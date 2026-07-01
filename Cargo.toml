@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = ["crates/trot-core", "crates/trot-daemon"]
+
+[workspace.package]
+edition = "2021"
+license = "GPL-3.0-or-later"
+authors = ["Marcus Puchalla"]
+rust-version = "1.77"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

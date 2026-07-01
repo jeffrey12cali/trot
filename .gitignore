@@ -1,0 +1,9 @@
+/target
+**/*.rs.bk
+Cargo.lock.orig
+# local runtime handshake (port+token) written by the daemon
+runtime.json
+*.db
+*.db-shm
+*.db-wal
+.DS_Store
