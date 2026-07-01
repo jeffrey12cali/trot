@@ -16,10 +16,30 @@ use axum::{
     Json, Router,
 };
 use axum::extract::{DefaultBodyLimit, Request};
+use axum::http::{HeaderName, HeaderValue};
 use axum::middleware::{self, Next};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
+
+/// CORS for the Nowhere UI, which loads from Tauri's own asset origin (a
+/// different origin than this loopback daemon). We allow ONLY the Tauri webview
+/// origins — never a website origin — so a page in a normal browser still can't
+/// read responses; writes additionally require the token (see `guard`).
+fn cors() -> CorsLayer {
+    let origins: Vec<HeaderValue> = ["tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"]
+        .iter()
+        .filter_map(|o| o.parse().ok())
+        .collect();
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::list(origins))
+        .allow_methods(Any)
+        .allow_headers([
+            axum::http::header::CONTENT_TYPE,
+            HeaderName::from_static("x-sc110-token"),
+        ])
+}
 
 const RETENTION_DAYS: f64 = 5.0;
 const ROLLUP_INTERVAL_S: f64 = 300.0;
@@ -59,6 +79,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         // service. Body cap bounds memory from a hostile import while still
         // allowing real (multi-MB) backups.
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
+        // CORS is outermost so preflight (OPTIONS) is answered before routing.
+        .layer(cors())
         .with_state(state)
 }
 
