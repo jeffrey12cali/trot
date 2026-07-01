@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.marcuspuchalla.trot</string>
+    <key>CFBundleName</key>
+    <string>trot</string>
+    <!-- Embedded into the trot binary (see build.rs) so this CLI/daemon carries
+         its own Bluetooth usage description. macOS treats a bare helper binary
+         as its own responsible process for TCC, so the description must live on
+         the binary itself, not only in a host app's Info.plist. -->
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>TROT connects to your treadmill over Bluetooth to track your walking.</string>
+    <key>NSBluetoothPeripheralUsageDescription</key>
+    <string>TROT connects to your treadmill over Bluetooth to read your walking data.</string>
+</dict>
+</plist>
