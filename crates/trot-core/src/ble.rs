@@ -142,6 +142,11 @@ pub async fn run(state: Arc<AppState>) {
             _ = state.wake.notified() => {}
         }
     }
+
+    // Loop exited (stop requested). The peripheral was disconnected on the way
+    // out of connect_and_poll; tell shutdown() we're done so it can stop waiting.
+    tracing::info!("BLE worker stopped");
+    state.ble_done.notify_one();
 }
 
 async fn find_peripheral(adapter: &Adapter, device_id: &str) -> Result<Peripheral> {

@@ -8,7 +8,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 #[derive(Parser)]
 #[command(name = "trot", version, about = "TROT — it's really only treadmilling.")]
@@ -81,13 +81,39 @@ fn run_daemon() -> Result<()> {
             runtime_path.display()
         );
 
-        tokio::signal::ctrl_c().await?;
-        engine.state.stop.store(true, Ordering::Relaxed);
-        engine.state.wake.notify_waiters();
+        wait_for_shutdown_signal().await;
+        // Disconnect the treadmill cleanly before we drop the runtime — otherwise
+        // the SC110 keeps the link open until it's power-cycled.
+        engine.state.shutdown(Duration::from_secs(5)).await;
         let _ = std::fs::remove_file(&runtime_path);
         tracing::info!("trot daemon shutting down");
         Ok::<(), anyhow::Error>(())
     })
+}
+
+/// Resolve when the user asks the daemon to stop — Ctrl-C, or SIGTERM (which is
+/// what `kill` and most supervisors send). Without the SIGTERM arm a `kill` would
+/// bypass the graceful BLE teardown.
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = term.recv() => {}
+                }
+            }
+            Err(_) => {
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 // ── CLI client ──────────────────────────────────────────────────────────────

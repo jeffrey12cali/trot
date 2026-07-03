@@ -31,6 +31,11 @@ pub struct AppState {
     /// Set when device_id changes or shutdown is requested, to wake the worker.
     pub wake: Notify,
     pub stop: AtomicBool,
+    /// Fired once by the BLE worker after its loop has exited — i.e. after the
+    /// peripheral has been cleanly disconnected. `shutdown()` awaits this so the
+    /// process doesn't die (taking the OS BLE handle with it) before the SC110
+    /// gets a real GATT disconnect.
+    pub ble_done: Notify,
 }
 
 /// Max raw frames retained for diagnostics (~a few minutes at 20 Hz).
@@ -56,7 +61,22 @@ impl AppState {
             frames: Mutex::new(std::collections::VecDeque::with_capacity(FRAME_RING_CAP)),
             wake: Notify::new(),
             stop: AtomicBool::new(false),
+            ble_done: Notify::new(),
         })
+    }
+
+    /// Signal the BLE worker to stop and wait until it has cleanly disconnected
+    /// the treadmill (bounded by `timeout`, so a wedged link can't hang forever).
+    /// Call this before tearing the process down — a bare kill leaves the SC110
+    /// holding the link until it's power-cycled, because the OS closes the socket
+    /// without a GATT disconnect.
+    pub async fn shutdown(&self, timeout: std::time::Duration) {
+        self.stop.store(true, Ordering::Relaxed);
+        self.wake.notify_waiters();
+        // The worker calls `ble_done.notify_one()` once its loop has exited.
+        // notify_one stores a permit if we aren't awaiting yet, so this can't
+        // miss the signal even if the worker exits first.
+        let _ = tokio::time::timeout(timeout, self.ble_done.notified()).await;
     }
 
     /// Current displayed unit ("km/h" or "mph").

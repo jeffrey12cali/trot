@@ -28,17 +28,49 @@ use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 /// origins — never a website origin — so a page in a normal browser still can't
 /// read responses; writes additionally require the token (see `guard`).
 fn cors() -> CorsLayer {
-    let origins: Vec<HeaderValue> = ["tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"]
-        .iter()
-        .filter_map(|o| o.parse().ok())
-        .collect();
     CorsLayer::new()
-        .allow_origin(AllowOrigin::list(origins))
+        .allow_origin(AllowOrigin::predicate(|origin, _req| is_allowed_origin(origin)))
         .allow_methods(Any)
         .allow_headers([
             axum::http::header::CONTENT_TYPE,
             HeaderName::from_static("x-sc110-token"),
         ])
+}
+
+/// Which browser origins may read the loopback API. Production Nowhere loads the
+/// UI from Tauri's own origin; `tauri dev` serves it from a vite dev server on a
+/// dynamic localhost port. Allow both. Safe because a remote site's Origin is its
+/// own domain (never localhost), and state-changing calls still require the
+/// per-launch token plus a loopback Host header (see `guard`).
+fn is_allowed_origin(origin: &HeaderValue) -> bool {
+    let o = match origin.to_str() {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    // Tauri's production webview origins (macOS uses tauri://; Windows/Linux the
+    // http(s)://tauri.localhost custom-protocol host).
+    if matches!(
+        o,
+        "tauri://localhost" | "http://tauri.localhost" | "https://tauri.localhost"
+    ) {
+        return true;
+    }
+    // A localhost dev server (vite / tauri dev), any scheme or port.
+    matches!(
+        origin_host(o),
+        Some("localhost") | Some("127.0.0.1") | Some("::1")
+    )
+}
+
+/// Host portion of a `scheme://host[:port]` origin (brackets stripped for IPv6).
+fn origin_host(origin: &str) -> Option<&str> {
+    let authority = origin.split_once("://")?.1.split('/').next().unwrap_or("");
+    let host = if let Some(rest) = authority.strip_prefix('[') {
+        rest.split(']').next().unwrap_or("") // [::1]:port
+    } else {
+        authority.rsplit_once(':').map(|(h, _)| h).unwrap_or(authority)
+    };
+    (!host.is_empty()).then_some(host)
 }
 
 const RETENTION_DAYS: f64 = 5.0;
@@ -52,6 +84,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/sessions", get(api_sessions))
         .route("/api/sessions/:id", get(api_session_detail))
         .route("/api/health", get(api_health))
+        .route("/api/shutdown", post(api_shutdown))
         .route("/api/scan", get(api_scan))
         .route("/api/pair", post(api_pair))
         .route("/api/unpair", post(api_unpair))
@@ -138,6 +171,17 @@ async fn api_today(State(s): State<Arc<AppState>>) -> Json<Value> {
 
 async fn api_health(State(s): State<Arc<AppState>>) -> Json<Value> {
     Json(json!({"ok": true, "connected": s.is_connected()}))
+}
+
+/// Gracefully disconnect the treadmill and stop the BLE worker, then respond.
+/// Nowhere calls this on app-quit *before* killing the engine process: it blocks
+/// until the SC110's BLE link is actually torn down, so the treadmill gets a real
+/// GATT disconnect instead of a yanked socket (which it would otherwise hold onto
+/// until power-cycled). Token-guarded (it's a POST), so only the paired UI can
+/// trigger it. Terminal — the worker does not reconnect afterwards.
+async fn api_shutdown(State(s): State<Arc<AppState>>) -> Json<Value> {
+    s.shutdown(std::time::Duration::from_secs(3)).await;
+    Json(json!({"ok": true}))
 }
 
 fn resolution_seconds(res: &str) -> Option<i64> {
