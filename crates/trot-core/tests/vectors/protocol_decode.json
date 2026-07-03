@@ -1,0 +1,27 @@
+{
+  "_comment": "Canonical SC110 protocol decode vectors. The Rust engine (trot-core) and the TypeScript web engine (nowhere) BOTH run these through their Reader and assert the same result, so the two decoders can't drift. Each case feeds one (opcode, 6-byte frame) into a fresh Reader. `expect` names a Telemetry field + value; `error: true` means feed must reject. Edit here once; both test suites pick it up.",
+  "cases": [
+    { "name": "steps 300",            "opcode": "0x88", "frame": "a1 aa 01 2c 00 00", "expect": { "field": "steps",        "value": 300 } },
+    { "name": "steps 0",              "opcode": "0x88", "frame": "a1 aa 00 00 00 00", "expect": { "field": "steps",        "value": 0 } },
+    { "name": "steps 65535 (max)",    "opcode": "0x88", "frame": "a1 aa ff ff 00 00", "expect": { "field": "steps",        "value": 65535 } },
+    { "name": "calories 123",         "opcode": "0x87", "frame": "a1 aa 00 7b 00 00", "expect": { "field": "calories",     "value": 123 } },
+    { "name": "distance 100 dam",     "opcode": "0x85", "frame": "a1 aa 00 64 00 00", "expect": { "field": "distance_raw", "value": 100 } },
+    { "name": "distance 4660 dam",    "opcode": "0x85", "frame": "a1 aa 12 34 00 00", "expect": { "field": "distance_raw", "value": 4660 } },
+    { "name": "speed 3.32",           "opcode": "0x82", "frame": "a1 aa 03 20 00 00", "expect": { "field": "speed_raw",    "value": 332 } },
+    { "name": "speed 0",              "opcode": "0x82", "frame": "a1 aa 00 00 00 00", "expect": { "field": "speed_raw",    "value": 0 } },
+    { "name": "speed 5.00",           "opcode": "0x82", "frame": "a1 aa 05 00 00 00", "expect": { "field": "speed_raw",    "value": 500 } },
+    { "name": "duration 1m05s",       "opcode": "0x89", "frame": "a1 aa 00 01 05 00", "expect": { "field": "duration_s",   "value": 65 } },
+    { "name": "duration 1h",          "opcode": "0x89", "frame": "a1 aa 01 00 00 00", "expect": { "field": "duration_s",   "value": 3600 } },
+    { "name": "duration 2h34m56s",    "opcode": "0x89", "frame": "a1 aa 02 22 38 00", "expect": { "field": "duration_s",   "value": 9296 } },
+    { "name": "status running",       "opcode": "0x91", "frame": "a1 aa 03 00 00 00", "expect": { "field": "status",       "value": 3 } },
+    { "name": "status standby",       "opcode": "0x91", "frame": "a1 aa 01 00 00 00", "expect": { "field": "status",       "value": 1 } },
+    { "name": "status paused",        "opcode": "0x91", "frame": "a1 aa 05 00 00 00", "expect": { "field": "status",       "value": 5 } },
+
+    { "name": "err unknown-opcode flag", "opcode": "0x88", "frame": "a1 ff 00 00 00 00", "error": true },
+    { "name": "err bad prefix",          "opcode": "0x88", "frame": "a2 aa 00 00 00 00", "error": true },
+    { "name": "err short frame",         "opcode": "0x88", "frame": "a1 aa 00 00 00",    "error": true },
+    { "name": "err unexpected flag",     "opcode": "0x88", "frame": "a1 42 00 00 00 00", "error": true },
+    { "name": "err duration minute 60",  "opcode": "0x89", "frame": "a1 aa 00 3c 00 00", "error": true },
+    { "name": "err duration second 60",  "opcode": "0x89", "frame": "a1 aa 00 00 3c 00", "error": true }
+  ]
+}
