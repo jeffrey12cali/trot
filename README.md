@@ -16,14 +16,32 @@ No opinions about presentation; it does the modest thing and says so on the tin.
 - Session lifecycle (start/stop/pause/resume), streaks, local-first history.
 - Metrics: distance, time, cadence, speed, derived calories.
 - A stable local **HTTP + WebSocket API** — the contract anything on top consumes.
-- A real terminal surface, e.g.:
+- A real terminal surface:
   ```
   trot daemon           # run the engine (serves the API)
+  trot scan             # find nearby treadmills
+  trot pair <id>        # pair one and make it active
+  trot devices          # list paired treadmills (* = active)
+  trot unpair           # forget the active treadmill
+  trot status           # is the daemon up? treadmill connected?
   trot today            # what you did today
   trot log --week       # the week's ledger
-  trot start | stop     # session control
-  trot scan | pair      # find and pair a treadmill
   ```
+
+## Pairing a treadmill
+Sessions are tracked against the **active** paired treadmill, which is remembered
+across restarts. First-time setup:
+
+```
+trot scan                              # prints each treadmill's name + id
+trot pair <id> --name "My treadmill"   # pair it and make it active
+trot daemon                            # start tracking; auto-connects to it
+```
+
+`scan`/`pair` work **with or without** the daemon running. If the daemon is up it
+owns the Bluetooth adapter, so the commands go through its API and it connects to
+a newly paired treadmill immediately — no restart. If the daemon is down, they run
+locally and just record your choice, so the next `trot daemon` picks it up.
 
 ## Planned structure
 ```

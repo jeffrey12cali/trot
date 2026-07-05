@@ -34,6 +34,27 @@ enum Cmd {
         #[arg(long, default_value_t = 20)]
         limit: i64,
     },
+    /// Scan for nearby treadmills.
+    Scan {
+        /// How long to scan for, in seconds (1–15).
+        #[arg(long, default_value_t = 6.0)]
+        seconds: f64,
+        /// Show every Bluetooth device, not just treadmills.
+        #[arg(long)]
+        all: bool,
+    },
+    /// List paired treadmills (the active one is marked with *).
+    Devices,
+    /// Pair a treadmill from `trot scan` and make it the active one.
+    Pair {
+        /// The device id printed by `trot scan`.
+        device_id: String,
+        /// A friendly name to remember it by.
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Forget the active treadmill.
+    Unpair,
 }
 
 /// Where TROT keeps its database + handshake file. Override with `TROT_DATA_DIR`.
@@ -52,6 +73,10 @@ fn main() -> Result<()> {
         Cmd::Today => cmd_today(),
         Cmd::Status => cmd_status(),
         Cmd::Log { week, limit } => cmd_log(week, limit),
+        Cmd::Scan { seconds, all } => cmd_scan(seconds, all),
+        Cmd::Devices => cmd_devices(),
+        Cmd::Pair { device_id, name } => cmd_pair(device_id, name),
+        Cmd::Unpair => cmd_unpair(),
     }
 }
 
@@ -118,15 +143,32 @@ async fn wait_for_shutdown_signal() {
 
 // ── CLI client ──────────────────────────────────────────────────────────────
 
+/// The daemon's handshake: (port, token) from runtime.json, or None if no file.
+fn runtime() -> Option<(u16, String)> {
+    let path = data_dir().ok()?.join("runtime.json");
+    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
+    let port = v["port"].as_u64()? as u16;
+    let token = v["token"].as_str().unwrap_or("").to_string();
+    Some((port, token))
+}
+
 fn daemon_port() -> Result<u16> {
-    let path = data_dir()?.join("runtime.json");
-    let bytes = std::fs::read(&path)
-        .context("no running trot daemon — start it with `trot daemon`")?;
-    let v: serde_json::Value = serde_json::from_slice(&bytes)?;
-    v["port"]
-        .as_u64()
-        .map(|p| p as u16)
-        .context("handshake file has no port")
+    runtime()
+        .map(|(p, _)| p)
+        .context("no running trot daemon — start it with `trot daemon`")
+}
+
+/// (port, token) if a daemon is actually reachable — not just a stale handshake
+/// file left behind by a crash. Used to decide between the API and doing the work
+/// locally: while the daemon is up it owns the Bluetooth adapter, so scanning and
+/// pairing must go through it.
+fn live_daemon() -> Option<(u16, String)> {
+    let (port, token) = runtime()?;
+    // Connection-refused on loopback returns immediately when nothing's listening.
+    ureq::get(&format!("http://127.0.0.1:{port}/api/health"))
+        .call()
+        .ok()
+        .map(|_| (port, token))
 }
 
 fn get(path: &str) -> Result<serde_json::Value> {
@@ -134,6 +176,18 @@ fn get(path: &str) -> Result<serde_json::Value> {
     let url = format!("http://127.0.0.1:{port}{path}");
     let resp = ureq::get(&url)
         .call()
+        .map_err(|e| anyhow::anyhow!("cannot reach the trot daemon: {e}"))?;
+    Ok(resp.into_json()?)
+}
+
+/// POST to the daemon. Mutating routes require the per-launch token (loopback
+/// Host + `x-sc110-token`), so we read both from the handshake file.
+fn post(path: &str, body: serde_json::Value) -> Result<serde_json::Value> {
+    let (port, token) = runtime().context("no running trot daemon — start it with `trot daemon`")?;
+    let url = format!("http://127.0.0.1:{port}{path}");
+    let resp = ureq::post(&url)
+        .set("x-sc110-token", &token)
+        .send_json(body)
         .map_err(|e| anyhow::anyhow!("cannot reach the trot daemon: {e}"))?;
     Ok(resp.into_json()?)
 }
@@ -215,5 +269,104 @@ fn cmd_log(week: bool, limit: i64) -> Result<()> {
     if shown == 0 {
         println!("No sessions yet. Hop on the belt.");
     }
+    Ok(())
+}
+
+// ── pairing ───────────────────────────────────────────────────────────────────
+
+fn cmd_scan(seconds: f64, all: bool) -> Result<()> {
+    // If the daemon is up it owns the adapter, so let it scan; otherwise scan
+    // ourselves so you can pair before ever starting the daemon.
+    let v = if live_daemon().is_some() {
+        get(&format!("/api/scan?seconds={seconds}&all_devices={all}"))?
+    } else {
+        trot_core::config::init_paths(&data_dir()?);
+        tokio::runtime::Runtime::new()?.block_on(trot_core::ble::scan(seconds, all))?
+    };
+
+    let empty = vec![];
+    let devices = v["devices"].as_array().unwrap_or(&empty);
+    if devices.is_empty() {
+        println!("No treadmills found. Make sure it's powered on and nearby, then try again.");
+        println!("(Tip: `trot scan --all` lists every Bluetooth device.)");
+        return Ok(());
+    }
+    println!("Found {} device(s):\n", devices.len());
+    for d in devices {
+        let name = match d["name"].as_str().unwrap_or("") {
+            "" => "(unnamed)",
+            n => n,
+        };
+        let id = d["device_id"].as_str().unwrap_or("");
+        let sig = d["rssi"].as_i64().map(|r| format!("   {r} dBm")).unwrap_or_default();
+        println!("  {name}{sig}");
+        println!("      {id}");
+    }
+    println!("\nPair one with:  trot pair <id> --name \"My treadmill\"");
+    Ok(())
+}
+
+fn cmd_devices() -> Result<()> {
+    let v = if live_daemon().is_some() {
+        get("/api/devices")?
+    } else {
+        trot_core::config::init_paths(&data_dir()?);
+        let cfg = trot_core::config::load_devices();
+        serde_json::json!({
+            "active": cfg.active,
+            "devices": cfg.devices.iter()
+                .map(|d| serde_json::json!({"id": d.id, "name": d.name}))
+                .collect::<Vec<_>>(),
+        })
+    };
+
+    let active = v["active"].as_str();
+    let empty = vec![];
+    let devices = v["devices"].as_array().unwrap_or(&empty);
+    if devices.is_empty() {
+        println!("No paired treadmills yet. Run `trot scan`, then `trot pair <id>`.");
+        return Ok(());
+    }
+    for d in devices {
+        let id = d["id"].as_str().unwrap_or("");
+        let name = match d["name"].as_str().unwrap_or("") {
+            "" => "(unnamed)",
+            n => n,
+        };
+        let mark = if Some(id) == active { "* " } else { "  " };
+        println!("{mark}{name}");
+        println!("      {id}");
+    }
+    println!("\n* = active (the treadmill the daemon connects to)");
+    Ok(())
+}
+
+fn cmd_pair(device_id: String, name: Option<String>) -> Result<()> {
+    let id = device_id.trim();
+    if id.is_empty() {
+        anyhow::bail!("device id must not be empty — copy it from `trot scan`");
+    }
+    if live_daemon().is_some() {
+        post("/api/pair", serde_json::json!({ "device_id": id, "name": name }))?;
+        println!("Paired. The running daemon is connecting to it now.");
+    } else {
+        trot_core::config::init_paths(&data_dir()?);
+        trot_core::config::add_and_activate(id, name.as_deref());
+        println!("Paired and set as active.");
+        println!("Start tracking with:  trot daemon");
+    }
+    Ok(())
+}
+
+fn cmd_unpair() -> Result<()> {
+    if live_daemon().is_some() {
+        post("/api/unpair", serde_json::json!({}))?;
+    } else {
+        trot_core::config::init_paths(&data_dir()?);
+        if let Some(active) = trot_core::config::active_device_id() {
+            trot_core::config::forget(&active);
+        }
+    }
+    println!("Unpaired the active treadmill.");
     Ok(())
 }
