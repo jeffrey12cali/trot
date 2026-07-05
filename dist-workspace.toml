@@ -1,0 +1,23 @@
+# Release automation for `trot` — powered by dist (cargo-dist).
+# Regenerate CI after editing:  dist generate
+[workspace]
+members = ["cargo:."]
+
+[dist]
+cargo-dist-version = "0.32.0"
+ci = "github"
+installers = ["shell", "powershell"]
+# Ship the third-party (treadspan MIT) notice alongside the binary in every archive.
+include = ["THIRD-PARTY-NOTICES.md"]
+targets = [
+    "x86_64-apple-darwin",      # macOS Intel
+    "aarch64-apple-darwin",     # macOS Apple Silicon
+    "x86_64-pc-windows-msvc",   # Windows
+    "x86_64-unknown-linux-gnu", # Linux
+]
+
+# btleplug needs D-Bus headers + pkg-config to build on Linux.
+# Only installed on the Linux runner; macOS/Windows need nothing.
+[dist.dependencies.apt]
+libdbus-1-dev = '*'
+pkg-config = '*'

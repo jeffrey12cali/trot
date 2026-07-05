@@ -7,8 +7,8 @@ talks to your under-desk treadmill, records sessions, and exposes clean data.
 No opinions about presentation; it does the modest thing and says so on the tin.
 
 - **License:** GPLv3.
-- **Status:** to be extracted from the current Tauri monolith (see
-  [`../PLAN.md`](../PLAN.md)). Nothing has moved yet.
+- **Status:** early days — `v0.1` builds a working `trot` CLI + daemon for
+  LifeSpan (native) and generic FTMS treadmills. Interfaces may still shift.
 
 ## What it does
 - Device connectivity for under-desk treadmills (LifeSpan/Omni + generic FTMS
@@ -65,13 +65,13 @@ down, your choice is saved and the next `trot daemon` picks it up.
 The daemon **connects to the paired treadmill on start and disconnects it cleanly
 on stop** (Ctrl-C or SIGTERM), so the belt's Bluetooth link isn't left open.
 
-## Planned structure
+## Structure
 ```
 Cargo.toml               # workspace
 crates/
-  trot-core/             # engine as a library: ble · protocol · ftms · db · state · api · config
-  trot-daemon/           # `trot daemon` — runs start_engine(), serves /api + /ws
-  trot-cli/              # `trot` — subcommands over the daemon API
+  trot-core/             # engine library: ble · protocol · ftms · db · state · api · config
+  trot-daemon/           # the `trot` binary: `daemon` serves /api + /ws; the other
+                         # subcommands (scan/pair/today/…) drive it over that API
 ```
 
 ## Design rules

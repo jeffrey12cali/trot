@@ -1,11 +1,12 @@
 [package]
-name = "trot-daemon"
+name = "trot"
 version = "0.1.0"
-description = "The `trot` binary — runs the TROT tracking daemon."
+description = "The `trot` binary — TROT treadmill tracking CLI + daemon."
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
 rust-version.workspace = true
+repository.workspace = true
 
 [[bin]]
 name = "trot"

@@ -7,3 +7,6 @@ runtime.json
 *.db-shm
 *.db-wal
 .DS_Store
+
+# internal release notes — not published
+/RELEASING.md

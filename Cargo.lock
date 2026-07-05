@@ -1935,6 +1935,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "trot"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "dialoguer",
+ "directories",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "trot-core",
+ "ureq",
+]
+
+[[package]]
 name = "trot-core"
 version = "0.1.0"
 dependencies = [
@@ -1951,22 +1967,6 @@ dependencies = [
  "tower-http",
  "tracing",
  "uuid",
-]
-
-[[package]]
-name = "trot-daemon"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "dialoguer",
- "directories",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "trot-core",
- "ureq",
 ]
 
 [[package]]

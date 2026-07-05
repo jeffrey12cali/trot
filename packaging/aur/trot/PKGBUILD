@@ -1,0 +1,38 @@
+# Maintainer: Marcus Puchalla <marcus.puchalla@googlemail.com>
+pkgname=trot
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Underdesk treadmill tracker: CLI + daemon (Bluetooth/BLE), local-first"
+arch=('x86_64')
+url="https://github.com/marcuspuchalla/trot"
+license=('GPL-3.0-or-later')
+depends=('dbus')
+makedepends=('cargo')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/marcuspuchalla/trot/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')  # run `updpkgsums` to pin
+
+prepare() {
+    cd "$pkgname-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+    cd "$pkgname-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    export CARGO_TARGET_DIR=target
+    cargo build --frozen --release --package trot
+}
+
+check() {
+    cd "$pkgname-$pkgver"
+    export RUSTUP_TOOLCHAIN=stable
+    cargo test --frozen --workspace
+}
+
+package() {
+    cd "$pkgname-$pkgver"
+    install -Dm0755 "target/release/trot" "$pkgdir/usr/bin/trot"
+    install -Dm0644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+    install -Dm0644 LICENSE  "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
