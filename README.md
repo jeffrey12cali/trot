@@ -6,6 +6,7 @@ An honest little tracker for treadmill walking — a CLI + background daemon tha
 talks to your under-desk treadmill, records sessions, and exposes clean data.
 No opinions about presentation; it does the modest thing and says so on the tin.
 
+- **Website:** [trot.fmp.dev](https://trot.fmp.dev)
 - **License:** GPLv3.
 - **Status:** early days — `v0.1` builds a working `trot` CLI + daemon for
   LifeSpan (native) and generic FTMS treadmills. Interfaces may still shift.
