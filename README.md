@@ -28,6 +28,21 @@ No opinions about presentation; it does the modest thing and says so on the tin.
   trot log --week       # the week's ledger
   ```
 
+## Supported treadmills
+Trot talks to under-desk walking treadmills over **Bluetooth Low Energy**, two ways:
+
+- **LifeSpan\*** — native support for LifeSpan under-desk treadmills using their
+  own Bluetooth protocol (developed and tested against a LifeSpan walking pad).
+- **Standard FTMS treadmills** — any treadmill that advertises the standard
+  Bluetooth **Fitness Machine Service** (FTMS, `0x1826`). That's a large and
+  growing set — NordicTrack\*, Peloton\*, Woodway\*, Technogym\* and many more.
+
+If your machine speaks FTMS, `trot scan` will find it. Compatibility is best-effort
+and interoperability-based: we can't promise a specific model, but the standard
+covers most under-desk treadmills.
+
+<sub>\* Trademarks of their respective owners — see [Trademarks](#trademarks).</sub>
+
 ## Pairing a treadmill
 Sessions are tracked against the **active** paired treadmill, which is remembered
 across restarts. First-time setup:
@@ -60,3 +75,14 @@ crates/
 - The API is the product's public surface — keep it stable and documented.
 - Voice: honest, modest, self-aware. You're not "training," you're trotting along
   at 3 km/h answering email, and the tool says so.
+
+## Trademarks
+Trot is an independent, unofficial interoperability tool. It is **not affiliated
+with, endorsed by, or sponsored by** any treadmill manufacturer, and it only reads
+data your treadmill already broadcasts over Bluetooth.
+
+LifeSpan, NordicTrack, Peloton, Woodway and Technogym are trademarks or registered
+trademarks of their respective owners. The **Bluetooth®** word mark and logos are
+registered trademarks owned by Bluetooth SIG, Inc. All other product and company
+names are the property of their respective holders; their use here is for
+identification and compatibility purposes only.
