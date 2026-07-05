@@ -35,9 +35,10 @@ full-size treadmills alike. Two ways in:
 - **LifeSpan\*** — LifeSpan consoles use a proprietary protocol, so Trot ships a
   **native adapter** for them (developed and tested against a LifeSpan walking pad).
 - **Standard FTMS\*** — any treadmill that broadcasts the standard Bluetooth
-  **Fitness Machine Service** (FTMS, `0x1826`). Confirmed on Horizon\* AT-series,
-  Technogym MyRun\*, BowFlex\* T9, 3G Cardio\*, Matrix\* (XER-02+) and newer
-  WalkingPad\* / KingSmith pads.
+  **Fitness Machine Service** (FTMS, `0x1826`). Models *documented* to broadcast
+  FTMS include Horizon\* AT-series, Technogym MyRun\*, BowFlex\* T9, 3G Cardio\*,
+  Matrix\* (XER-02+) and newer WalkingPad\* / KingSmith pads — it's per-model, so
+  verify yours. (Only LifeSpan is tested by us on real hardware.)
 
 FTMS is per-model: if your treadmill has an "FTMS" or "broadcast to Zwift/Kinomap"
 mode, `trot scan` will find it. Closed ecosystems — **iFit** (NordicTrack\* /
