@@ -19,8 +19,8 @@ No opinions about presentation; it does the modest thing and says so on the tin.
 - A real terminal surface:
   ```
   trot daemon           # run the engine (serves the API)
-  trot scan             # find nearby treadmills
-  trot pair <id>        # pair one and make it active
+  trot scan             # scan + interactively pick a treadmill to pair
+  trot pair <id>        # pair a specific device id (non-interactive)
   trot devices          # list paired treadmills (* = active)
   trot unpair           # forget the active treadmill
   trot status           # is the daemon up? treadmill connected?
@@ -33,15 +33,18 @@ Sessions are tracked against the **active** paired treadmill, which is remembere
 across restarts. First-time setup:
 
 ```
-trot scan                              # prints each treadmill's name + id
-trot pair <id> --name "My treadmill"   # pair it and make it active
-trot daemon                            # start tracking; auto-connects to it
+trot scan       # scans, then arrow-key pick a treadmill to pair
+trot daemon     # start tracking; auto-connects to the paired treadmill
 ```
 
-`scan`/`pair` work **with or without** the daemon running. If the daemon is up it
-owns the Bluetooth adapter, so the commands go through its API and it connects to
-a newly paired treadmill immediately — no restart. If the daemon is down, they run
-locally and just record your choice, so the next `trot daemon` picks it up.
+`trot scan` shows an interactive picker on a terminal (use `--list` for plain
+output, or `trot pair <id>` to pair a specific device id in scripts). Pairing works
+**with or without** the daemon running: if it's up it owns the Bluetooth adapter,
+so the pick goes through its API and it connects immediately — no restart; if it's
+down, your choice is saved and the next `trot daemon` picks it up.
+
+The daemon **connects to the paired treadmill on start and disconnects it cleanly
+on stop** (Ctrl-C or SIGTERM), so the belt's Bluetooth link isn't left open.
 
 ## Planned structure
 ```

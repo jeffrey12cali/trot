@@ -7,6 +7,7 @@
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -34,7 +35,7 @@ enum Cmd {
         #[arg(long, default_value_t = 20)]
         limit: i64,
     },
-    /// Scan for nearby treadmills.
+    /// Scan for nearby treadmills and pick one to pair (interactive).
     Scan {
         /// How long to scan for, in seconds (1–15).
         #[arg(long, default_value_t = 6.0)]
@@ -42,6 +43,9 @@ enum Cmd {
         /// Show every Bluetooth device, not just treadmills.
         #[arg(long)]
         all: bool,
+        /// Just print the list; don't show the interactive picker.
+        #[arg(long)]
+        list: bool,
     },
     /// List paired treadmills (the active one is marked with *).
     Devices,
@@ -73,7 +77,7 @@ fn main() -> Result<()> {
         Cmd::Today => cmd_today(),
         Cmd::Status => cmd_status(),
         Cmd::Log { week, limit } => cmd_log(week, limit),
-        Cmd::Scan { seconds, all } => cmd_scan(seconds, all),
+        Cmd::Scan { seconds, all, list } => cmd_scan(seconds, all, list),
         Cmd::Devices => cmd_devices(),
         Cmd::Pair { device_id, name } => cmd_pair(device_id, name),
         Cmd::Unpair => cmd_unpair(),
@@ -220,7 +224,6 @@ fn cmd_today() -> Result<()> {
     println!("  time       {}", fmt_dur(t["duration_s"].as_i64().unwrap_or(0)));
     println!("  calories   {}", t["calories"].as_i64().unwrap_or(0));
     println!("  sessions   {}", t["sessions"].as_i64().unwrap_or(0));
-    println!("\n  It's really only treadmilling.");
     Ok(())
 }
 
@@ -274,7 +277,7 @@ fn cmd_log(week: bool, limit: i64) -> Result<()> {
 
 // ── pairing ───────────────────────────────────────────────────────────────────
 
-fn cmd_scan(seconds: f64, all: bool) -> Result<()> {
+fn cmd_scan(seconds: f64, all: bool, list: bool) -> Result<()> {
     // If the daemon is up it owns the adapter, so let it scan; otherwise scan
     // ourselves so you can pair before ever starting the daemon.
     let v = if live_daemon().is_some() {
@@ -291,18 +294,49 @@ fn cmd_scan(seconds: f64, all: bool) -> Result<()> {
         println!("(Tip: `trot scan --all` lists every Bluetooth device.)");
         return Ok(());
     }
-    println!("Found {} device(s):\n", devices.len());
-    for d in devices {
-        let name = match d["name"].as_str().unwrap_or("") {
-            "" => "(unnamed)",
-            n => n,
-        };
-        let id = d["device_id"].as_str().unwrap_or("");
-        let sig = d["rssi"].as_i64().map(|r| format!("   {r} dBm")).unwrap_or_default();
-        println!("  {name}{sig}");
-        println!("      {id}");
+
+    let name_of = |d: &serde_json::Value| match d["name"].as_str().unwrap_or("") {
+        "" => "(unnamed)".to_string(),
+        n => n.to_string(),
+    };
+
+    // Interactive picker by default on a real terminal; plain list when piped or
+    // when --list is passed, so scripts keep working.
+    if list || !std::io::stdout().is_terminal() {
+        for d in devices {
+            let id = d["device_id"].as_str().unwrap_or("");
+            let sig = d["rssi"].as_i64().map(|r| format!("   {r} dBm")).unwrap_or_default();
+            println!("  {}{sig}", name_of(d));
+            println!("      {id}");
+        }
+        return Ok(());
     }
-    println!("\nPair one with:  trot pair <id> --name \"My treadmill\"");
+
+    let labels: Vec<String> = devices
+        .iter()
+        .map(|d| {
+            let sig = d["rssi"].as_i64().map(|r| format!("  ·  {r} dBm")).unwrap_or_default();
+            format!("{}{sig}", name_of(d))
+        })
+        .collect();
+
+    let choice = dialoguer::Select::new()
+        .with_prompt("Select a treadmill  (↑/↓ to move, Enter to pair, Esc to cancel)")
+        .items(&labels)
+        .default(0)
+        .interact_opt()?;
+
+    match choice {
+        Some(i) => {
+            let id = devices[i]["device_id"].as_str().unwrap_or("");
+            let name = match devices[i]["name"].as_str().unwrap_or("") {
+                "" => None,
+                n => Some(n.to_string()),
+            };
+            do_pair(id, name)?;
+        }
+        None => println!("Cancelled — nothing paired."),
+    }
     Ok(())
 }
 
@@ -346,13 +380,20 @@ fn cmd_pair(device_id: String, name: Option<String>) -> Result<()> {
     if id.is_empty() {
         anyhow::bail!("device id must not be empty — copy it from `trot scan`");
     }
+    do_pair(id, name)
+}
+
+/// Pair a device and make it active. Goes through a live daemon (which connects
+/// immediately) or writes the config directly when the daemon is down.
+fn do_pair(id: &str, name: Option<String>) -> Result<()> {
+    let label = name.clone().unwrap_or_else(|| id.to_string());
     if live_daemon().is_some() {
         post("/api/pair", serde_json::json!({ "device_id": id, "name": name }))?;
-        println!("Paired. The running daemon is connecting to it now.");
+        println!("Paired \"{label}\". The running daemon is connecting to it now.");
     } else {
         trot_core::config::init_paths(&data_dir()?);
         trot_core::config::add_and_activate(id, name.as_deref());
-        println!("Paired and set as active.");
+        println!("Paired \"{label}\" and set as active.");
         println!("Start tracking with:  trot daemon");
     }
     Ok(())
