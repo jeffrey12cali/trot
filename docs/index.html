@@ -1,0 +1,429 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trot — the open-source engine under the desk</title>
+<meta name="description" content="Trot is a small, headless Rust daemon that reads your under-desk treadmill over Bluetooth and serves it as plain HTTP + WebSocket. GPLv3. Offline. Zero telemetry. The open-source core the Nowhere app is built on.">
+<link rel="canonical" href="https://trot.fmp.dev/">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Trot — the open-source engine under the desk">
+<meta property="og:description" content="A headless Rust daemon that reads your under-desk treadmill over Bluetooth and speaks HTTP + WebSocket. GPLv3, offline, zero telemetry.">
+<meta property="og:url" content="https://trot.fmp.dev/">
+<style>
+  :root{
+    /* Shared with the Nowhere app so Trot reads as family… */
+    --ground:#0a0e13;
+    --surface:#111922;
+    --surface2:#17212c;
+    --hairline:#22303f;
+    --ink:#e7eef5;
+    --muted:#8595a4;
+    /* …but the engine leads with terminal-green, not the app's lime. */
+    --moss:#34d399;
+    --mossdim:#1fae82;
+    --lime:#bef264;
+    --amber:#e6b980;
+
+    --font-display:"Barlow Semi Condensed","Oswald","Arial Narrow",system-ui,sans-serif;
+    --font-sans:"Inter",system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+    --font-mono:"JetBrains Mono","SFMono-Regular",ui-monospace,"Cascadia Mono",Menlo,Consolas,monospace;
+
+    --maxw:1080px;
+  }
+
+  *{box-sizing:border-box;}
+  html{-webkit-text-size-adjust:100%;scroll-behavior:smooth;}
+  body{
+    margin:0;font-family:var(--font-sans);
+    background:var(--ground);color:var(--ink);line-height:1.6;
+    -webkit-font-smoothing:antialiased;overflow-x:hidden;
+  }
+  a{color:var(--moss);text-decoration:none;}
+  a:hover{text-decoration:underline;}
+  a:focus-visible,button:focus-visible,.btn:focus-visible{
+    outline:2px solid var(--moss);outline-offset:3px;border-radius:8px;
+  }
+  .wrap{max-width:var(--maxw);margin:0 auto;padding:0 24px;}
+
+  /* The name is a command, so the whole identity is monospace. */
+  .eyebrow{font-family:var(--font-mono);text-transform:uppercase;letter-spacing:.16em;font-weight:600;font-size:.7rem;color:var(--moss);}
+  h1,h2,h3{font-family:var(--font-display);letter-spacing:-.01em;line-height:1.05;font-weight:700;margin:0;}
+  p{margin:0;}
+
+  .btn{
+    display:inline-flex;align-items:center;gap:.5rem;
+    font-family:var(--font-mono);text-transform:none;letter-spacing:.01em;font-weight:600;font-size:.9rem;
+    padding:.8rem 1.4rem;border-radius:10px;border:1px solid transparent;cursor:pointer;
+    transition:transform .15s ease, background .15s ease, border-color .15s ease;
+  }
+  .btn:hover{text-decoration:none;transform:translateY(-1px);}
+  .btn-primary{background:var(--moss);color:#04120c;box-shadow:0 0 30px rgba(52,211,153,.22);}
+  .btn-primary:hover{background:var(--mossdim);}
+  .btn-ghost{background:transparent;color:var(--ink);border-color:var(--hairline);}
+  .btn-ghost:hover{border-color:var(--moss);}
+
+  /* ── Header ── */
+  header.site{position:sticky;top:0;z-index:20;backdrop-filter:blur(10px);
+    background:color-mix(in srgb, var(--ground) 82%, transparent);border-bottom:1px solid var(--hairline);}
+  .navrow{display:flex;align-items:center;justify-content:space-between;padding:13px 24px;max-width:var(--maxw);margin:0 auto;}
+  .brand{font-family:var(--font-mono);font-weight:700;font-size:1.1rem;letter-spacing:.01em;color:var(--ink);}
+  .brand .p{color:var(--moss);}
+  .brand .cur{display:inline-block;width:.6ch;height:1.05em;background:var(--moss);margin-left:.15ch;vertical-align:-.15em;animation:blink 1.1s steps(1) infinite;}
+  @keyframes blink{50%{opacity:0;}}
+  .nav-links{display:flex;gap:1.3rem;align-items:center;}
+  .nav-links a{color:var(--muted);font-size:.88rem;font-family:var(--font-mono);}
+  .nav-links a:hover{color:var(--ink);text-decoration:none;}
+  @media (max-width:680px){.nav-links a:not(.btn){display:none;}}
+
+  /* ── Hero ── */
+  .hero{position:relative;padding:64px 0 44px;}
+  .hero-grid{display:grid;grid-template-columns:1fr 1.02fr;gap:44px;align-items:center;}
+  @media (max-width:880px){.hero-grid{grid-template-columns:1fr;gap:32px;}}
+  .hero h1{font-size:clamp(2.5rem,6vw,4rem);}
+  .hero h1 .accent{color:var(--moss);}
+  .lede{color:var(--muted);font-size:1.1rem;margin-top:1.1rem;max-width:40ch;}
+  .lede code{font-family:var(--font-mono);color:var(--ink);font-size:.92em;background:var(--surface2);padding:.05em .35em;border-radius:5px;}
+  .cta-row{display:flex;gap:.7rem;margin-top:1.7rem;flex-wrap:wrap;}
+  .assurance{margin-top:1.1rem;font-size:.8rem;color:var(--muted);font-family:var(--font-mono);}
+  .assurance b{color:var(--moss);font-weight:600;}
+
+  /* ── Signature: a live terminal running the daemon ── */
+  .term{background:#070b10;border:1px solid var(--hairline);border-radius:14px;overflow:hidden;
+    box-shadow:0 24px 60px rgba(0,0,0,.4);}
+  .term-bar{display:flex;align-items:center;gap:.5rem;padding:11px 14px;background:var(--surface);border-bottom:1px solid var(--hairline);}
+  .term-bar .b{width:11px;height:11px;border-radius:50%;background:#2a3947;}
+  .term-bar .ttl{margin-left:.5rem;font-family:var(--font-mono);font-size:.72rem;color:var(--muted);}
+  .term-body{padding:16px 18px;font-family:var(--font-mono);font-size:.82rem;line-height:1.75;min-height:340px;white-space:pre-wrap;word-break:break-word;}
+  .term-body .cmd{color:var(--ink);}
+  .term-body .cmd .p{color:var(--moss);}
+  .term-body .tag{color:var(--moss);}
+  .term-body .tag.amber{color:var(--amber);}
+  .term-body .dim{color:var(--muted);}
+  .term-body .val{color:var(--lime);font-variant-numeric:tabular-nums;}
+  .term-body .cur{display:inline-block;width:.55ch;height:1.05em;background:var(--moss);vertical-align:-.15em;animation:blink 1.1s steps(1) infinite;}
+  .kv{display:inline-grid;grid-template-columns:auto auto;gap:0 1.4ch;}
+
+  /* ── Sections ── */
+  section{padding:70px 0;border-top:1px solid var(--hairline);}
+  .sec-head{max-width:60ch;margin-bottom:36px;}
+  .sec-head h2{font-size:clamp(1.8rem,4vw,2.5rem);}
+  .sec-head p{color:var(--muted);margin-top:.6rem;font-size:1.03rem;}
+
+  /* Overview cards — markers echo the daemon's own log prefixes */
+  .grid{display:grid;gap:16px;}
+  .g3{grid-template-columns:repeat(3,1fr);}
+  @media (max-width:820px){.g3{grid-template-columns:1fr 1fr;}}
+  @media (max-width:520px){.g3{grid-template-columns:1fr;}}
+  .card{background:linear-gradient(180deg,var(--surface) 0%,var(--ground) 150%);
+    border:1px solid var(--hairline);border-radius:14px;padding:20px;}
+  .card h3{font-size:1.12rem;margin-bottom:.45rem;}
+  .card p{color:var(--muted);font-size:.92rem;}
+  .card .mk{font-family:var(--font-mono);font-size:.72rem;letter-spacing:.02em;color:var(--moss);display:block;margin-bottom:.7rem;}
+  .card .mk::before{content:"[";color:var(--muted);}
+  .card .mk::after{content:"]";color:var(--muted);}
+
+  /* Code blocks */
+  .code{position:relative;background:#070b10;border:1px solid var(--hairline);border-radius:12px;
+    padding:16px 18px;font-family:var(--font-mono);font-size:.82rem;line-height:1.7;overflow-x:auto;white-space:pre;}
+  .code + .code{margin-top:14px;}
+  .code .p{color:var(--moss);}
+  .code .c{color:var(--muted);}
+  .code .o{color:var(--ink);}
+  .copy{position:absolute;top:9px;right:9px;background:var(--surface2);border:1px solid var(--hairline);
+    color:var(--muted);font-family:var(--font-mono);font-size:.68rem;padding:.25rem .55rem;border-radius:7px;cursor:pointer;}
+  .copy:hover{color:var(--ink);border-color:var(--moss);}
+  .steps-note{color:var(--muted);font-size:.9rem;margin-top:14px;}
+
+  /* API table */
+  .tablewrap{overflow-x:auto;border:1px solid var(--hairline);border-radius:12px;}
+  table{border-collapse:collapse;width:100%;min-width:520px;font-size:.9rem;}
+  th,td{text-align:left;padding:12px 16px;border-bottom:1px solid var(--hairline);}
+  th{font-family:var(--font-mono);font-size:.68rem;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-weight:600;}
+  tbody tr:last-child td{border-bottom:none;}
+  td.ep{font-family:var(--font-mono);color:var(--moss);white-space:nowrap;}
+  td.ep .m{color:var(--amber);}
+  td.d{color:var(--muted);}
+  .api-note{color:var(--muted);font-size:.92rem;margin-top:16px;}
+  .api-note code{font-family:var(--font-mono);color:var(--ink);background:var(--surface2);padding:.05em .35em;border-radius:5px;}
+
+  /* Trot × Nowhere split */
+  .split{display:grid;grid-template-columns:1fr 1fr;gap:18px;}
+  @media (max-width:720px){.split{grid-template-columns:1fr;}}
+  .half{border:1px solid var(--hairline);border-radius:16px;padding:24px;background:var(--surface);}
+  .half.app{background:linear-gradient(180deg,var(--surface),rgba(190,242,100,.04));}
+  .half .role{font-family:var(--font-mono);font-size:.7rem;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);}
+  .half h3{font-size:1.5rem;margin:.3rem 0 .1rem;}
+  .half.eng h3{color:var(--moss);}
+  .half.app h3{color:var(--lime);}
+  .half p{color:var(--muted);font-size:.95rem;margin-top:.6rem;}
+  .half ul{list-style:none;padding:0;margin:16px 0 20px;display:grid;gap:.5rem;}
+  .half li{font-size:.9rem;color:var(--ink);display:flex;gap:.6rem;}
+  .half li::before{content:"›";color:var(--moss);flex:none;}
+  .half.app li::before{color:var(--lime);}
+
+  /* License strip */
+  .license{background:radial-gradient(130% 120% at 50% -20%,rgba(52,211,153,.07),transparent 60%);text-align:center;}
+  .license .gpl{font-family:var(--font-display);font-size:clamp(1.6rem,4vw,2.4rem);font-weight:700;}
+  .license .gpl .accent{color:var(--moss);}
+  .license p{max-width:54ch;margin:18px auto 0;color:var(--muted);}
+
+  footer.site{padding:40px 0;border-top:1px solid var(--hairline);color:var(--muted);font-size:.85rem;}
+  .foot-grid{display:flex;justify-content:space-between;gap:24px;flex-wrap:wrap;align-items:flex-start;}
+  .foot-brand{font-family:var(--font-mono);font-weight:700;color:var(--ink);font-size:1rem;}
+  .foot-brand .p{color:var(--moss);}
+  footer.site a{color:var(--muted);}
+  footer.site a:hover{color:var(--ink);}
+  .imprint{max-width:52ch;line-height:1.7;}
+  .foot-links{display:flex;gap:1.2rem;flex-wrap:wrap;font-family:var(--font-mono);}
+
+  @media (prefers-reduced-motion:reduce){.cur,.brand .cur{animation:none;}}
+  @media (prefers-color-scheme:light){
+    :root{--ground:#f4f6f8;--surface:#ffffff;--surface2:#eef1f4;--hairline:#d6dde3;
+      --moss:#0f9d6b;--mossdim:#0c8459;--lime:#4d7c0f;--amber:#b06f14;--ink:#111922;--muted:#5a6b78;}
+    .term,.code{background:#0b1016;}
+    .term-body .cmd,.code .o{color:#e7eef5;}
+    .btn-primary{color:#ffffff;}
+  }
+</style>
+<script defer src="https://a.fmp.dev/script.js" data-website-id="9998e921-b6a9-46f1-aaf6-dddc4a9d2838"></script>
+</head>
+
+<header class="site">
+  <div class="navrow">
+    <div class="brand"><span class="p">$</span> trot<span class="cur" aria-hidden="true"></span></div>
+    <nav class="nav-links" aria-label="Primary">
+      <a href="#overview">Overview</a>
+      <a href="#install">Install</a>
+      <a href="#api">API</a>
+      <a href="#nowhere">Nowhere</a>
+      <a class="btn btn-ghost" style="padding:.5rem 1rem;" href="https://github.com/marcuspuchalla/trot">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <!-- HERO -->
+  <section class="hero" style="border-top:none;">
+    <div class="wrap hero-grid">
+      <div>
+        <span class="eyebrow">Open-source treadmill engine · GPLv3</span>
+        <h1 style="margin-top:14px;">The engine <span class="accent">under the desk</span>.</h1>
+        <p class="lede">Trot is a small, headless Rust daemon that reads your under-desk treadmill over Bluetooth and serves it as plain HTTP&nbsp;+&nbsp;WebSocket. Run <code>trot daemon</code>, point anything at it. It's the open-source core the <a href="https://nowhere.fitness">Nowhere</a> app is built on.</p>
+        <div class="cta-row">
+          <a class="btn btn-primary" href="#install">Install</a>
+          <a class="btn btn-ghost" href="https://github.com/marcuspuchalla/trot">View source</a>
+        </div>
+        <p class="assurance">Rust · GPLv3 · <b>runs offline</b> · zero telemetry</p>
+      </div>
+
+      <!-- Signature: the daemon's own output, streaming. -->
+      <div class="term" aria-label="A terminal running the trot daemon and printing live treadmill telemetry.">
+        <div class="term-bar">
+          <span class="b" aria-hidden="true"></span><span class="b" aria-hidden="true"></span><span class="b" aria-hidden="true"></span>
+          <span class="ttl">trot — it's really only treadmilling</span>
+        </div>
+        <div class="term-body" id="term"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- OVERVIEW -->
+  <section id="overview">
+    <div class="wrap">
+      <div class="sec-head">
+        <span class="eyebrow">What it is</span>
+        <h2>One binary between your treadmill and everything else.</h2>
+        <p>No GUI, no account, no cloud. Trot connects to the belt, keeps the record, and exposes it on localhost. What you build on top is up to you.</p>
+      </div>
+      <div class="grid g3">
+        <div class="card"><span class="mk">ble</span><h3>Reads the treadmill</h3><p>Native LifeSpan SC110 support plus generic FTMS, straight over Bluetooth LE. No dongle, no vendor app.</p></div>
+        <div class="card"><span class="mk">api</span><h3>Local HTTP + WebSocket</h3><p>A tiny <code>axum</code> server on loopback: poll <code>/api/state</code> or subscribe to <code>/ws</code> for a live stream of steps, speed and distance.</p></div>
+        <div class="card"><span class="mk">rec</span><h3>Records sessions</h3><p>Every walk is written to a local SQLite database with per-minute rollups and retention. Your history, on your disk.</p></div>
+        <div class="card"><span class="mk">svc</span><h3>Headless daemon</h3><p><code>trot daemon</code> runs quietly in the background — drop it behind systemd, launchd, or a login item and forget it.</p></div>
+        <div class="card"><span class="mk">priv</span><h3>Nothing leaves</h3><p>No accounts, no analytics, no phone-home. Trot binds to 127.0.0.1 and speaks only when spoken to.</p></div>
+        <div class="card"><span class="mk">rust</span><h3>Small &amp; portable</h3><p>One dependency-light Rust binary. Builds and runs on Linux, macOS and Windows from the same source.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- INSTALL -->
+  <section id="install">
+    <div class="wrap">
+      <div class="sec-head">
+        <span class="eyebrow">Install</span>
+        <h2>Clone, build, walk.</h2>
+        <p>Trot is a Cargo project. You need a Rust toolchain and a Bluetooth adapter — that's it.</p>
+      </div>
+
+      <div class="code"><button class="copy" type="button">copy</button><span class="c"># build from source</span>
+<span class="p">$</span> git clone https://github.com/marcuspuchalla/trot
+<span class="p">$</span> cd trot
+<span class="p">$</span> cargo build --release
+<span class="c"># the binary lands in target/release/trot</span></div>
+
+      <div class="code"><button class="copy" type="button">copy</button><span class="c"># run the engine, then talk to it</span>
+<span class="p">$</span> trot daemon        <span class="c"># connect + serve the API</span>
+<span class="p">$</span> trot status        <span class="c"># is it up? treadmill connected?</span>
+<span class="p">$</span> trot today         <span class="c"># today's totals</span>
+<span class="p">$</span> trot log --week    <span class="c"># recent sessions</span></div>
+
+      <p class="steps-note">Prefer a polished UI over a terminal? <a href="https://nowhere.fitness">Nowhere</a> is the desktop, mobile and web app that runs on this exact engine.</p>
+    </div>
+  </section>
+
+  <!-- API -->
+  <section id="api">
+    <div class="wrap">
+      <div class="sec-head">
+        <span class="eyebrow">The contract</span>
+        <h2>A local API you can build against.</h2>
+        <p>The daemon picks a free port and writes it to a handshake file; <code>trot status/today/log</code> and Nowhere read it automatically. These are the same endpoints the app uses — nothing is private.</p>
+      </div>
+      <div class="tablewrap">
+        <table>
+          <thead><tr><th>Endpoint</th><th>Returns</th></tr></thead>
+          <tbody>
+            <tr><td class="ep"><span class="m">GET</span> /api/state</td><td class="d">Connection status + the live sample (steps, speed, distance, duration) + today's totals.</td></tr>
+            <tr><td class="ep"><span class="m">GET</span> /api/today</td><td class="d">Today's totals with an hourly breakdown.</td></tr>
+            <tr><td class="ep"><span class="m">GET</span> /api/sessions</td><td class="d">Session history; <span class="ep" style="color:var(--moss)">/api/sessions/:id</span> for one.</td></tr>
+            <tr><td class="ep"><span class="m">GET</span> /api/analytics</td><td class="d">Aggregated trends over time.</td></tr>
+            <tr><td class="ep"><span class="m">GET</span> /api/export</td><td class="d">A full, lossless dump of your data (sessions + samples).</td></tr>
+            <tr><td class="ep"><span class="m">WS</span>&nbsp;&nbsp; /ws</td><td class="d">Live push: every new sample and session event as it happens.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="api-note">Point <code>curl</code>, a script, a Grafana panel, or your own front-end at it. The <code>/api</code> + <code>/ws</code> boundary is deliberately the seam between Trot and Nowhere, so anything Nowhere does, you can too.</p>
+    </div>
+  </section>
+
+  <!-- TROT × NOWHERE -->
+  <section id="nowhere">
+    <div class="wrap">
+      <div class="sec-head">
+        <span class="eyebrow">Trot &amp; Nowhere</span>
+        <h2>Trot is the engine. Nowhere is the app.</h2>
+        <p>Same author, clean split: an open engine anyone can run and fork, and a polished product that pays for the work. Neither hides the other.</p>
+      </div>
+      <div class="split">
+        <div class="half eng">
+          <span class="role">Open source · this page</span>
+          <h3>Trot</h3>
+          <p>The GPLv3 Rust daemon. Talks to the treadmill, keeps the database, serves the API. Headless, hackable, yours.</p>
+          <ul>
+            <li>Command line + background daemon</li>
+            <li>Local HTTP + WebSocket API</li>
+            <li>Fork it, script it, self-host it</li>
+          </ul>
+          <a class="btn btn-primary" href="https://github.com/marcuspuchalla/trot">GitHub</a>
+        </div>
+        <div class="half app">
+          <span class="role">The product · nowhere.fitness</span>
+          <h3>Nowhere</h3>
+          <p>The calm, privacy-first app built on Trot — live sessions, history, analytics and optional encrypted sync, on every platform.</p>
+          <ul>
+            <li>macOS, Windows, Linux, iOS, Android, Web</li>
+            <li>One codebase, no data collection</li>
+            <li>Buying Plus keeps the engine funded</li>
+          </ul>
+          <a class="btn btn-ghost" href="https://nowhere.fitness">nowhere.fitness</a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- LICENSE -->
+  <section class="license">
+    <div class="wrap">
+      <p class="gpl">Free as in <span class="accent">freedom</span>. GPLv3.</p>
+      <p>Trot is released under the GNU General Public License v3. Run it, read it, change it, share it. If you ship a modified version, keep it open — that's the whole deal.</p>
+      <div class="cta-row" style="justify-content:center;margin-top:24px;">
+        <a class="btn btn-ghost" href="https://github.com/marcuspuchalla/trot/blob/main/LICENSE">Read the license</a>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="site">
+  <div class="wrap foot-grid">
+    <div class="imprint">
+      <div class="foot-brand"><span class="p">$</span> trot</div>
+      <p style="margin-top:.6rem;">An open-source engine for under-desk walking treadmills. It's really only treadmilling.</p>
+      <p style="margin-top:.8rem;">Trot is an independent, unofficial interoperability tool and is not affiliated with or endorsed by LifeSpan or any treadmill manufacturer. All product names are trademarks of their respective owners.</p>
+    </div>
+    <div class="foot-links">
+      <a href="https://github.com/marcuspuchalla/trot">GitHub</a>
+      <a href="https://github.com/marcuspuchalla/trot/blob/main/LICENSE">License</a>
+      <a href="#api">API</a>
+      <a href="https://nowhere.fitness">Nowhere app</a>
+    </div>
+  </div>
+</footer>
+
+<script>
+  // The daemon's own boot sequence, then a live "trot today" that ticks up —
+  // exactly what the tool prints. Honoured statically under reduced motion.
+  (function(){
+    var term = document.getElementById('term');
+    var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+    var boot = [
+      '<span class="cmd"><span class="p">$</span> trot daemon</span>',
+      '<span class="dim">TROT — it\'s really only treadmilling.</span>',
+      '<span class="tag">[ble]</span>  scanning for a treadmill…',
+      '<span class="tag">[ble]</span>  SC110 connected',
+      '<span class="tag">[api]</span>  serving <span class="dim">http://127.0.0.1:8901</span> · /api + /ws',
+      '<span class="tag amber">[rec]</span>  session started',
+      '',
+      '<span class="cmd"><span class="p">$</span> trot today</span>'
+    ];
+
+    function totals(steps, seconds){
+      var km = (steps*0.00075).toFixed(2);
+      var m = Math.floor(seconds/60), s = seconds%60;
+      var clk = String(Math.floor(m/60)).padStart(2,'0')+':'+String(m%60).padStart(2,'0')+':'+String(s).padStart(2,'0');
+      return '<span class="kv">'
+        + '<span class="dim">steps</span><span class="val">'+steps.toLocaleString('en-US')+'</span>'
+        + '<span class="dim">distance</span><span class="val">'+km+' km</span>'
+        + '<span class="dim">speed</span><span class="val">3.1 km/h</span>'
+        + '<span class="dim">time</span><span class="val">'+clk+'</span>'
+        + '</span>';
+    }
+
+    if (reduce){
+      term.innerHTML = boot.join('\n') + '\n' + totals(1204, 1122);
+      return;
+    }
+
+    var i = 0;
+    function typeLine(){
+      term.innerHTML = boot.slice(0, i+1).join('\n') + '<span class="cur"></span>';
+      i++;
+      if (i < boot.length){ setTimeout(typeLine, 460); }
+      else { setTimeout(runTotals, 380); }
+    }
+    var steps = 1180, seconds = 1098;
+    function runTotals(){
+      term.innerHTML = boot.join('\n') + '\n' + totals(steps, seconds) + '\n<span class="cmd"><span class="p">$</span> <span class="cur"></span></span>';
+      steps += 22 + Math.floor(Math.random()*4);
+      seconds += 1;
+      setTimeout(runTotals, 1000);
+    }
+    setTimeout(typeLine, 300);
+  })();
+
+  // Copy buttons — strip the leading "$ " prompts and comment lines.
+  document.querySelectorAll('.code .copy').forEach(function(btn){
+    btn.addEventListener('click', function(){
+      var block = btn.parentNode.cloneNode(true);
+      block.querySelector('.copy').remove();
+      var text = block.textContent.split('\n')
+        .filter(function(l){ return l.trim() && l.trim().indexOf('#') !== 0; })
+        .map(function(l){ return l.replace(/^\s*\$\s?/, '').replace(/\s+#.*$/, ''); })
+        .join('\n').trim();
+      navigator.clipboard && navigator.clipboard.writeText(text);
+      var old = btn.textContent; btn.textContent = 'copied'; setTimeout(function(){ btn.textContent = old; }, 1200);
+    });
+  });
+</script>
+</html>
