@@ -29,17 +29,20 @@ No opinions about presentation; it does the modest thing and says so on the tin.
   ```
 
 ## Supported treadmills
-Trot talks to under-desk walking treadmills over **Bluetooth Low Energy**, two ways:
+Trot reads treadmills over **Bluetooth Low Energy** — under-desk walking pads and
+full-size treadmills alike. Two ways in:
 
-- **LifeSpan\*** — native support for LifeSpan under-desk treadmills using their
-  own Bluetooth protocol (developed and tested against a LifeSpan walking pad).
-- **Standard FTMS treadmills** — any treadmill that advertises the standard
-  Bluetooth **Fitness Machine Service** (FTMS, `0x1826`). That's a large and
-  growing set — NordicTrack\*, Peloton\*, Woodway\*, Technogym\* and many more.
+- **LifeSpan\*** — LifeSpan consoles use a proprietary protocol, so Trot ships a
+  **native adapter** for them (developed and tested against a LifeSpan walking pad).
+- **Standard FTMS\*** — any treadmill that broadcasts the standard Bluetooth
+  **Fitness Machine Service** (FTMS, `0x1826`). Confirmed on Horizon\* AT-series,
+  Technogym MyRun\*, BowFlex\* T9, 3G Cardio\*, Matrix\* (XER-02+) and newer
+  WalkingPad\* / KingSmith pads.
 
-If your machine speaks FTMS, `trot scan` will find it. Compatibility is best-effort
-and interoperability-based: we can't promise a specific model, but the standard
-covers most under-desk treadmills.
+FTMS is per-model: if your treadmill has an "FTMS" or "broadcast to Zwift/Kinomap"
+mode, `trot scan` will find it. Closed ecosystems — **iFit** (NordicTrack\* /
+ProForm\*), **Peloton\*** and **Echelon\*** — don't broadcast their data, so no
+third-party tool can read them.
 
 <sub>\* Trademarks of their respective owners — see [Trademarks](#trademarks).</sub>
 
@@ -81,8 +84,15 @@ Trot is an independent, unofficial interoperability tool. It is **not affiliated
 with, endorsed by, or sponsored by** any treadmill manufacturer, and it only reads
 data your treadmill already broadcasts over Bluetooth.
 
-LifeSpan, NordicTrack, Peloton, Woodway and Technogym are trademarks or registered
-trademarks of their respective owners. The **Bluetooth®** word mark and logos are
-registered trademarks owned by Bluetooth SIG, Inc. All other product and company
-names are the property of their respective holders; their use here is for
-identification and compatibility purposes only.
+LifeSpan, Horizon, BowFlex, Technogym, Matrix, 3G Cardio, WalkingPad / KingSmith,
+NordicTrack, ProForm, Peloton and Echelon are trademarks or registered trademarks
+of their respective owners. The **Bluetooth®** word mark and logos are registered
+trademarks owned by Bluetooth SIG, Inc. All other product and company names are the
+property of their respective holders; their use here is for identification and
+compatibility purposes only.
+
+## Acknowledgements
+Trot's LifeSpan / Omni protocol support was bootstrapped from and cross-checked
+against [**blak3r/treadspan**](https://github.com/blak3r/treadspan) (MIT,
+© 2025 Blake Robertson), which reverse-engineered the LifeSpan Omni console
+protocol. See [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md).

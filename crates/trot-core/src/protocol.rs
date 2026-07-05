@@ -1,6 +1,9 @@
 //! SC110 BLE protocol: constants, request builder, and the incremental Reader.
 //! Ported faithfully from the Python `lifespan_sc110` package (parser.py + __init__.py).
 //!
+//! Protocol knowledge was bootstrapped from and cross-checked against
+//! blak3r/treadspan (MIT, © 2025 Blake Robertson). See THIRD-PARTY-NOTICES.md.
+//!
 //! Frame format (confirmed on SC110):
 //!   byte 0: 0xA1 (prefix)
 //!   byte 1: 0xAA (ok) or 0xFF (unknown opcode)
