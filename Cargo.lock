@@ -1942,6 +1942,7 @@ dependencies = [
  "clap",
  "dialoguer",
  "directories",
+ "libc",
  "serde_json",
  "tokio",
  "tracing",

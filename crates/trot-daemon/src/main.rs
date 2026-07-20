@@ -120,28 +120,56 @@ fn run_daemon() -> Result<()> {
     })
 }
 
-/// Resolve when the user asks the daemon to stop — Ctrl-C, or SIGTERM (which is
-/// what `kill` and most supervisors send). Without the SIGTERM arm a `kill` would
-/// bypass the graceful BLE teardown.
+/// Resolve when the daemon should stop — Ctrl-C, SIGTERM (what `kill` and most
+/// supervisors send), or our PARENT DYING. The parent arm matters for Nowhere:
+/// on macOS a Cmd-Q can tear the app down without it sending us a signal or
+/// killing us, orphaning the daemon with the treadmill still connected. Watching
+/// for the orphan lets us disconnect cleanly instead of leaking the BLE link
+/// until the treadmill is power-cycled. (Also covers a Nowhere crash.)
 async fn wait_for_shutdown_signal() {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
+        let parent = wait_for_parent_death();
+        tokio::pin!(parent);
         match signal(SignalKind::terminate()) {
             Ok(mut term) => {
                 tokio::select! {
                     _ = tokio::signal::ctrl_c() => {}
                     _ = term.recv() => {}
+                    _ = &mut parent => {}
                 }
             }
             Err(_) => {
-                let _ = tokio::signal::ctrl_c().await;
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = &mut parent => {}
+                }
             }
         }
     }
     #[cfg(not(unix))]
     {
         let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+/// Resolves when our parent process goes away. Reparenting flips `getppid()` (an
+/// orphan is adopted by init/launchd, pid 1), so we record the launching pid and
+/// watch for it to change. If we were started directly by init there's no parent
+/// to lose, so we never resolve.
+#[cfg(unix)]
+async fn wait_for_parent_death() {
+    let initial = unsafe { libc::getppid() };
+    if initial <= 1 {
+        std::future::pending::<()>().await;
+    }
+    loop {
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+        if unsafe { libc::getppid() } != initial {
+            tracing::info!("trot: parent process gone — shutting down to release the treadmill");
+            return;
+        }
     }
 }
 
