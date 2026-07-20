@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-const RETENTION_DAYS: f64 = 5.0;
+const RETENTION_DAYS: f64 = 7.0;
 const ROLLUP_INTERVAL_S: f64 = 300.0;
 
 /// A running engine: the shared state plus the loopback port the API is on.
@@ -24,6 +24,18 @@ pub async fn start_engine(data_dir: PathBuf) -> anyhow::Result<Engine> {
     config::init_paths(&data_dir);
 
     let db = Arc::new(db::Db::open(config::db_path())?);
+
+    // One-time Phase-0 retention migration (gated by PRAGMA user_version): backfill
+    // rollups over ALL raw history, THEN prune raw beyond retention, THEN VACUUM.
+    // Must run before the rollup/prune loop so history is banked into rollups
+    // before any raw is dropped. Idempotent — a no-op on every subsequent boot.
+    match db.run_startup_migration(RETENTION_DAYS * 86400.0) {
+        Ok(res) if res.get("ran").and_then(|v| v.as_bool()).unwrap_or(false) => {
+            tracing::info!("phase0 retention migration ran: {res}");
+        }
+        Ok(_) => {}
+        Err(e) => tracing::error!("phase0 retention migration failed: {e}"),
+    }
 
     // High-entropy per-launch token, required on state-changing /api calls so
     // neither another local process nor a cross-site request can drive the API.

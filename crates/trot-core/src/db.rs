@@ -78,6 +78,10 @@ CREATE INDEX IF NOT EXISTS idx_speed_marks_ts ON speed_marks(ts);
 
 const ROLLUP_RESOLUTION_S: i64 = 60;
 const ROLLUP_KIND: &str = "samples_1m";
+/// Raw samples older than this are never (re)inserted by `import_dump` — a
+/// belt-and-braces guard so a stale peer or an old full backup can't refill
+/// pruned history behind the retention loop. Matches the engine's 7-day window.
+const IMPORT_MAX_RAW_AGE_S: f64 = 7.0 * 86400.0;
 /// How far before `last_rolled` the de-glitch walk re-reads samples purely to
 /// establish the previous-value context (so the first new bucket's increment
 /// and any boundary spike are judged correctly). Those older buckets are not
@@ -211,6 +215,95 @@ fn deglitch_bucketed(
     out
 }
 
+/// De-glitched increments for the *un-rolled raw tail* of a day.
+///
+/// Walks the day's samples exactly like `deglitch_walk`, but only *counts* an
+/// accepted increment when the current sample's `ts >= floor` (the rollup
+/// `last_rolled_ts`). Samples older than `floor` are used purely as de-glitch
+/// *context* (so the increment straddling the rollup boundary is judged and
+/// counted correctly against its true predecessor). This lets a day's total be
+/// composed as `SUM(rollup deltas below floor) + tail(raw at/above floor)`
+/// without double-counting the boundary and without a first-reading baseline
+/// that the rollups (which never store one) would not carry.
+///
+/// When `floor == 0` (nothing rolled yet) every sample counts *including* the
+/// first-reading baseline, so this degrades exactly to the historical
+/// `deglitch_total` over the full day — preserving pre-rollup numbers.
+fn deglitch_tail(
+    samples: &[(f64, i64)], // (ts, value) ordered by ts
+    floor: f64,
+    spike: i64,
+    reset_max: i64,
+    mut emit: impl FnMut(usize, i64),
+) {
+    let n = samples.len();
+    let mut prev: Option<i64> = None;
+    for i in 0..n {
+        let (ts, v) = samples[i];
+        if i > 0 && i + 1 < n {
+            let p = samples[i - 1].1;
+            let nx = samples[i + 1].1;
+            if (v - p > spike && v - nx > spike) || (p - v > spike && nx - v > spike) {
+                continue;
+            }
+        }
+        let counts = ts >= floor;
+        match prev {
+            None => {
+                let base = v.max(0);
+                if base > 0 && counts {
+                    emit(i, base);
+                }
+                prev = Some(v);
+            }
+            Some(pv) => {
+                let d = v - pv;
+                if d > 0 {
+                    if counts {
+                        emit(i, d);
+                    }
+                    prev = Some(v);
+                } else if d < 0 && (v <= reset_max || v * 2 < pv) {
+                    prev = Some(v);
+                }
+            }
+        }
+    }
+}
+
+/// Sum of `deglitch_tail`'s counted increments.
+fn deglitch_tail_total(samples: &[(f64, i64)], floor: f64, spike: i64, reset_max: i64) -> i64 {
+    let mut total = 0i64;
+    deglitch_tail(samples, floor, spike, reset_max, |_, d| total += d);
+    total
+}
+
+/// The rollup floor (`last_rolled_ts`): raw samples below it are already
+/// captured in `sample_rollups_1m`, so day/hour/timeseries reads must not
+/// double-count them. 0 when nothing has been rolled.
+fn raw_floor(c: &Connection) -> f64 {
+    c.query_row(
+        "SELECT last_rolled_ts FROM rollup_state WHERE kind=?",
+        params![ROLLUP_KIND],
+        |r| r.get(0),
+    )
+    .optional()
+    .ok()
+    .flatten()
+    .unwrap_or(0.0)
+}
+
+/// Local hour (0..23) of a unix timestamp.
+fn local_hour(ts: f64) -> usize {
+    use chrono::{Local, TimeZone, Timelike};
+    Local
+        .timestamp_opt(ts as i64, 0)
+        .single()
+        .map(|d| d.hour() as usize)
+        .unwrap_or(0)
+        .min(23)
+}
+
 /// De-glitched total for one metric: use the sampled odometer when samples
 /// exist, otherwise fall back to the session end-minus-start sum. `start_col`
 /// empty means the metric has no per-session start (count from 0).
@@ -236,6 +329,19 @@ fn metric_total(
          FROM sessions se WHERE se.local_date = ?"
     );
     Ok(c.query_row(&sql, params![local_date_s], |r| r.get(0))?)
+}
+
+/// Unix timestamp of local midnight for a "YYYY-MM-DD" date string, using the
+/// same local timezone the rest of the engine derives `local_date` in. `None`
+/// if the string doesn't parse (or the wall-clock is ambiguous, e.g. a DST gap).
+fn local_midnight(date: &str) -> Option<f64> {
+    use chrono::{Local, NaiveDate, TimeZone};
+    let d = NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?;
+    let naive = d.and_hms_opt(0, 0, 0)?;
+    Local
+        .from_local_datetime(&naive)
+        .single()
+        .map(|dt| dt.timestamp() as f64)
 }
 
 /// Human-readable local timestamp for diagnostic dumps ("YYYY-MM-DD HH:MM:SS").
@@ -408,44 +514,77 @@ impl Db {
             |r| r.get(0),
         )?;
 
-        // Pull the day's samples once, in the order the odometer advanced.
-        let mut stmt = c.prepare(
-            "SELECT s.steps, s.duration_s, s.distance_raw, s.calories
-             FROM samples s JOIN sessions se ON se.id = s.session_id
-             WHERE se.local_date = ? ORDER BY s.ts, s.id",
+        // Rollup floor: everything below it lives in sample_rollups_1m. For a
+        // fully-historical (pruned) date the raw tail is empty and all totals
+        // come from the rollups; for today the rollups carry the bulk and the
+        // raw tail carries the last, not-yet-rolled minute — union at `floor`.
+        let floor = raw_floor(&c);
+
+        // Tier-1 contribution: SUM of de-glitched deltas already banked in the
+        // per-minute rollups for this local_date.
+        let (r_steps, r_dist, r_cal, r_dur, roll_n): (i64, i64, i64, i64, i64) = c.query_row(
+            "SELECT COALESCE(SUM(r.steps_delta),0), COALESCE(SUM(r.distance_raw_delta),0),
+                    COALESCE(SUM(r.calories_delta),0), COALESCE(SUM(r.duration_s_delta),0),
+                    COUNT(*)
+             FROM sample_rollups_1m r JOIN sessions se ON se.id = r.session_id
+             WHERE se.local_date = ? AND r.bucket_ts < ?",
+            params![local_date_s, floor as i64],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )?;
-        let mut steps_v: Vec<i64> = Vec::new();
-        let mut dur_v: Vec<i64> = Vec::new();
-        let mut dist_v: Vec<i64> = Vec::new();
-        let mut cal_v: Vec<i64> = Vec::new();
-        let mut rows = stmt.query(params![local_date_s])?;
-        while let Some(r) = rows.next()? {
-            if let Some(x) = r.get::<_, Option<i64>>(0)? {
-                steps_v.push(x);
-            }
-            if let Some(x) = r.get::<_, Option<i64>>(1)? {
-                dur_v.push(x);
-            }
-            if let Some(x) = r.get::<_, Option<i64>>(2)? {
-                dist_v.push(x);
-            }
-            if let Some(x) = r.get::<_, Option<i64>>(3)? {
-                cal_v.push(x);
+
+        // Tier-0 tail: the day's raw samples with their timestamps, walked once
+        // so increments at/after `floor` are added on top of the rollup sums.
+        let mut steps_v: Vec<(f64, i64)> = Vec::new();
+        let mut dur_v: Vec<(f64, i64)> = Vec::new();
+        let mut dist_v: Vec<(f64, i64)> = Vec::new();
+        let mut cal_v: Vec<(f64, i64)> = Vec::new();
+        {
+            let mut stmt = c.prepare(
+                "SELECT s.ts, s.steps, s.duration_s, s.distance_raw, s.calories
+                 FROM samples s JOIN sessions se ON se.id = s.session_id
+                 WHERE se.local_date = ? ORDER BY s.ts, s.id",
+            )?;
+            let mut rows = stmt.query(params![local_date_s])?;
+            while let Some(r) = rows.next()? {
+                let ts: f64 = r.get(0)?;
+                if let Some(x) = r.get::<_, Option<i64>>(1)? {
+                    steps_v.push((ts, x));
+                }
+                if let Some(x) = r.get::<_, Option<i64>>(2)? {
+                    dur_v.push((ts, x));
+                }
+                if let Some(x) = r.get::<_, Option<i64>>(3)? {
+                    dist_v.push((ts, x));
+                }
+                if let Some(x) = r.get::<_, Option<i64>>(4)? {
+                    cal_v.push((ts, x));
+                }
             }
         }
-        drop(rows);
-        drop(stmt);
 
-        // Per-metric (spike, reset_max). Spike = max plausible single-sample jump
-        // above BOTH neighbours (a stale read that immediately reverts); the
-        // result is insensitive to its exact value. reset_max = a drop to at or
-        // below this counts as a genuine power-cycle reset to ~0.
-        let steps = metric_total(&c, local_date_s, &steps_v, 50, 10, "steps_end", "start_steps")?;
+        // Per-metric (spike, reset_max) as before. Where neither a rollup nor a
+        // raw sample exists for the date, fall back to the session end-start sum
+        // (metric_total with an empty slice) — legacy summary-only imports.
+        let combine = |c: &Connection,
+                       roll: i64,
+                       vals: &[(f64, i64)],
+                       spike: i64,
+                       reset: i64,
+                       end_col: &str,
+                       start_col: &str|
+         -> Result<i64> {
+            if roll_n > 0 || !vals.is_empty() {
+                Ok(roll + deglitch_tail_total(vals, floor, spike, reset))
+            } else {
+                metric_total(c, local_date_s, &[], spike, reset, end_col, start_col)
+            }
+        };
+
+        let steps = combine(&c, r_steps, &steps_v, 50, 10, "steps_end", "start_steps")?;
         let duration_s =
-            metric_total(&c, local_date_s, &dur_v, 600, 10, "duration_s_end", "start_duration_s")?;
-        let calories = metric_total(&c, local_date_s, &cal_v, 100, 10, "calories_end", "")?;
-        let distance_raw =
-            metric_total(&c, local_date_s, &dist_v, 200, 10, "distance_raw_end", "")?;
+            combine(&c, r_dur, &dur_v, 600, 10, "duration_s_end", "start_duration_s")?;
+        let calories = combine(&c, r_cal, &cal_v, 100, 10, "calories_end", "")?;
+        let distance_raw = combine(&c, r_dist, &dist_v, 200, 10, "distance_raw_end", "")?;
 
         Ok(json!({
             "sessions": sessions,
@@ -482,28 +621,44 @@ impl Db {
     /// the day's step total and a stale frame can't spike a single hour (this is
     /// what made one afternoon hour show the day's max after a reconnect).
     pub fn hourly_steps(&self, local_date_s: &str) -> Result<Vec<Value>> {
-        let mut hours: Vec<usize> = Vec::new();
-        let mut steps: Vec<i64> = Vec::new();
+        let mut buckets = [0i64; 24];
+        let c = self.conn();
+        let floor = raw_floor(&c);
+
+        // Rolled hours: SUM(steps_delta) grouped by the local hour of the bucket.
         {
-            let c = self.conn();
-            let mut stmt = c.prepare(
-                "SELECT CAST(strftime('%H', datetime(s.ts, 'unixepoch', 'localtime')) AS INTEGER) AS hour,
-                        s.steps
+            let mut rstmt = c.prepare(
+                "SELECT CAST(strftime('%H', datetime(r.bucket_ts, 'unixepoch', 'localtime')) AS INTEGER) AS hour,
+                        COALESCE(SUM(r.steps_delta), 0)
+                 FROM sample_rollups_1m r JOIN sessions se ON se.id = r.session_id
+                 WHERE se.local_date = ? AND r.bucket_ts < ?
+                 GROUP BY hour",
+            )?;
+            let mut rows = rstmt.query(params![local_date_s, floor as i64])?;
+            while let Some(r) = rows.next()? {
+                let h: i64 = r.get(0)?;
+                buckets[h.clamp(0, 23) as usize] += r.get::<_, i64>(1)?;
+            }
+        }
+
+        // Raw tail: increments at/after `floor`, attributed to the local hour of
+        // their sample. Same (spike, reset_max) as day_totals so bars reconcile.
+        let mut samples: Vec<(f64, i64)> = Vec::new();
+        {
+            let mut sstmt = c.prepare(
+                "SELECT s.ts, s.steps
                  FROM samples s JOIN sessions se ON se.id = s.session_id
                  WHERE se.local_date = ? AND s.steps IS NOT NULL
                  ORDER BY s.ts, s.id",
             )?;
-            let mut rows = stmt.query(params![local_date_s])?;
+            let mut rows = sstmt.query(params![local_date_s])?;
             while let Some(r) = rows.next()? {
-                let h: i64 = r.get(0)?;
-                hours.push(h.clamp(0, 23) as usize);
-                steps.push(r.get(1)?);
+                samples.push((r.get(0)?, r.get(1)?));
             }
         }
-
-        let mut buckets = [0i64; 24];
-        // Same (spike, reset_max) as the steps metric in day_totals so totals reconcile.
-        deglitch_walk(&steps, 50, 10, |i, d| buckets[hours[i]] += d);
+        deglitch_tail(&samples, floor, 50, 10, |i, d| {
+            buckets[local_hour(samples[i].0)] += d;
+        });
 
         Ok((0..24)
             .map(|h| json!({"hour": format!("{h:02}"), "steps": buckets[h]}))
@@ -860,106 +1015,12 @@ impl Db {
         }
 
         let tx = c.transaction()?;
-        let mut written = 0i64;
-        let mut max_bucket_ts = last_rolled;
-        {
-            let res_s = ROLLUP_RESOLUTION_S;
-
-            // De-glitched per-(bucket,session) metric deltas. Read with a small
-            // lookback so the walk has prior-value context across the window edge.
-            let lookback_start = (last_rolled - ROLLUP_DEGLITCH_LOOKBACK_S).max(0.0);
-            let mut steps_s: Vec<(i64, i64, i64)> = Vec::new();
-            let mut dist_s: Vec<(i64, i64, i64)> = Vec::new();
-            let mut cal_s: Vec<(i64, i64, i64)> = Vec::new();
-            let mut dur_s: Vec<(i64, i64, i64)> = Vec::new();
-            {
-                let mut q = tx.prepare(
-                    "SELECT CAST(s.ts AS INTEGER), s.session_id, s.steps, s.distance_raw,
-                            s.calories, s.duration_s
-                     FROM samples s WHERE s.ts > ? AND s.ts < ? AND s.session_id IS NOT NULL
-                     ORDER BY s.ts, s.id",
-                )?;
-                let mut rows = q.query(params![lookback_start, cutoff])?;
-                while let Some(r) = rows.next()? {
-                    let ts: i64 = r.get(0)?;
-                    let sess: i64 = r.get(1)?;
-                    if let Some(v) = r.get::<_, Option<i64>>(2)? {
-                        steps_s.push((ts, sess, v));
-                    }
-                    if let Some(v) = r.get::<_, Option<i64>>(3)? {
-                        dist_s.push((ts, sess, v));
-                    }
-                    if let Some(v) = r.get::<_, Option<i64>>(4)? {
-                        cal_s.push((ts, sess, v));
-                    }
-                    if let Some(v) = r.get::<_, Option<i64>>(5)? {
-                        dur_s.push((ts, sess, v));
-                    }
-                }
-            }
-            let steps_d = deglitch_bucketed(&steps_s, res_s, 50, 10);
-            let dist_d = deglitch_bucketed(&dist_s, res_s, 200, 10);
-            let cal_d = deglitch_bucketed(&cal_s, res_s, 100, 10);
-            let dur_d = deglitch_bucketed(&dur_s, res_s, 600, 10);
-
-            // Stateless speed/running/total aggregates per (bucket,session) over
-            // the strict (last_rolled, cutoff) window — the authoritative bucket set.
-            let agg_sql = format!(
-                "SELECT (CAST(s.ts AS INTEGER) / {res_s}) * {res_s} AS bucket_ts, s.session_id,
-                        MIN(CASE WHEN s.speed_raw > 0 THEN s.speed_raw END) AS speed_raw_min,
-                        AVG(CASE WHEN s.speed_raw > 0 THEN s.speed_raw END) AS speed_raw_avg,
-                        MAX(CASE WHEN s.speed_raw > 0 THEN s.speed_raw END) AS speed_raw_max,
-                        SUM(CASE WHEN s.status = 3 THEN 1 ELSE 0 END) AS running_samples,
-                        COUNT(*) AS total_samples
-                 FROM samples s WHERE s.ts > ? AND s.ts < ? AND s.session_id IS NOT NULL
-                 GROUP BY bucket_ts, s.session_id"
-            );
-            let mut agg = tx.prepare(&agg_sql)?;
-            let groups: Vec<RollupRow> = agg
-                .query_map(params![last_rolled, cutoff], |r| {
-                    let bucket_ts: i64 = r.get(0)?;
-                    let session_id: Option<i64> = r.get(1)?;
-                    let key = (bucket_ts, session_id.unwrap_or(0));
-                    Ok(RollupRow {
-                        bucket_ts,
-                        session_id,
-                        steps_delta: *steps_d.get(&key).unwrap_or(&0),
-                        distance_raw_delta: *dist_d.get(&key).unwrap_or(&0),
-                        calories_delta: *cal_d.get(&key).unwrap_or(&0),
-                        duration_s_delta: *dur_d.get(&key).unwrap_or(&0),
-                        speed_raw_min: r.get(2)?,
-                        speed_raw_avg: r.get(3)?,
-                        speed_raw_max: r.get(4)?,
-                        running_samples: r.get::<_, Option<i64>>(5)?.unwrap_or(0),
-                        total_samples: r.get::<_, Option<i64>>(6)?.unwrap_or(0),
-                    })
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            drop(agg);
-
-            for r in &groups {
-                tx.execute(
-                    "INSERT INTO sample_rollups_1m(bucket_ts, session_id, steps_delta, distance_raw_delta,
-                        calories_delta, duration_s_delta, speed_raw_min, speed_raw_avg, speed_raw_max,
-                        running_samples, total_samples)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                     ON CONFLICT(bucket_ts, session_id) DO UPDATE SET
-                        steps_delta=excluded.steps_delta, distance_raw_delta=excluded.distance_raw_delta,
-                        calories_delta=excluded.calories_delta, duration_s_delta=excluded.duration_s_delta,
-                        speed_raw_min=excluded.speed_raw_min, speed_raw_avg=excluded.speed_raw_avg,
-                        speed_raw_max=excluded.speed_raw_max, running_samples=excluded.running_samples,
-                        total_samples=excluded.total_samples",
-                    params![
-                        r.bucket_ts, r.session_id, r.steps_delta, r.distance_raw_delta,
-                        r.calories_delta, r.duration_s_delta, r.speed_raw_min, r.speed_raw_avg,
-                        r.speed_raw_max, r.running_samples, r.total_samples
-                    ],
-                )?;
-                written += 1;
-                max_bucket_ts = max_bucket_ts.max((r.bucket_ts + res_s) as f64);
-            }
-        }
-        let new_mark = max_bucket_ts.max(last_rolled);
+        // Strict incremental window (last_rolled, cutoff]; a small lookback only
+        // gives the de-glitch walk prior-value context across the window edge.
+        let lookback = (last_rolled - ROLLUP_DEGLITCH_LOOKBACK_S).max(0.0);
+        let (written, max_bucket_end) =
+            Self::aggregate_and_upsert(&tx, last_rolled, cutoff, lookback)?;
+        let new_mark = max_bucket_end.max(last_rolled);
         tx.execute(
             "INSERT INTO rollup_state(kind, last_rolled_ts, last_run_ts) VALUES (?, ?, ?)
              ON CONFLICT(kind) DO UPDATE SET last_rolled_ts=excluded.last_rolled_ts, last_run_ts=excluded.last_run_ts",
@@ -969,21 +1030,155 @@ impl Db {
         Ok(json!({"buckets_written": written, "last_rolled_ts": new_mark, "cutoff_ts": cutoff}))
     }
 
-    /// Wipe all rollups and recompute them from the raw samples still on disk,
-    /// using the de-glitched aggregation. Repairs buckets that the old
-    /// MAX-MIN writer inflated from stale frames. Buckets older than the raw
-    /// retention window are gone but were already final, so nothing is lost.
-    pub fn rebuild_rollups(&self) -> Result<Value> {
+    /// Core rollup writer: de-glitch-aggregate every raw sample in
+    /// `(agg_start, agg_end)` into per-minute (bucket, session) rows and **upsert**
+    /// them (`ON CONFLICT … DO UPDATE`). `deglitch_start (<= agg_start)` only
+    /// widens the de-glitch *read* for boundary context — those older increments
+    /// are not written. Returns `(buckets_written, max_bucket_end_ts)` where the
+    /// end ts is `bucket_ts + resolution` of the newest bucket (0.0 if none).
+    /// **Never deletes** — safe to run over ranges whose older raw is already
+    /// pruned. Caller owns `rollup_state`.
+    fn aggregate_and_upsert(
+        c: &Connection,
+        agg_start: f64,
+        agg_end: f64,
+        deglitch_start: f64,
+    ) -> Result<(i64, f64)> {
+        let res_s = ROLLUP_RESOLUTION_S;
+
+        // De-glitched per-(bucket,session) metric deltas over the context-widened read.
+        let mut steps_s: Vec<(i64, i64, i64)> = Vec::new();
+        let mut dist_s: Vec<(i64, i64, i64)> = Vec::new();
+        let mut cal_s: Vec<(i64, i64, i64)> = Vec::new();
+        let mut dur_s: Vec<(i64, i64, i64)> = Vec::new();
         {
-            let c = self.conn();
-            c.execute("DELETE FROM sample_rollups_1m", [])?;
-            c.execute(
-                "INSERT INTO rollup_state(kind, last_rolled_ts, last_run_ts) VALUES (?, 0, NULL)
-                 ON CONFLICT(kind) DO UPDATE SET last_rolled_ts = 0",
-                params![ROLLUP_KIND],
+            let mut q = c.prepare(
+                "SELECT CAST(s.ts AS INTEGER), s.session_id, s.steps, s.distance_raw,
+                        s.calories, s.duration_s
+                 FROM samples s WHERE s.ts > ? AND s.ts < ? AND s.session_id IS NOT NULL
+                 ORDER BY s.ts, s.id",
             )?;
+            let mut rows = q.query(params![deglitch_start, agg_end])?;
+            while let Some(r) = rows.next()? {
+                let ts: i64 = r.get(0)?;
+                let sess: i64 = r.get(1)?;
+                if let Some(v) = r.get::<_, Option<i64>>(2)? {
+                    steps_s.push((ts, sess, v));
+                }
+                if let Some(v) = r.get::<_, Option<i64>>(3)? {
+                    dist_s.push((ts, sess, v));
+                }
+                if let Some(v) = r.get::<_, Option<i64>>(4)? {
+                    cal_s.push((ts, sess, v));
+                }
+                if let Some(v) = r.get::<_, Option<i64>>(5)? {
+                    dur_s.push((ts, sess, v));
+                }
+            }
         }
-        self.rollup_samples()
+        let steps_d = deglitch_bucketed(&steps_s, res_s, 50, 10);
+        let dist_d = deglitch_bucketed(&dist_s, res_s, 200, 10);
+        let cal_d = deglitch_bucketed(&cal_s, res_s, 100, 10);
+        let dur_d = deglitch_bucketed(&dur_s, res_s, 600, 10);
+
+        // Stateless speed/running/total aggregates per (bucket,session) over the
+        // strict (agg_start, agg_end) window — the authoritative bucket set.
+        let agg_sql = format!(
+            "SELECT (CAST(s.ts AS INTEGER) / {res_s}) * {res_s} AS bucket_ts, s.session_id,
+                    MIN(CASE WHEN s.speed_raw > 0 THEN s.speed_raw END) AS speed_raw_min,
+                    AVG(CASE WHEN s.speed_raw > 0 THEN s.speed_raw END) AS speed_raw_avg,
+                    MAX(CASE WHEN s.speed_raw > 0 THEN s.speed_raw END) AS speed_raw_max,
+                    SUM(CASE WHEN s.status = 3 THEN 1 ELSE 0 END) AS running_samples,
+                    COUNT(*) AS total_samples
+             FROM samples s WHERE s.ts > ? AND s.ts < ? AND s.session_id IS NOT NULL
+             GROUP BY bucket_ts, s.session_id"
+        );
+        let mut agg = c.prepare(&agg_sql)?;
+        let groups: Vec<RollupRow> = agg
+            .query_map(params![agg_start, agg_end], |r| {
+                let bucket_ts: i64 = r.get(0)?;
+                let session_id: Option<i64> = r.get(1)?;
+                let key = (bucket_ts, session_id.unwrap_or(0));
+                Ok(RollupRow {
+                    bucket_ts,
+                    session_id,
+                    steps_delta: *steps_d.get(&key).unwrap_or(&0),
+                    distance_raw_delta: *dist_d.get(&key).unwrap_or(&0),
+                    calories_delta: *cal_d.get(&key).unwrap_or(&0),
+                    duration_s_delta: *dur_d.get(&key).unwrap_or(&0),
+                    speed_raw_min: r.get(2)?,
+                    speed_raw_avg: r.get(3)?,
+                    speed_raw_max: r.get(4)?,
+                    running_samples: r.get::<_, Option<i64>>(5)?.unwrap_or(0),
+                    total_samples: r.get::<_, Option<i64>>(6)?.unwrap_or(0),
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(agg);
+
+        let mut written = 0i64;
+        let mut max_bucket_end = 0.0f64;
+        for r in &groups {
+            c.execute(
+                "INSERT INTO sample_rollups_1m(bucket_ts, session_id, steps_delta, distance_raw_delta,
+                    calories_delta, duration_s_delta, speed_raw_min, speed_raw_avg, speed_raw_max,
+                    running_samples, total_samples)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 ON CONFLICT(bucket_ts, session_id) DO UPDATE SET
+                    steps_delta=excluded.steps_delta, distance_raw_delta=excluded.distance_raw_delta,
+                    calories_delta=excluded.calories_delta, duration_s_delta=excluded.duration_s_delta,
+                    speed_raw_min=excluded.speed_raw_min, speed_raw_avg=excluded.speed_raw_avg,
+                    speed_raw_max=excluded.speed_raw_max, running_samples=excluded.running_samples,
+                    total_samples=excluded.total_samples",
+                params![
+                    r.bucket_ts, r.session_id, r.steps_delta, r.distance_raw_delta,
+                    r.calories_delta, r.duration_s_delta, r.speed_raw_min, r.speed_raw_avg,
+                    r.speed_raw_max, r.running_samples, r.total_samples
+                ],
+            )?;
+            written += 1;
+            max_bucket_end = max_bucket_end.max((r.bucket_ts + res_s) as f64);
+        }
+        Ok((written, max_bucket_end))
+    }
+
+    /// Non-destructive rollup (re)builder over `[from_ts, to_ts)`. Recomputes and
+    /// upserts buckets **only for minutes that actually have raw samples** in the
+    /// range, and **never deletes** buckets — so it is safe to run after raw has
+    /// been pruned (buckets whose raw is gone are simply left untouched). Advances
+    /// `last_rolled_ts` to cover the range (clamped to now, never rewound) so
+    /// day/hour/timeseries reads treat the range as rolled. Replaces the old
+    /// destructive `rebuild_rollups` (which DELETEd every bucket first — a data-loss
+    /// footgun once retention actually prunes raw).
+    pub fn backfill_rollups(&self, from_ts: f64, to_ts: f64) -> Result<Value> {
+        let now = now_ts();
+        let mut c = self.conn();
+        let last_rolled: f64 = c
+            .query_row(
+                "SELECT last_rolled_ts FROM rollup_state WHERE kind=?",
+                params![ROLLUP_KIND],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(0.0);
+        let tx = c.transaction()?;
+        let deglitch_start = (from_ts - ROLLUP_DEGLITCH_LOOKBACK_S).max(0.0);
+        let (written, max_bucket_end) =
+            Self::aggregate_and_upsert(&tx, from_ts, to_ts, deglitch_start)?;
+        // Advance the floor to cover what we rolled, never past now, never backward.
+        let new_mark = last_rolled.max(max_bucket_end.min(now));
+        tx.execute(
+            "INSERT INTO rollup_state(kind, last_rolled_ts, last_run_ts) VALUES (?, ?, ?)
+             ON CONFLICT(kind) DO UPDATE SET last_rolled_ts=excluded.last_rolled_ts, last_run_ts=excluded.last_run_ts",
+            params![ROLLUP_KIND, new_mark, now],
+        )?;
+        tx.commit()?;
+        Ok(json!({
+            "buckets_written": written,
+            "last_rolled_ts": new_mark,
+            "from_ts": from_ts,
+            "to_ts": to_ts,
+        }))
     }
 
     pub fn prune_raw_samples(&self, retention_s: f64) -> Result<usize> {
@@ -1008,22 +1203,36 @@ impl Db {
 
     // --- export / import -------------------------------------------------
 
-    pub fn export_all(&self) -> Result<Value> {
+    /// Serialise the durable tiers for backup / sync. By default (`include_raw =
+    /// false`) this is **sessions + 1-minute rollups + speed marks** — NO raw
+    /// samples. Raw is ~99.5% of the bytes, serves no product feature beyond
+    /// today, and is deliberately kept out of the sync/backup path (a syncing
+    /// peer must not be able to resurrect pruned history). Pass `include_raw =
+    /// true` for a full manual archive (the UI "export with raw" button). The
+    /// dump `version` stays 2 and remains importable by older builds; the extra
+    /// `speed_marks` key is ignored by importers that don't know it.
+    pub fn export_all(&self, include_raw: bool) -> Result<Value> {
         let c = self.conn();
         let sessions = rows_as_json(&c, "SELECT * FROM sessions ORDER BY id")?;
-        let samples = rows_as_json(&c, "SELECT * FROM samples ORDER BY id")?;
         let rollups = rows_as_json(
             &c,
             "SELECT * FROM sample_rollups_1m ORDER BY bucket_ts, session_id",
         )?;
-        Ok(json!({
+        let speed_marks = rows_as_json(&c, "SELECT * FROM speed_marks ORDER BY id")?;
+        let mut out = json!({
             "format": "lifespan-sc110-dump",
             "version": 2,
             "exported_at": now_ts(),
+            "include_raw": include_raw,
             "sessions": sessions,
-            "samples": samples,
             "rollups_1m": rollups,
-        }))
+            "speed_marks": speed_marks,
+        });
+        if include_raw {
+            let samples = rows_as_json(&c, "SELECT * FROM samples ORDER BY id")?;
+            out["samples"] = json!(samples);
+        }
+        Ok(out)
     }
 
     /// Load a previous export back in. mode="merge" skips sessions whose
@@ -1044,9 +1253,20 @@ impl Db {
         let sessions = dump.get("sessions").and_then(|v| v.as_array()).unwrap_or(&empty);
         let samples = dump.get("samples").and_then(|v| v.as_array()).unwrap_or(&empty);
         let rollups = dump.get("rollups_1m").and_then(|v| v.as_array()).unwrap_or(&empty);
+        let speed_marks = dump.get("speed_marks").and_then(|v| v.as_array()).unwrap_or(&empty);
+
+        // Belt-and-braces retention guard: never let an import (a stale peer or an
+        // old full backup) resurrect raw samples older than the live retention
+        // window. Rollups and sessions still merge fully — only ancient RAW is
+        // dropped, because that is the payload the prune loop is meant to shed.
+        let raw_cutoff = now_ts() - IMPORT_MAX_RAW_AGE_S;
 
         let mut counts = serde_json::Map::new();
-        for k in ["sessions", "samples", "rollups", "skipped_sessions", "skipped_samples", "skipped_rollups"] {
+        for k in [
+            "sessions", "samples", "rollups", "speed_marks",
+            "skipped_sessions", "skipped_samples", "skipped_rollups", "skipped_speed_marks",
+            "skipped_old_samples",
+        ] {
             counts.insert(k.into(), json!(0));
         }
         fn bump(m: &mut serde_json::Map<String, Value>, k: &str) {
@@ -1064,6 +1284,7 @@ impl Db {
             tx.execute("DELETE FROM sample_rollups_1m", [])?;
             tx.execute("DELETE FROM samples", [])?;
             tx.execute("DELETE FROM sessions", [])?;
+            tx.execute("DELETE FROM speed_marks", [])?;
             tx.execute("DELETE FROM rollup_state", [])?;
         }
 
@@ -1120,6 +1341,11 @@ impl Db {
                 Some(t) => t,
                 None => continue,
             };
+            // Never re-insert raw older than the retention window (both modes).
+            if ts < raw_cutoff {
+                bump(&mut counts, "skipped_old_samples");
+                continue;
+            }
             let new_sid = i64_of(sm, "session_id").and_then(|o| id_map.get(&o).copied());
             if mode == "merge" {
                 let dup: Option<i64> = tx
@@ -1185,8 +1411,121 @@ impl Db {
             bump(&mut counts, "rollups");
         }
 
+        // Speed marks (present in v2+ dumps; older dumps simply omit the key).
+        for mk in speed_marks {
+            let ts = match f64_of(mk, "ts") {
+                Some(t) => t,
+                None => continue,
+            };
+            let set_speed = f64_of(mk, "set_speed").unwrap_or(0.0);
+            if mode == "merge" {
+                let dup: Option<i64> = tx
+                    .query_row(
+                        "SELECT 1 FROM speed_marks WHERE ts = ? AND set_speed = ? LIMIT 1",
+                        params![ts, set_speed],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                if dup.is_some() {
+                    bump(&mut counts, "skipped_speed_marks");
+                    continue;
+                }
+            }
+            tx.execute(
+                "INSERT INTO speed_marks(ts, set_speed, unit) VALUES (?, ?, ?)",
+                params![ts, set_speed, str_of(mk, "unit").unwrap_or_else(|| "km/h".into())],
+            )?;
+            bump(&mut counts, "speed_marks");
+        }
+
         tx.commit()?;
         Ok(Value::Object(counts))
+    }
+
+    /// Cumulative walking on `date` (local) up to `until_sod` seconds after that
+    /// day's local midnight — powers "steps vs the same point on a previous day".
+    /// Reads the durable 1-minute rollups (correct even after raw is pruned) and,
+    /// for a still-partly-unrolled `date` (i.e. today), unions the raw tail via
+    /// the `raw_floor` boundary so it doesn't double-count. Uses the same local
+    /// date / local-midnight convention as the rest of the engine.
+    pub fn timeofday_totals(&self, date: &str, until_sod: i64) -> Result<Value> {
+        let c = self.conn();
+        let midnight = match local_midnight(date) {
+            Some(m) => m,
+            // Unparseable date → empty rather than error (caller validated shape).
+            None => return Ok(json!({"date": date, "until_sod": until_sod, "steps": 0, "distance_raw": 0})),
+        };
+        let end = midnight + until_sod as f64;
+        let floor = raw_floor(&c);
+
+        // Tier-1: rollup deltas for buckets on this local day, up to the cutoff.
+        let (mut steps, mut dist): (i64, i64) = c.query_row(
+            "SELECT COALESCE(SUM(steps_delta),0), COALESCE(SUM(distance_raw_delta),0)
+             FROM sample_rollups_1m
+             WHERE bucket_ts >= ? AND bucket_ts <= ?",
+            params![midnight as i64, end as i64],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+
+        // Tier-0 tail: raw increments at/after `floor` up to the same cutoff. For
+        // a fully-rolled past date `floor` is beyond `end`, so nothing is added.
+        if end >= floor {
+            let mut steps_v: Vec<(f64, i64)> = Vec::new();
+            let mut dist_v: Vec<(f64, i64)> = Vec::new();
+            let mut stmt = c.prepare(
+                "SELECT s.ts, s.steps, s.distance_raw
+                 FROM samples s JOIN sessions se ON se.id = s.session_id
+                 WHERE se.local_date = ? AND s.ts <= ? ORDER BY s.ts, s.id",
+            )?;
+            let mut rows = stmt.query(params![date, end])?;
+            while let Some(r) = rows.next()? {
+                let ts: f64 = r.get(0)?;
+                if let Some(v) = r.get::<_, Option<i64>>(1)? {
+                    steps_v.push((ts, v));
+                }
+                if let Some(v) = r.get::<_, Option<i64>>(2)? {
+                    dist_v.push((ts, v));
+                }
+            }
+            drop(rows);
+            drop(stmt);
+            steps += deglitch_tail_total(&steps_v, floor, 50, 10);
+            dist += deglitch_tail_total(&dist_v, floor, 200, 10);
+        }
+
+        Ok(json!({"date": date, "until_sod": until_sod, "steps": steps, "distance_raw": dist}))
+    }
+
+    /// One-time Phase-0 data-retention migration, gated by `PRAGMA user_version`.
+    /// Idempotent: runs its body exactly once (subsequent boots are a no-op).
+    ///
+    /// Order is critical (the whole point): **(a)** backfill 1-minute rollups over
+    /// the FULL existing raw history — this is the last moment minute-grain history
+    /// can be built, so it MUST happen before any prune — then **(b)** prune raw
+    /// older than the retention window, then **(c)** `VACUUM` to reclaim the space.
+    pub fn run_startup_migration(&self, retention_s: f64) -> Result<Value> {
+        let version: i64 = {
+            let c = self.conn();
+            c.pragma_query_value(None, "user_version", |r| r.get(0))?
+        };
+        if version >= 1 {
+            return Ok(json!({"ran": false, "user_version": version}));
+        }
+        // (a) build rollups from all raw still on disk (before it can be pruned).
+        let backfill = self.backfill_rollups(0.0, now_ts())?;
+        // (b) prune raw beyond retention (safe now that history is in rollups).
+        let pruned = self.prune_raw_samples(retention_s)?;
+        // (c) reclaim freed pages, then mark the migration done.
+        {
+            let c = self.conn();
+            c.execute_batch("VACUUM;")?;
+            c.pragma_update(None, "user_version", 1)?;
+        }
+        Ok(json!({
+            "ran": true,
+            "backfill": backfill,
+            "pruned_samples": pruned,
+        }))
     }
 }
 
@@ -1345,11 +1684,14 @@ mod tests {
 
     #[test]
     fn export_import_round_trips() {
+        // Use recent timestamps so the raw sample survives the import retention
+        // guard — this exercises the full v2 (WITH samples) round-trip.
         let db = mem();
-        let sid = db.open_session(1000.0, "km/h", Some(0), Some(0)).unwrap();
-        db.insert_sample(Some(sid), 1001.0, Some(5), Some(10), Some(60), Some(2), Some(1), Some(3)).unwrap();
-        db.close_session(sid, 1002.0, Some(5), Some(10), Some(2), Some(1), Some(60), "stopped").unwrap();
-        let dump = db.export_all().unwrap();
+        let t = now_ts() - 100.0;
+        let sid = db.open_session(t, "km/h", Some(0), Some(0)).unwrap();
+        db.insert_sample(Some(sid), t + 1.0, Some(5), Some(10), Some(60), Some(2), Some(1), Some(3)).unwrap();
+        db.close_session(sid, t + 2.0, Some(5), Some(10), Some(2), Some(1), Some(60), "stopped").unwrap();
+        let dump = db.export_all(true).unwrap();
 
         let db2 = mem();
         let res = db2.import_dump(&dump, "merge").unwrap();
@@ -1358,6 +1700,7 @@ mod tests {
         // Re-importing the same dump is idempotent (skips duplicates).
         let res2 = db2.import_dump(&dump, "merge").unwrap();
         assert_eq!(res2["skipped_sessions"].as_i64().unwrap(), 1);
+        assert_eq!(res2["skipped_samples"].as_i64().unwrap(), 1);
         assert_eq!(db2.list_sessions(10).unwrap().len(), 1);
     }
 
@@ -1365,5 +1708,208 @@ mod tests {
     fn rejects_foreign_dump() {
         let db = mem();
         assert!(db.import_dump(&serde_json::json!({"format": "nope"}), "merge").is_err());
+    }
+
+    // --- Phase 0: retention refactor -------------------------------------
+
+    /// Insert a session ~10 min ago with samples on a minute boundary so they all
+    /// fall before the rollup cutoff (now-60) and can be rolled. Returns the
+    /// session id and the local date the samples belong to.
+    fn seed_rollable_session(db: &Db, offset_ago_s: i64, steps: &[u32]) -> (i64, String) {
+        let base = (((now_ts() as i64 - offset_ago_s) / 60) * 60) as f64 + 1.0;
+        let sid = db.open_session(base, "km/h", Some(0), Some(0)).unwrap();
+        for (i, st) in steps.iter().enumerate() {
+            // distance tracks steps/4, calories steps/10, duration = seconds.
+            db.insert_sample(
+                Some(sid), base + i as f64, Some(*st), Some(i as u32),
+                Some(60), Some(*st / 4), Some(*st / 10), Some(3),
+            ).unwrap();
+        }
+        db.close_session(sid, base + steps.len() as f64, steps.last().copied(),
+            Some(steps.len() as u32), Some(steps.last().copied().unwrap_or(0) / 4),
+            Some(steps.last().copied().unwrap_or(0) / 10), Some(60), "stopped").unwrap();
+        (sid, local_date(base))
+    }
+
+    #[test]
+    fn export_default_omits_raw_include_raw_adds_it() {
+        let db = mem();
+        seed_rollable_session(&db, 600, &[0, 10, 20, 30, 40]);
+
+        let default = db.export_all(false).unwrap();
+        // No samples key (or empty) on the default export.
+        assert!(
+            default.get("samples").is_none(),
+            "default export must not carry raw samples"
+        );
+        assert!(default.get("sessions").unwrap().as_array().unwrap().len() == 1);
+        assert!(default.get("rollups_1m").is_some());
+        assert!(default.get("speed_marks").is_some());
+
+        let full = db.export_all(true).unwrap();
+        assert!(
+            !full.get("samples").unwrap().as_array().unwrap().is_empty(),
+            "include_raw export must carry raw samples"
+        );
+    }
+
+    #[test]
+    fn day_and_hour_totals_from_rollups_match_raw() {
+        let db = mem();
+        // Monotonic climb 0..90 (no glitches) so the de-glitched total == 90.
+        let steps: Vec<u32> = (0..=90).step_by(10).collect(); // 0,10,...,90
+        let (_sid, date) = seed_rollable_session(&db, 600, &steps);
+
+        // Golden: raw-only totals (nothing rolled yet, floor == 0).
+        let raw_day = db.day_totals(&date).unwrap()["steps"].as_i64().unwrap();
+        let raw_hour_sum: i64 = db.hourly_steps(&date).unwrap().iter()
+            .map(|h| h["steps"].as_i64().unwrap()).sum();
+        assert_eq!(raw_day, 90);
+        assert_eq!(raw_hour_sum, 90);
+
+        // Roll every sample up (all < cutoff → floor advances past them).
+        db.rollup_samples().unwrap();
+        // With raw still present, the union (rollups + empty tail) must match.
+        assert_eq!(db.day_totals(&date).unwrap()["steps"].as_i64().unwrap(), raw_day);
+        let rolled_hour_sum: i64 = db.hourly_steps(&date).unwrap().iter()
+            .map(|h| h["steps"].as_i64().unwrap()).sum();
+        assert_eq!(rolled_hour_sum, raw_hour_sum);
+
+        // Now DELETE all raw — totals must be unchanged (pure rollup path).
+        db.conn().execute("DELETE FROM samples", []).unwrap();
+        assert_eq!(db.day_totals(&date).unwrap()["steps"].as_i64().unwrap(), raw_day);
+        let pruned_hour_sum: i64 = db.hourly_steps(&date).unwrap().iter()
+            .map(|h| h["steps"].as_i64().unwrap()).sum();
+        assert_eq!(pruned_hour_sum, raw_hour_sum);
+    }
+
+    #[test]
+    fn backfill_is_idempotent_and_never_deletes_orphaned_buckets() {
+        let db = mem();
+        let steps: Vec<u32> = (0..=100).step_by(10).collect();
+        let (_sid, _date) = seed_rollable_session(&db, 600, &steps);
+
+        let count = |db: &Db| -> i64 {
+            db.conn().query_row("SELECT COUNT(*) FROM sample_rollups_1m", [], |r| r.get(0)).unwrap()
+        };
+        let sum = |db: &Db| -> i64 {
+            db.conn().query_row("SELECT COALESCE(SUM(steps_delta),0) FROM sample_rollups_1m", [], |r| r.get(0)).unwrap()
+        };
+
+        db.backfill_rollups(0.0, now_ts()).unwrap();
+        let (c1, s1) = (count(&db), sum(&db));
+        assert!(c1 > 0);
+        assert_eq!(s1, 100, "backfilled deltas sum to the climb");
+
+        // Idempotent: a second full backfill changes nothing.
+        db.backfill_rollups(0.0, now_ts()).unwrap();
+        assert_eq!(count(&db), c1);
+        assert_eq!(sum(&db), s1);
+
+        // Simulate a pruned past: raw gone, rollups remain. Backfill must NOT
+        // delete the now-orphaned buckets.
+        db.conn().execute("DELETE FROM samples", []).unwrap();
+        let res = db.backfill_rollups(0.0, now_ts()).unwrap();
+        assert_eq!(res["buckets_written"].as_i64().unwrap(), 0);
+        assert_eq!(count(&db), c1, "buckets whose raw is gone must survive backfill");
+        assert_eq!(sum(&db), s1);
+    }
+
+    #[test]
+    fn import_skips_ancient_raw_but_keeps_sessions_and_rollups() {
+        let db = mem();
+        let now = now_ts();
+        let recent_ts = now - 100.0;
+        let ancient_ts = now - 30.0 * 86400.0; // 30 days old
+        let dump = json!({
+            "format": "lifespan-sc110-dump",
+            "version": 2,
+            "sessions": [{
+                "id": 1, "started_ts": recent_ts, "ended_ts": recent_ts + 5.0,
+                "local_date": local_date(recent_ts), "display_unit": "km/h",
+                "start_steps": 0, "steps_end": 50,
+            }],
+            "samples": [
+                {"id": 1, "session_id": 1, "ts": recent_ts, "steps": 10},
+                {"id": 2, "session_id": 1, "ts": ancient_ts, "steps": 20},
+            ],
+            "rollups_1m": [{
+                "bucket_ts": (recent_ts as i64 / 60) * 60, "session_id": 1,
+                "steps_delta": 40, "distance_raw_delta": 10, "calories_delta": 4,
+                "duration_s_delta": 60, "running_samples": 24, "total_samples": 24,
+            }],
+        });
+        let res = db.import_dump(&dump, "merge").unwrap();
+        assert_eq!(res["sessions"].as_i64().unwrap(), 1);
+        assert_eq!(res["rollups"].as_i64().unwrap(), 1);
+        assert_eq!(res["samples"].as_i64().unwrap(), 1, "recent raw kept");
+        assert_eq!(res["skipped_old_samples"].as_i64().unwrap(), 1, "ancient raw dropped");
+    }
+
+    #[test]
+    fn migration_runs_once_prunes_old_raw_keeps_totals() {
+        let db = mem();
+        // An OLD day (10 days ago) that will be pruned, plus a recent day.
+        let old_steps: Vec<u32> = (0..=80).step_by(10).collect();
+        let (_o, old_date) = seed_rollable_session(&db, 10 * 86400, &old_steps);
+        let recent_steps: Vec<u32> = (0..=50).step_by(10).collect();
+        let (_r, _recent_date) = seed_rollable_session(&db, 600, &recent_steps);
+
+        // Golden day total for the old date (raw present, floor 0).
+        let old_total_before = db.day_totals(&old_date).unwrap()["steps"].as_i64().unwrap();
+        assert_eq!(old_total_before, 80);
+
+        let m1 = db.run_startup_migration(7.0 * 86400.0).unwrap();
+        assert_eq!(m1["ran"].as_bool().unwrap(), true);
+        assert!(m1["pruned_samples"].as_i64().unwrap() >= old_steps.len() as i64);
+
+        // Old raw is gone...
+        let old_raw: i64 = db.conn().query_row(
+            "SELECT COUNT(*) FROM samples s JOIN sessions se ON se.id=s.session_id WHERE se.local_date=?",
+            params![old_date], |r| r.get(0)).unwrap();
+        assert_eq!(old_raw, 0, "old raw pruned");
+        // ...but the day total survives, served from rollups.
+        assert_eq!(db.day_totals(&old_date).unwrap()["steps"].as_i64().unwrap(), old_total_before);
+
+        // Idempotent: a second run is a no-op (no further prune / vacuum).
+        let m2 = db.run_startup_migration(7.0 * 86400.0).unwrap();
+        assert_eq!(m2["ran"].as_bool().unwrap(), false);
+    }
+
+    #[test]
+    fn timeofday_cuts_cumulative_at_sod() {
+        let db = mem();
+        // Build a day two hours ago: hour A gets +30 steps, hour B gets +40.
+        let midnight = local_midnight(&local_date(now_ts())).unwrap();
+        // Place buckets at 09:00 (sod 32400) and 10:00 (sod 36000) local.
+        let sid = db.open_session(midnight + 100.0, "km/h", Some(0), Some(0)).unwrap();
+        db.close_session(sid, midnight + 4000.0, Some(70), Some(60), Some(17), Some(7), Some(60), "stopped").unwrap();
+        let insert_bucket = |sod: i64, steps: i64, dist: i64| {
+            db.conn().execute(
+                "INSERT INTO sample_rollups_1m(bucket_ts, session_id, steps_delta, distance_raw_delta,
+                    calories_delta, duration_s_delta, running_samples, total_samples)
+                 VALUES (?,?,?,?,0,60,24,24)",
+                params![midnight as i64 + sod, sid, steps, dist],
+            ).unwrap();
+        };
+        insert_bucket(32_400, 30, 8); // 09:00
+        insert_bucket(36_000, 40, 10); // 10:00
+        let date = local_date(now_ts());
+
+        // Before 09:00 → nothing.
+        let a = db.timeofday_totals(&date, 30_000).unwrap();
+        assert_eq!(a["steps"].as_i64().unwrap(), 0);
+        // Through 09:30 → only the 09:00 bucket.
+        let b = db.timeofday_totals(&date, 34_200).unwrap();
+        assert_eq!(b["steps"].as_i64().unwrap(), 30);
+        assert_eq!(b["distance_raw"].as_i64().unwrap(), 8);
+        // Through 10:30 → both buckets.
+        let c = db.timeofday_totals(&date, 37_800).unwrap();
+        assert_eq!(c["steps"].as_i64().unwrap(), 70);
+        assert_eq!(c["distance_raw"].as_i64().unwrap(), 18);
+
+        // A date with no data is zero, not an error.
+        let empty = db.timeofday_totals("2000-01-01", 86_400).unwrap();
+        assert_eq!(empty["steps"].as_i64().unwrap(), 0);
     }
 }

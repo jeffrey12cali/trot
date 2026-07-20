@@ -73,7 +73,7 @@ fn origin_host(origin: &str) -> Option<&str> {
     (!host.is_empty()).then_some(host)
 }
 
-const RETENTION_DAYS: f64 = 5.0;
+const RETENTION_DAYS: f64 = 7.0;
 const ROLLUP_INTERVAL_S: f64 = 300.0;
 
 pub fn router(state: Arc<AppState>) -> Router {
@@ -81,6 +81,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/state", get(api_state))
         .route("/api/today", get(api_today))
         .route("/api/analytics", get(api_analytics))
+        .route("/api/timeofday", get(api_timeofday))
         .route("/api/sessions", get(api_sessions))
         .route("/api/sessions/:id", get(api_session_detail))
         .route("/api/health", get(api_health))
@@ -274,6 +275,39 @@ async fn api_analytics(
 }
 
 #[derive(Deserialize)]
+struct TimeOfDayParams {
+    date: Option<String>,
+    until_sod: Option<i64>,
+}
+
+/// Cumulative walking on a LOCAL `date` up to `until_sod` seconds since that
+/// day's local midnight — for "steps vs the same point on a previous day".
+/// Read-only (no token), served from the durable 1-minute rollups (correct even
+/// after raw is pruned). `{steps, distance_raw}`; a data-less date is 0, not 404.
+async fn api_timeofday(
+    State(s): State<Arc<AppState>>,
+    Query(p): Query<TimeOfDayParams>,
+) -> Response {
+    let date = match p.date {
+        Some(d) => d,
+        None => return (StatusCode::BAD_REQUEST, "date is required").into_response(),
+    };
+    // Validate the local-date shape (same "YYYY-MM-DD" convention as sessions).
+    if chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d").is_err() {
+        return (StatusCode::BAD_REQUEST, "date must be YYYY-MM-DD").into_response();
+    }
+    let until_sod = match p.until_sod {
+        Some(u) if (0..=90_000).contains(&u) => u,
+        Some(_) => return (StatusCode::BAD_REQUEST, "until_sod out of range").into_response(),
+        None => return (StatusCode::BAD_REQUEST, "until_sod is required").into_response(),
+    };
+    match s.db.timeofday_totals(&date, until_sod) {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
 struct SessionsParams {
     #[serde(default = "default_limit")]
     limit: i64,
@@ -410,8 +444,9 @@ async fn api_rollup_status(State(s): State<Arc<AppState>>) -> Json<Value> {
 struct RollupRunParams {
     #[serde(default = "default_true")]
     prune: bool,
-    /// Wipe and recompute every rollup bucket from raw (repairs buckets the old
-    /// MAX-MIN writer corrupted). Skips pruning so the raw it rebuilds from stays.
+    /// Non-destructively (re)compute rollup buckets from the full raw range
+    /// (repairs buckets the old MAX-MIN writer corrupted) — never deletes buckets
+    /// whose raw is gone. Skips pruning so the raw it rebuilds from stays.
     #[serde(default)]
     rebuild: bool,
 }
@@ -424,7 +459,13 @@ async fn api_rollup_run(
     Query(p): Query<RollupRunParams>,
 ) -> Json<Value> {
     if p.rebuild {
-        let res = s.db.rebuild_rollups().unwrap_or_else(|_| json!({}));
+        // Safe full-history backfill over the entire raw range (0..now): upserts
+        // buckets only where raw exists, never deletes — data-loss-free once raw
+        // pruning is real.
+        let res = s
+            .db
+            .backfill_rollups(0.0, crate::db::now_ts())
+            .unwrap_or_else(|_| json!({}));
         let mut out = json!({"ok": true, "pruned_samples": 0, "rebuilt": true});
         if let (Value::Object(ref mut o), Value::Object(r)) = (&mut out, res) {
             for (k, v) in r {
@@ -447,8 +488,20 @@ async fn api_rollup_run(
     Json(out)
 }
 
-async fn api_export(State(s): State<Arc<AppState>>) -> Response {
-    let dump = s.db.export_all().unwrap_or_else(|_| json!({}));
+#[derive(Deserialize)]
+struct ExportParams {
+    /// `include=raw` re-adds the full raw `samples` array (manual backup). The
+    /// default export is sessions + rollups_1m + speed_marks only — no raw.
+    #[serde(default)]
+    include: String,
+}
+
+async fn api_export(
+    State(s): State<Arc<AppState>>,
+    Query(p): Query<ExportParams>,
+) -> Response {
+    let include_raw = p.include.eq_ignore_ascii_case("raw");
+    let dump = s.db.export_all(include_raw).unwrap_or_else(|_| json!({}));
     let body = serde_json::to_string(&dump).unwrap_or_default();
     let filename = format!(
         "lifespan-sc110-{}.json",
@@ -472,7 +525,8 @@ async fn api_export(State(s): State<Arc<AppState>>) -> Response {
 /// first-run/empty state and reload their data afterwards. The snapshot persists
 /// across restarts and reinstalls (same data dir).
 async fn api_data_reset(State(s): State<Arc<AppState>>) -> Json<Value> {
-    let dump = match s.db.export_all() {
+    // Full snapshot includes raw so a reset→restore round-trip loses nothing.
+    let dump = match s.db.export_all(true) {
         Ok(d) => d,
         Err(e) => return Json(json!({"ok": false, "error": format!("export failed: {e}")})),
     };
