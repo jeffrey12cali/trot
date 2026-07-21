@@ -143,6 +143,15 @@ fn deglitch_walk(values: &[i64], spike: i64, reset_max: i64, mut emit: impl FnMu
         }
         match prev {
             None => {
+                // Drop a stale-HIGH opening frame the next sample contradicts by
+                // more than `spike`: the interior spike rule needs both neighbours,
+                // but the first sample has only the forward one, so a garbage
+                // opening reading (e.g. 5000 before a real 1800) would otherwise be
+                // counted as baseline steps. Leave `prev` unset so the next sample
+                // becomes the baseline instead.
+                if i + 1 < n && v - values[i + 1] > spike {
+                    continue;
+                }
                 // First accepted reading already reflects steps walked today.
                 let base = v.max(0);
                 if base > 0 {
@@ -250,6 +259,12 @@ fn deglitch_tail(
         let counts = ts >= floor;
         match prev {
             None => {
+                // Drop a stale-HIGH opening frame (see `deglitch_walk`): a garbage
+                // first reading must not become a baseline. The next sample becomes
+                // the baseline instead.
+                if i + 1 < n && v - samples[i + 1].1 > spike {
+                    continue;
+                }
                 let base = v.max(0);
                 if base > 0 && counts {
                     emit(i, base);
@@ -856,26 +871,73 @@ impl Db {
 
         match metric {
             "steps" | "calories" | "distance_raw" => {
-                let (col, delta_col) = match metric {
-                    "steps" => ("s.steps", "r.steps_delta"),
-                    "calories" => ("s.calories", "r.calories_delta"),
-                    _ => ("s.distance_raw", "r.distance_raw_delta"),
+                let (col, delta_col, spike, reset) = match metric {
+                    "steps" => ("s.steps", "r.steps_delta", 50i64, 10i64),
+                    "calories" => ("s.calories", "r.calories_delta", 100i64, 10i64),
+                    _ => ("s.distance_raw", "r.distance_raw_delta", 200i64, 10i64),
                 };
-                let raw_sql = format!(
-                    "SELECT inner_bucket AS bucket_ts, SUM(per_session_delta) AS value FROM (
-                        SELECT s.session_id, {raw_bucket} AS inner_bucket,
-                               (MAX({col}) - MIN({col})) AS per_session_delta
-                        FROM samples s
-                        WHERE s.ts >= ? AND s.ts < ? AND {col} IS NOT NULL AND s.session_id IS NOT NULL
-                        GROUP BY s.session_id, inner_bucket
-                    ) GROUP BY inner_bucket"
-                );
+
+                // Rollup tier (below the raw floor): already de-glitched deltas.
                 let roll_sql = format!(
                     "SELECT {roll_bucket} AS bucket_ts, SUM({delta_col}) AS value
                      FROM sample_rollups_1m r WHERE r.bucket_ts >= ? AND r.bucket_ts < ? GROUP BY bucket_ts"
                 );
-                Self::accumulate_sum(&c, &raw_sql, effective_start, end_ts, &mut merged)?;
                 Self::accumulate_sum(&c, &roll_sql, start_ts, end_ts, &mut merged)?;
+
+                // Raw tail (at/after the floor): de-glitch it the SAME way the
+                // rollup writer does, instead of the old `MAX(col) - MIN(col)` per
+                // bucket — that let a single stale frame (e.g. 346 wedged between
+                // 1800 and 1891) spike a chart bucket that the day/hour views
+                // correctly suppress. We walk the continuous stream (increments
+                // only, no first-sample baseline — matching stored rollups) and
+                // bucket each accepted increment the same way the SQL would.
+                let bucket_of = |ts: f64| -> i64 {
+                    if resolution_s >= 86400 {
+                        local_midnight(&local_date(ts))
+                            .map(|m| m as i64)
+                            .unwrap_or((ts as i64 / resolution_s) * resolution_s)
+                    } else {
+                        (ts as i64 / resolution_s) * resolution_s
+                    }
+                };
+                let mut samples: Vec<(f64, i64)> = Vec::new();
+                {
+                    let raw_sql = format!(
+                        "SELECT s.ts, {col} FROM samples s
+                         WHERE s.ts >= ? AND s.ts < ? AND {col} IS NOT NULL AND s.session_id IS NOT NULL
+                         ORDER BY s.ts, s.id"
+                    );
+                    let mut stmt = c.prepare(&raw_sql)?;
+                    let mut rows = stmt.query(params![effective_start, end_ts])?;
+                    while let Some(r) = rows.next()? {
+                        samples.push((r.get(0)?, r.get(1)?));
+                    }
+                }
+                let n = samples.len();
+                let mut prev: Option<i64> = None;
+                for i in 0..n {
+                    let (ts, v) = samples[i];
+                    if i > 0 && i + 1 < n {
+                        let p = samples[i - 1].1;
+                        let nx = samples[i + 1].1;
+                        if (v - p > spike && v - nx > spike) || (p - v > spike && nx - v > spike) {
+                            continue;
+                        }
+                    }
+                    match prev {
+                        None => prev = Some(v),
+                        Some(pv) => {
+                            let d = v - pv;
+                            if d > 0 {
+                                merged.entry(bucket_of(ts)).or_insert((0.0, 0.0)).0 += d as f64;
+                                prev = Some(v);
+                            } else if d < 0 && (v <= reset || v * 2 < pv) {
+                                prev = Some(v);
+                            }
+                        }
+                    }
+                }
+
                 Ok(merged
                     .into_iter()
                     .map(|(ts, (v, _))| json!({"bucket_ts": ts, "value": v}))
@@ -1619,6 +1681,9 @@ mod tests {
         // Counter reset caught after it already climbed past reset_max (488 -> 42):
         // the drop is >half, so it's a reset and the post-reset climb (42->45) counts.
         assert_eq!(deglitch_total(&[400, 402, 42, 44, 45], 50, 10), 400 + 2 + 3);
+        // A garbage stale-HIGH opening frame is dropped, not counted as baseline:
+        // 1800 becomes the baseline, then +10 -> 1810 (was 5010 before the guard).
+        assert_eq!(deglitch_total(&[5000, 1800, 1810], 50, 10), 1810);
     }
 
     #[test]
@@ -1680,6 +1745,26 @@ mod tests {
             .unwrap();
         // Old MAX-MIN gave 1901-346 = 1555; de-glitched increments = 3+91+5+5.
         assert_eq!(delta, 104, "rollup writer must drop the stale 346 frame");
+    }
+
+    #[test]
+    fn timeseries_deglitches_raw_tail() {
+        let db = mem();
+        let base = now_ts() - 100.0;
+        let sid = db.open_session(base, "km/h", Some(0), Some(0)).unwrap();
+        // Same stale-frame shape as the day/hour tests: 346 wedged between 1800
+        // and 1891. Nothing is rolled yet (floor 0), so this exercises the pure
+        // raw-tail path of `timeseries`.
+        for (i, steps) in [1797u32, 1800, 346, 1891, 1896, 1901].iter().enumerate() {
+            db.insert_sample(Some(sid), base + i as f64, Some(*steps), Some(0), Some(60), Some(0), Some(0), Some(3)).unwrap();
+        }
+        let series = db
+            .timeseries("steps", 3600, now_ts() - 86_400.0, now_ts() + 1.0)
+            .unwrap();
+        let total: f64 = series.iter().map(|b| b["value"].as_f64().unwrap()).sum();
+        // De-glitched increments = 3 + 91 + 5 + 5 = 104. The old MAX-MIN path gave
+        // 1901 - 346 = 1555 — a phantom spike the day/hour views never showed.
+        assert_eq!(total as i64, 104, "timeseries raw tail must de-glitch, not MAX-MIN");
     }
 
     #[test]

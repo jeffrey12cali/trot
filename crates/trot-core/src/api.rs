@@ -104,16 +104,17 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/import", post(api_import))
         .route("/ws", get(ws_handler))
         // Security guard (runs first): rejects non-loopback Host headers
-        // (defeats DNS-rebinding) and requires the per-launch token on
+        // (defeats DNS-rebinding), rejects disallowed browser Origins (covers the
+        // /ws upgrade, which CORS does not), and requires the per-launch token on
         // state-changing /api calls (stops other local processes / cross-site
         // writes that could pair BLE devices or wipe the database).
         .layer(middleware::from_fn_with_state(state.clone(), guard))
-        // No CORS layer: the UI is served same-origin from this very server, so
-        // we must NOT advertise Access-Control-Allow-Origin on a loopback
-        // service. Body cap bounds memory from a hostile import while still
-        // allowing real (multi-MB) backups.
+        // Body cap bounds memory from a hostile import while still allowing real
+        // (multi-MB) backups.
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
-        // CORS is outermost so preflight (OPTIONS) is answered before routing.
+        // Restrictive CORS (only the Tauri/localhost origins in `is_allowed_origin`)
+        // is outermost so a cross-site page can't read responses, and preflight
+        // (OPTIONS) is answered before routing.
         .layer(cors())
         .with_state(state)
 }
@@ -139,9 +140,20 @@ async fn guard(State(s): State<Arc<AppState>>, req: Request, next: Next) -> Resp
         return (StatusCode::FORBIDDEN, "bad host").into_response();
     }
 
+    // 1b. Reject any request that carries a disallowed browser Origin. CORS stops
+    //     a cross-site page from *reading* normal responses, but it does NOT cover
+    //     the /ws upgrade — so we enforce the same origin allow-list here, for
+    //     every request. Non-browser clients (the CLI / ureq) send no Origin and
+    //     pass through untouched.
+    if let Some(origin) = req.headers().get(header::ORIGIN) {
+        if !is_allowed_origin(origin) {
+            return (StatusCode::FORBIDDEN, "bad origin").into_response();
+        }
+    }
+
     // 2. Require the session token on mutating API requests. Reads stay open so
-    //    same-origin GETs work without ceremony; the absence of CORS already
-    //    prevents cross-site reading of responses.
+    //    same-origin GETs work without ceremony; CORS + the Origin guard above
+    //    already prevent cross-site reading of responses.
     let is_write = matches!(
         *req.method(),
         Method::POST | Method::PUT | Method::DELETE | Method::PATCH
@@ -237,6 +249,18 @@ async fn api_analytics(
     };
     if p.range_days <= 0.0 || p.range_days > 365.0 * 5.0 {
         return (StatusCode::BAD_REQUEST, "range_days out of bounds").into_response();
+    }
+    // Bound the work: `range ÷ resolution` is the number of buckets SQLite has to
+    // aggregate and we have to serialize. Reject absurd combinations (e.g.
+    // 5 years at minute resolution ≈ 2.6M buckets) so a cheap request can't turn
+    // into a CPU/memory amplifier.
+    const MAX_BUCKETS: f64 = 200_000.0;
+    if p.range_days * 86400.0 / res_s as f64 > MAX_BUCKETS {
+        return (
+            StatusCode::BAD_REQUEST,
+            "range too large for this resolution — narrow range_days or use a coarser resolution",
+        )
+            .into_response();
     }
     let end_ts = crate::db::now_ts();
     let start_ts = end_ts - p.range_days * 86400.0;
@@ -530,8 +554,21 @@ async fn api_data_reset(State(s): State<Arc<AppState>>) -> Json<Value> {
         Ok(d) => d,
         Err(e) => return Json(json!({"ok": false, "error": format!("export failed: {e}")})),
     };
+    // Refuse to reset an already-empty DB: otherwise a second reset would export
+    // nothing and overwrite the *first* reset's good snapshot with an empty one,
+    // making the earlier data unrecoverable. Restore first if that's the intent.
+    let count = |k: &str| dump.get(k).and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+    let has_data = ["sessions", "samples", "rollups_1m", "speed_marks"]
+        .iter()
+        .any(|k| count(k) > 0);
+    if !has_data {
+        return Json(json!({
+            "ok": false,
+            "error": "nothing to reset — the database is already empty (use restore to recover a prior snapshot)"
+        }));
+    }
     let path = crate::config::snapshot_path();
-    if let Err(e) = std::fs::write(&path, serde_json::to_vec(&dump).unwrap_or_default()) {
+    if let Err(e) = crate::config::atomic_write(&path, &serde_json::to_vec(&dump).unwrap_or_default()) {
         return Json(json!({"ok": false, "error": format!("could not save snapshot: {e}")}));
     }
     if let Err(e) = s.db.wipe_all() {
@@ -546,7 +583,6 @@ async fn api_data_reset(State(s): State<Arc<AppState>>) -> Json<Value> {
     st.setup_complete = false;
     crate::config::save_settings(&st);
     s.set_device_id(None); // stops the worker and wakes it to wait for re-pair
-    let count = |k: &str| dump.get(k).and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
     Json(json!({"ok": true, "snapshot_sessions": count("sessions"), "snapshot_samples": count("samples")}))
 }
 

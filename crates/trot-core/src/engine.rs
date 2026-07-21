@@ -21,6 +21,14 @@ pub struct Engine {
 /// then returns (the tasks keep running for the life of the process).
 pub async fn start_engine(data_dir: PathBuf) -> anyhow::Result<Engine> {
     std::fs::create_dir_all(&data_dir)?;
+    // Lock the data dir down to the owner (0700): it holds the activity DB, the
+    // reset snapshot, and (via the daemon) the API-token handshake file. On a
+    // shared host another local user must not be able to read them.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o700));
+    }
     config::init_paths(&data_dir);
 
     let db = Arc::new(db::Db::open(config::db_path())?);

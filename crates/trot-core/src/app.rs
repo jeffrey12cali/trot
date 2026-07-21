@@ -16,9 +16,10 @@ pub struct AppState {
     /// Displayed speed/distance unit ("km/h" or "mph"). Runtime-settable from the
     /// setup wizard / settings, so it's behind a lock.
     display_unit: Mutex<String>,
-    /// Random per-launch token injected into the served index.html and required
-    /// on state-changing /api calls. Stops other local processes / cross-site
-    /// requests from driving the loopback API (see server.rs guard).
+    /// Random per-launch token required on state-changing /api calls. The daemon
+    /// publishes it (with the port) in the handshake file so the CLI / Nowhere can
+    /// send it; it stops other local processes and cross-site requests from driving
+    /// the loopback API. Enforced by the request `guard` in `api.rs`.
     pub token: String,
     pub device_id: Mutex<Option<String>>,
     pub connected: AtomicBool,

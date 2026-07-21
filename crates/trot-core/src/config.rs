@@ -26,6 +26,17 @@ pub struct DevicesConfig {
     pub devices: Vec<Device>,
 }
 
+/// Write `data` to `path` atomically: write a sibling temp file, then `rename`
+/// it over the target (atomic on the same filesystem). A crash/power-loss can no
+/// longer leave a half-written JSON file that a reader would then treat as
+/// corrupt and silently reset to defaults. Used for every config/snapshot/handshake
+/// write across the engine and daemon.
+pub fn atomic_write(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, data)?;
+    std::fs::rename(&tmp, path)
+}
+
 pub fn init_paths(data_dir: &std::path::Path) {
     let _ = DEVICE_ID_FILE.set(data_dir.join("device_id"));
     let _ = DEVICES_FILE.set(data_dir.join("devices.json"));
@@ -89,7 +100,7 @@ pub fn load_settings() -> AppSettings {
 pub fn save_settings(s: &AppSettings) {
     if let Some(path) = SETTINGS_FILE.get() {
         if let Ok(text) = serde_json::to_string_pretty(s) {
-            let _ = std::fs::write(path, text);
+            let _ = atomic_write(path, text.as_bytes());
         }
     }
 }
@@ -154,7 +165,7 @@ pub fn load_devices() -> DevicesConfig {
 pub fn save_devices(cfg: &DevicesConfig) {
     if let Some(path) = DEVICES_FILE.get() {
         if let Ok(text) = serde_json::to_string_pretty(cfg) {
-            let _ = std::fs::write(path, text);
+            let _ = atomic_write(path, text.as_bytes());
         }
     }
 }
