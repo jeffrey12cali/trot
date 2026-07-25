@@ -89,6 +89,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/scan", get(api_scan))
         .route("/api/pair", post(api_pair))
         .route("/api/unpair", post(api_unpair))
+        .route("/api/connect", post(api_connect))
+        .route("/api/disconnect", post(api_disconnect))
         .route("/api/devices", get(api_devices))
         .route("/api/devices/active", post(api_device_activate))
         .route("/api/devices/forget", post(api_device_forget))
@@ -453,6 +455,21 @@ async fn api_unpair(State(s): State<Arc<AppState>>) -> Json<Value> {
         s.set_device_id(new_active);
     }
     Json(devices_payload())
+}
+
+/// Manually drop the BLE link but stay paired and keep the engine running (so
+/// cloud sync still works), then idle until `/api/connect`. Distinct from
+/// `/api/shutdown` (terminal) and `/api/devices/forget` (unpair) — this is a
+/// reversible disconnect that leaves the treadmill saved.
+async fn api_disconnect(State(s): State<Arc<AppState>>) -> Json<Value> {
+    s.set_paused(true);
+    Json(json!({"ok": true, "connected": false, "paused": true}))
+}
+
+/// Resume after a manual disconnect: reconnect to the active paired treadmill.
+async fn api_connect(State(s): State<Arc<AppState>>) -> Json<Value> {
+    s.set_paused(false);
+    Json(json!({"ok": true, "paused": false}))
 }
 
 async fn api_rollup_status(State(s): State<Arc<AppState>>) -> Json<Value> {

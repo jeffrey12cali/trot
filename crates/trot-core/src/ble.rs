@@ -119,13 +119,26 @@ pub async fn run(state: Arc<AppState>) {
         }
         let device_id = device_id.unwrap();
 
+        // Manual disconnect: stay paired but idle (no reconnect) until resumed.
+        // The engine keeps running, so cloud sync still works while disconnected.
+        if state.is_paused() {
+            state.connected.store(false, Ordering::Relaxed);
+            state.broadcast(json!({
+                "type": "status", "connected": false, "paired": true, "paused": true
+            }));
+            tracing::info!("BLE paused (manual disconnect); waiting for resume");
+            state.wake.notified().await;
+            continue;
+        }
+
         if let Err(e) = connect_and_poll(&state, &device_id).await {
             tracing::warn!("BLE session ended: {e:#}");
         }
 
         state.connected.store(false, Ordering::Relaxed);
         state.broadcast(json!({
-            "type": "status", "connected": false, "paired": state.device_id().is_some()
+            "type": "status", "connected": false, "paired": state.device_id().is_some(),
+            "paused": state.is_paused()
         }));
 
         // Close any open session on link loss.
@@ -211,6 +224,10 @@ async fn poll_sc110(
     let mut dead_polls: u32 = 0;
 
     while !state.stop.load(Ordering::Relaxed) {
+        if state.is_paused() {
+            tracing::info!("manual disconnect requested; dropping link");
+            break;
+        }
         if state.device_id().as_deref() != Some(device_id) {
             tracing::info!("device_id changed; dropping connection");
             break;
@@ -297,6 +314,10 @@ async fn stream_ftms(
     let mut status_streak: i32 = 0;
 
     while !state.stop.load(Ordering::Relaxed) {
+        if state.is_paused() {
+            tracing::info!("manual disconnect requested; dropping link");
+            break;
+        }
         if state.device_id().as_deref() != Some(device_id) {
             tracing::info!("device_id changed; dropping connection");
             break;

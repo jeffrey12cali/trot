@@ -32,6 +32,11 @@ pub struct AppState {
     /// Set when device_id changes or shutdown is requested, to wake the worker.
     pub wake: Notify,
     pub stop: AtomicBool,
+    /// Manually paused ("Disconnect" in the UI): the worker drops the BLE link
+    /// and stays paired but idle — no reconnect — until resumed. Unlike `stop`
+    /// this is not terminal: the engine keeps running so cloud sync still works
+    /// while the treadmill is disconnected.
+    pub paused: AtomicBool,
     /// Fired once by the BLE worker after its loop has exited — i.e. after the
     /// peripheral has been cleanly disconnected. `shutdown()` awaits this so the
     /// process doesn't die (taking the OS BLE handle with it) before the SC110
@@ -57,6 +62,7 @@ impl AppState {
             token,
             device_id: Mutex::new(device_id),
             connected: AtomicBool::new(false),
+            paused: AtomicBool::new(false),
             active_session_id: Mutex::new(None),
             last_state: Mutex::new(None),
             frames: Mutex::new(std::collections::VecDeque::with_capacity(FRAME_RING_CAP)),
@@ -134,11 +140,26 @@ impl AppState {
 
     pub fn set_device_id(&self, id: Option<String>) {
         *self.device_id.lock().unwrap() = id;
+        // A (re)paired or switched device should connect, even if we were paused
+        // by a manual disconnect.
+        self.paused.store(false, Ordering::Relaxed);
         self.wake.notify_waiters();
     }
 
     pub fn is_connected(&self) -> bool {
         self.connected.load(Ordering::Relaxed)
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::Relaxed)
+    }
+
+    /// Manually disconnect (pause) the BLE worker without stopping the engine:
+    /// it drops the link, stays paired, and idles until resumed. Pass `false` to
+    /// resume (reconnect). Sync and history keep running throughout.
+    pub fn set_paused(&self, paused: bool) {
+        self.paused.store(paused, Ordering::Relaxed);
+        self.wake.notify_waiters();
     }
 
     pub fn active_session(&self) -> Option<i64> {
@@ -184,6 +205,7 @@ impl AppState {
     pub fn snapshot(&self) -> Value {
         json!({
             "connected": self.is_connected(),
+            "paused": self.is_paused(),
             "display_unit": self.display_unit(),
             "device_id": self.device_id(),
             "state": self.last_state.lock().unwrap().clone(),
@@ -204,6 +226,7 @@ impl AppState {
             "device_id": self.device_id(),
             "active_session_id": self.active_session(),
             "connected": self.is_connected(),
+            "paused": self.is_paused(),
         })
     }
 }
