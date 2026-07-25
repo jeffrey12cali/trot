@@ -37,6 +37,10 @@ pub struct AppState {
     /// this is not terminal: the engine keeps running so cloud sync still works
     /// while the treadmill is disconnected.
     pub paused: AtomicBool,
+    /// Set after too many consecutive failed connect attempts (treadmill off, out
+    /// of range, or already linked to another device). The worker stops retrying
+    /// and waits for a manual reconnect instead of scanning forever.
+    pub connect_failed: AtomicBool,
     /// Fired once by the BLE worker after its loop has exited — i.e. after the
     /// peripheral has been cleanly disconnected. `shutdown()` awaits this so the
     /// process doesn't die (taking the OS BLE handle with it) before the SC110
@@ -63,6 +67,7 @@ impl AppState {
             device_id: Mutex::new(device_id),
             connected: AtomicBool::new(false),
             paused: AtomicBool::new(false),
+            connect_failed: AtomicBool::new(false),
             active_session_id: Mutex::new(None),
             last_state: Mutex::new(None),
             frames: Mutex::new(std::collections::VecDeque::with_capacity(FRAME_RING_CAP)),
@@ -141,8 +146,9 @@ impl AppState {
     pub fn set_device_id(&self, id: Option<String>) {
         *self.device_id.lock().unwrap() = id;
         // A (re)paired or switched device should connect, even if we were paused
-        // by a manual disconnect.
+        // by a manual disconnect or had given up.
         self.paused.store(false, Ordering::Relaxed);
+        self.connect_failed.store(false, Ordering::Relaxed);
         self.wake.notify_waiters();
     }
 
@@ -154,12 +160,25 @@ impl AppState {
         self.paused.load(Ordering::Relaxed)
     }
 
+    pub fn is_connect_failed(&self) -> bool {
+        self.connect_failed.load(Ordering::Relaxed)
+    }
+
     /// Manually disconnect (pause) the BLE worker without stopping the engine:
     /// it drops the link, stays paired, and idles until resumed. Pass `false` to
-    /// resume (reconnect). Sync and history keep running throughout.
+    /// resume (reconnect) — which also clears a prior give-up. Sync and history
+    /// keep running throughout.
     pub fn set_paused(&self, paused: bool) {
         self.paused.store(paused, Ordering::Relaxed);
+        if !paused {
+            self.connect_failed.store(false, Ordering::Relaxed);
+        }
         self.wake.notify_waiters();
+    }
+
+    /// Record whether the worker has given up auto-connecting.
+    pub fn set_connect_failed(&self, failed: bool) {
+        self.connect_failed.store(failed, Ordering::Relaxed);
     }
 
     pub fn active_session(&self) -> Option<i64> {
@@ -206,6 +225,7 @@ impl AppState {
         json!({
             "connected": self.is_connected(),
             "paused": self.is_paused(),
+            "connect_failed": self.is_connect_failed(),
             "display_unit": self.display_unit(),
             "device_id": self.device_id(),
             "state": self.last_state.lock().unwrap().clone(),
@@ -227,6 +247,7 @@ impl AppState {
             "active_session_id": self.active_session(),
             "connected": self.is_connected(),
             "paused": self.is_paused(),
+            "connect_failed": self.is_connect_failed(),
         })
     }
 }

@@ -22,6 +22,10 @@ use std::time::Duration;
 use uuid::Uuid;
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(5);
+/// Consecutive failed connect attempts (never reaching the treadmill) before the
+/// worker gives up and waits for a manual reconnect, instead of scanning forever.
+/// Each attempt scans up to ~10s, so this is roughly a minute of trying.
+const MAX_CONNECT_ATTEMPTS: u32 = 6;
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// Consecutive unanswered polls (~2s each) before we treat a seemingly-"connected"
@@ -108,6 +112,7 @@ pub async fn run(state: Arc<AppState>) {
         }
     }
 
+    let mut fails: u32 = 0;
     while !state.stop.load(Ordering::Relaxed) {
         let device_id = state.device_id();
         if device_id.is_none() {
@@ -119,26 +124,45 @@ pub async fn run(state: Arc<AppState>) {
         }
         let device_id = device_id.unwrap();
 
-        // Manual disconnect: stay paired but idle (no reconnect) until resumed.
-        // The engine keeps running, so cloud sync still works while disconnected.
-        if state.is_paused() {
+        // Idle: manually disconnected, or gave up after repeated failures. Either
+        // way stop trying and wait for a manual reconnect — the engine (and cloud
+        // sync) keep running throughout.
+        if state.is_paused() || state.is_connect_failed() {
             state.connected.store(false, Ordering::Relaxed);
             state.broadcast(json!({
-                "type": "status", "connected": false, "paired": true, "paused": true
+                "type": "status", "connected": false, "paired": true,
+                "paused": state.is_paused(), "connect_failed": state.is_connect_failed()
             }));
-            tracing::info!("BLE paused (manual disconnect); waiting for resume");
             state.wake.notified().await;
             continue;
         }
 
-        if let Err(e) = connect_and_poll(&state, &device_id).await {
-            tracing::warn!("BLE session ended: {e:#}");
+        // A drop after a successful connect is a normal reconnect (resets the
+        // counter); never reaching the treadmill counts toward giving up.
+        let was_connected = match connect_and_poll(&state, &device_id).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("BLE error: {e:#}");
+                false
+            }
+        };
+        if was_connected {
+            fails = 0;
+        } else {
+            fails += 1;
+            tracing::warn!("connect attempt {fails}/{MAX_CONNECT_ATTEMPTS} failed for {device_id}");
+            if fails >= MAX_CONNECT_ATTEMPTS {
+                fails = 0;
+                state.set_connect_failed(true);
+                tracing::warn!("giving up auto-connect; waiting for manual reconnect");
+                continue; // → idle branch broadcasts the failure and waits
+            }
         }
 
         state.connected.store(false, Ordering::Relaxed);
         state.broadcast(json!({
             "type": "status", "connected": false, "paired": state.device_id().is_some(),
-            "paused": state.is_paused()
+            "paused": state.is_paused(), "connect_failed": state.is_connect_failed()
         }));
 
         // Close any open session on link loss.
@@ -178,12 +202,28 @@ async fn find_peripheral(adapter: &Adapter, device_id: &str) -> Result<Periphera
     Err(anyhow!("device {device_id} not found in scan"))
 }
 
-async fn connect_and_poll(state: &Arc<AppState>, device_id: &str) -> Result<()> {
+/// Returns `Ok(true)` once a link was established (a later mid-session drop is
+/// still `true` — a normal reconnect, not a failure), `Ok(false)` if we never
+/// reached the treadmill (counts toward the give-up limit).
+async fn connect_and_poll(state: &Arc<AppState>, device_id: &str) -> Result<bool> {
     tracing::info!("connecting to {device_id}...");
     let adapter = first_adapter().await?;
-    let peripheral = find_peripheral(&adapter, device_id).await?;
-    peripheral.connect().await?;
-    peripheral.discover_services().await?;
+    let peripheral = match find_peripheral(&adapter, device_id).await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::info!("{device_id} not found in scan: {e:#}");
+            return Ok(false);
+        }
+    };
+    if let Err(e) = peripheral.connect().await {
+        tracing::warn!("connect to {device_id} failed: {e:#}");
+        return Ok(false);
+    }
+    if let Err(e) = peripheral.discover_services().await {
+        tracing::warn!("service discovery failed: {e:#}");
+        let _ = peripheral.disconnect().await;
+        return Ok(false);
+    }
 
     let chars = peripheral.characteristics();
     let notify_char = chars.iter().find(|c| c.uuid == notify_uuid()).cloned();
@@ -192,16 +232,20 @@ async fn connect_and_poll(state: &Arc<AppState>, device_id: &str) -> Result<()> 
     // Prefer the native SC110 protocol (FFF1/FFF2). Fall back to the standard
     // Bluetooth FTMS Treadmill Data characteristic (0x2ACD) so other LifeSpan
     // models and third-party FTMS treadmills work too.
-    if let (Some(notify_char), Some(write_char)) = (notify_char, write_char) {
+    let poll = if let (Some(notify_char), Some(write_char)) = (notify_char, write_char) {
         poll_sc110(state, &peripheral, device_id, notify_char, write_char).await
     } else if let Some(data_char) = chars.iter().find(|c| c.uuid == ftms_data_uuid()).cloned() {
         stream_ftms(state, &peripheral, device_id, data_char).await
     } else {
         let _ = peripheral.disconnect().await;
-        Err(anyhow!(
+        return Err(anyhow!(
             "device exposes neither SC110 (FFF1/FFF2) nor FTMS (2ACD) characteristics"
-        ))
+        ));
+    };
+    if let Err(e) = poll {
+        tracing::warn!("BLE session ended: {e:#}");
     }
+    Ok(true) // we did connect; a drop here is a normal reconnect
 }
 
 /// Native SC110 path: poll the opcode rotation and decode via `Reader`.
