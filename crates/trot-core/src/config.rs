@@ -55,6 +55,11 @@ pub struct AppSettings {
     pub display_unit: String,
     #[serde(default)]
     pub setup_complete: bool,
+    /// Human label for THIS install, used to attribute recorded sessions to a
+    /// device in the multi-device step breakdown. Empty until the client sets it
+    /// (it defaults to the platform, e.g. "macOS"); shown as "Unknown" if blank.
+    #[serde(default)]
+    pub device_name: String,
 }
 
 fn default_locale() -> String {
@@ -70,8 +75,14 @@ impl Default for AppSettings {
             locale: default_locale(),
             display_unit: default_unit(),
             setup_complete: false,
+            device_name: String::new(),
         }
     }
+}
+
+/// Human label for this install (empty until the client sets it).
+pub fn device_name() -> String {
+    load_settings().device_name
 }
 
 pub fn load_settings() -> AppSettings {

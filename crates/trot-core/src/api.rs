@@ -81,6 +81,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/state", get(api_state))
         .route("/api/today", get(api_today))
         .route("/api/analytics", get(api_analytics))
+        .route("/api/steps/by-device", get(api_steps_by_device))
         .route("/api/timeofday", get(api_timeofday))
         .route("/api/sessions", get(api_sessions))
         .route("/api/sessions/:id", get(api_session_detail))
@@ -329,6 +330,27 @@ async fn api_timeofday(
     };
     match s.db.timeofday_totals(&date, until_sod) {
         Ok(v) => Json(v).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct StepsByDeviceParams {
+    days: Option<i64>,
+}
+
+/// Daily step totals split by the device that recorded them, over the last
+/// `days` local days (default 30, capped 1..=400).
+async fn api_steps_by_device(
+    State(s): State<Arc<AppState>>,
+    Query(p): Query<StepsByDeviceParams>,
+) -> Response {
+    let days = p.days.unwrap_or(30).clamp(1, 400);
+    let since = (chrono::Local::now().date_naive() - chrono::Duration::days(days - 1))
+        .format("%Y-%m-%d")
+        .to_string();
+    match s.db.steps_by_device(&since) {
+        Ok(rows) => Json(json!({ "since": since, "days": days, "rows": rows })).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
@@ -608,6 +630,7 @@ struct SettingsPatch {
     locale: Option<String>,
     display_unit: Option<String>,
     setup_complete: Option<bool>,
+    device_name: Option<String>,
 }
 
 /// First-run / preferences state (locale, unit, whether setup is done).
@@ -619,6 +642,7 @@ async fn api_settings_get(State(s): State<Arc<AppState>>) -> Json<Value> {
         "setup_complete": st.setup_complete,
         "needs_setup": !st.setup_complete,
         "active_device": s.device_id(),
+        "device_name": st.device_name,
     }))
 }
 
@@ -639,12 +663,16 @@ async fn api_settings_set(
     if let Some(c) = p.setup_complete {
         st.setup_complete = c;
     }
+    if let Some(n) = p.device_name {
+        st.device_name = n.trim().chars().take(40).collect();
+    }
     crate::config::save_settings(&st);
     Json(json!({
         "ok": true,
         "locale": st.locale,
         "display_unit": st.display_unit,
         "setup_complete": st.setup_complete,
+        "device_name": st.device_name,
     }))
 }
 

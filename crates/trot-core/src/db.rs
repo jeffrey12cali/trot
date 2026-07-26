@@ -24,7 +24,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     distance_raw_end INTEGER,
     calories_end INTEGER,
     speed_raw_last INTEGER,
-    closed_reason TEXT
+    closed_reason TEXT,
+    source TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_date ON sessions(local_date);
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_ts);
@@ -382,6 +383,7 @@ pub struct Session {
     pub distance_raw_end: Option<i64>,
     pub calories_end: Option<i64>,
     pub speed_raw_last: Option<i64>,
+    pub source: Option<String>,
 }
 
 pub struct Db {
@@ -393,6 +395,10 @@ impl Db {
         let conn = Connection::open(path)?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
         conn.execute_batch(SCHEMA)?;
+        // Additive columns for DBs created before they existed. `CREATE TABLE IF
+        // NOT EXISTS` won't add columns to an existing table, so patch them in.
+        // Nullable + no default → no row rewrite, safe on a large table.
+        ensure_column(&conn, "sessions", "source", "TEXT")?;
         Ok(Db {
             conn: Mutex::new(conn),
         })
@@ -412,12 +418,13 @@ impl Db {
         display_unit: &str,
         start_steps: Option<u32>,
         start_duration_s: Option<u32>,
+        source: Option<&str>,
     ) -> Result<i64> {
         let c = self.conn();
         c.execute(
-            "INSERT INTO sessions(started_ts, local_date, display_unit, start_steps, start_duration_s)
-             VALUES (?, ?, ?, ?, ?)",
-            params![ts, local_date(ts), display_unit, start_steps, start_duration_s],
+            "INSERT INTO sessions(started_ts, local_date, display_unit, start_steps, start_duration_s, source)
+             VALUES (?, ?, ?, ?, ?, ?)",
+            params![ts, local_date(ts), display_unit, start_steps, start_duration_s, source],
         )?;
         Ok(c.last_insert_rowid())
     }
@@ -635,6 +642,37 @@ impl Db {
     /// accepted increment to the local hour of its sample — so the bars sum to
     /// the day's step total and a stale frame can't spike a single hour (this is
     /// what made one afternoon hour show the day's max after a reconnect).
+    /// Daily step totals grouped by recording device (`source`) for every local
+    /// day >= `since_local_date`. Built from the per-minute rollups (de-glitched
+    /// and permanent), so past days are exact; today may lag the last unrolled
+    /// minute. Sessions recorded before device attribution have no source and
+    /// group under an empty string (surfaced as "Unknown" by the client).
+    pub fn steps_by_device(&self, since_local_date: &str) -> Result<Vec<Value>> {
+        let c = self.conn();
+        let mut stmt = c.prepare(
+            "SELECT se.local_date AS d,
+                    COALESCE(NULLIF(se.source, ''), '') AS src,
+                    COALESCE(SUM(r.steps_delta), 0) AS steps
+             FROM sessions se
+             JOIN sample_rollups_1m r ON r.session_id = se.id
+             WHERE se.local_date >= ?
+             GROUP BY se.local_date, src
+             HAVING steps > 0
+             ORDER BY d DESC, steps DESC",
+        )?;
+        let rows = stmt
+            .query_map(params![since_local_date], |r| {
+                Ok(json!({
+                    "date": r.get::<_, String>(0)?,
+                    "source": r.get::<_, String>(1)?,
+                    "steps": r.get::<_, i64>(2)?,
+                }))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(rows)
+    }
+
     pub fn hourly_steps(&self, local_date_s: &str) -> Result<Vec<Value>> {
         let mut buckets = [0i64; 24];
         let c = self.conn();
@@ -1376,7 +1414,7 @@ impl Db {
             tx.execute(
                 "INSERT INTO sessions(started_ts, ended_ts, local_date, display_unit, start_steps,
                     start_duration_s, steps_end, duration_s_end, distance_raw_end, calories_end,
-                    speed_raw_last, closed_reason) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    speed_raw_last, closed_reason, source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 params![
                     started_ts,
                     f64_of(s, "ended_ts"),
@@ -1390,6 +1428,7 @@ impl Db {
                     i64_of(s, "calories_end"),
                     i64_of(s, "speed_raw_last"),
                     str_of(s, "closed_reason"),
+                    str_of(s, "source"),
                 ],
             )?;
             if let Some(oid) = old_id {
@@ -1605,6 +1644,20 @@ struct RollupRow {
     total_samples: i64,
 }
 
+/// Add `col` to `table` if it isn't there yet (idempotent schema patch for DBs
+/// created before the column existed).
+fn ensure_column(conn: &Connection, table: &str, col: &str, decl: &str) -> Result<()> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let present = stmt
+        .query_map([], |r| r.get::<_, String>(1))?
+        .filter_map(|r| r.ok())
+        .any(|name| name == col);
+    if !present {
+        conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {col} {decl}"), [])?;
+    }
+    Ok(())
+}
+
 fn row_to_session(r: &rusqlite::Row) -> rusqlite::Result<Session> {
     Ok(Session {
         id: r.get("id")?,
@@ -1618,6 +1671,7 @@ fn row_to_session(r: &rusqlite::Row) -> rusqlite::Result<Session> {
         distance_raw_end: r.get("distance_raw_end")?,
         calories_end: r.get("calories_end")?,
         speed_raw_last: r.get("speed_raw_last")?,
+        source: r.get("source")?,
     })
 }
 
@@ -1656,7 +1710,7 @@ mod tests {
     fn day_totals_accumulates_across_counter_reset() {
         let db = mem();
         let today = local_date(now_ts());
-        let sid = db.open_session(now_ts(), "km/h", Some(0), Some(0)).unwrap();
+        let sid = db.open_session(now_ts(), "km/h", Some(0), Some(0), None).unwrap();
         let base = now_ts();
         // Walk 1: steps climb 0->10, then a reset (new walk) 0->5 => total 15.
         for (i, steps) in [0u32, 4, 10, 0, 3, 5].iter().enumerate() {
@@ -1690,7 +1744,7 @@ mod tests {
     fn day_totals_ignores_stale_reconnect_frame() {
         let db = mem();
         let today = local_date(now_ts());
-        let sid = db.open_session(now_ts(), "km/h", Some(0), Some(0)).unwrap();
+        let sid = db.open_session(now_ts(), "km/h", Some(0), Some(0), None).unwrap();
         let base = now_ts();
         // 1800 -> stale 346 -> 1891 -> 1901: only +101 of real climb after 1800.
         for (i, steps) in [1797u32, 1800, 346, 1891, 1896, 1901].iter().enumerate() {
@@ -1708,7 +1762,7 @@ mod tests {
     fn hourly_steps_reconcile_with_day_total() {
         let db = mem();
         let today = local_date(now_ts());
-        let sid = db.open_session(now_ts(), "km/h", Some(0), Some(0)).unwrap();
+        let sid = db.open_session(now_ts(), "km/h", Some(0), Some(0), None).unwrap();
         let base = now_ts();
         for (i, steps) in [1797u32, 1800, 346, 1891, 1896, 1901].iter().enumerate() {
             db.insert_sample(Some(sid), base + i as f64, Some(*steps), Some(0), Some(60), Some(0), Some(0), Some(3)).unwrap();
@@ -1727,7 +1781,7 @@ mod tests {
     #[test]
     fn rollup_deglitches_stale_frame() {
         let db = mem();
-        let sid = db.open_session(now_ts() - 600.0, "km/h", Some(0), Some(0)).unwrap();
+        let sid = db.open_session(now_ts() - 600.0, "km/h", Some(0), Some(0), None).unwrap();
         // Align to a minute boundary ~10 min ago so all samples share one bucket
         // and fall before the rollup cutoff (now - 60s).
         let base = (((now_ts() as i64 - 600) / 60) * 60) as f64 + 1.0;
@@ -1751,7 +1805,7 @@ mod tests {
     fn timeseries_deglitches_raw_tail() {
         let db = mem();
         let base = now_ts() - 100.0;
-        let sid = db.open_session(base, "km/h", Some(0), Some(0)).unwrap();
+        let sid = db.open_session(base, "km/h", Some(0), Some(0), None).unwrap();
         // Same stale-frame shape as the day/hour tests: 346 wedged between 1800
         // and 1891. Nothing is rolled yet (floor 0), so this exercises the pure
         // raw-tail path of `timeseries`.
@@ -1773,7 +1827,7 @@ mod tests {
         // guard — this exercises the full v2 (WITH samples) round-trip.
         let db = mem();
         let t = now_ts() - 100.0;
-        let sid = db.open_session(t, "km/h", Some(0), Some(0)).unwrap();
+        let sid = db.open_session(t, "km/h", Some(0), Some(0), None).unwrap();
         db.insert_sample(Some(sid), t + 1.0, Some(5), Some(10), Some(60), Some(2), Some(1), Some(3)).unwrap();
         db.close_session(sid, t + 2.0, Some(5), Some(10), Some(2), Some(1), Some(60), "stopped").unwrap();
         let dump = db.export_all(true).unwrap();
@@ -1795,6 +1849,32 @@ mod tests {
         assert!(db.import_dump(&serde_json::json!({"format": "nope"}), "merge").is_err());
     }
 
+    #[test]
+    fn steps_by_device_groups_by_source() {
+        let db = mem();
+        let base = (((now_ts() as i64 - 600) / 60) * 60) as f64 + 1.0;
+        let make = |src: Option<&str>, start: f64, steps: &[u32]| {
+            let sid = db.open_session(start, "km/h", Some(0), Some(0), src).unwrap();
+            for (i, st) in steps.iter().enumerate() {
+                db.insert_sample(Some(sid), start + i as f64, Some(*st), Some(i as u32),
+                    Some(60), Some(0), Some(0), Some(3)).unwrap();
+            }
+        };
+        make(Some("Mac"), base, &[0, 10, 20, 30]);       // 30 steps
+        make(Some("iPhone"), base + 5.0, &[0, 5, 10]);   // 10 steps
+        make(None, base + 10.0, &[0, 40]);               // 40 steps, legacy (no source)
+        db.rollup_samples().unwrap();
+
+        let rows = db.steps_by_device(&local_date(base)).unwrap();
+        let mut got = std::collections::HashMap::new();
+        for r in &rows {
+            got.insert(r["source"].as_str().unwrap().to_string(), r["steps"].as_i64().unwrap());
+        }
+        assert_eq!(got.get("Mac"), Some(&30));
+        assert_eq!(got.get("iPhone"), Some(&10));
+        assert_eq!(got.get(""), Some(&40), "sessions with no source group under empty string");
+    }
+
     // --- Phase 0: retention refactor -------------------------------------
 
     /// Insert a session ~10 min ago with samples on a minute boundary so they all
@@ -1802,7 +1882,7 @@ mod tests {
     /// session id and the local date the samples belong to.
     fn seed_rollable_session(db: &Db, offset_ago_s: i64, steps: &[u32]) -> (i64, String) {
         let base = (((now_ts() as i64 - offset_ago_s) / 60) * 60) as f64 + 1.0;
-        let sid = db.open_session(base, "km/h", Some(0), Some(0)).unwrap();
+        let sid = db.open_session(base, "km/h", Some(0), Some(0), None).unwrap();
         for (i, st) in steps.iter().enumerate() {
             // distance tracks steps/4, calories steps/10, duration = seconds.
             db.insert_sample(
@@ -1967,7 +2047,7 @@ mod tests {
         // Build a day two hours ago: hour A gets +30 steps, hour B gets +40.
         let midnight = local_midnight(&local_date(now_ts())).unwrap();
         // Place buckets at 09:00 (sod 32400) and 10:00 (sod 36000) local.
-        let sid = db.open_session(midnight + 100.0, "km/h", Some(0), Some(0)).unwrap();
+        let sid = db.open_session(midnight + 100.0, "km/h", Some(0), Some(0), None).unwrap();
         db.close_session(sid, midnight + 4000.0, Some(70), Some(60), Some(17), Some(7), Some(60), "stopped").unwrap();
         let insert_bucket = |sod: i64, steps: i64, dist: i64| {
             db.conn().execute(

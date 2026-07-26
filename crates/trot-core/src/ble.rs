@@ -477,11 +477,16 @@ fn ingest_sample(
     let active = state.active_session();
 
     if confirmed && telem.is_running && active.is_none() {
+        // Attribute the session to this install so the multi-device breakdown can
+        // split steps by device. Empty name → NULL (surfaced as "Unknown").
+        let source = crate::config::device_name();
+        let source = (!source.is_empty()).then_some(source);
         if let Ok(sid) = state.db.open_session(
             now,
             &state.display_unit(),
             telem.steps,
             telem.duration_s,
+            source.as_deref(),
         ) {
             *state.active_session_id.lock().unwrap() = Some(sid);
             state.broadcast(json!({"type": "session_start", "id": sid}));
