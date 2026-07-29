@@ -77,6 +77,16 @@ CREATE TABLE IF NOT EXISTS speed_marks (
 CREATE INDEX IF NOT EXISTS idx_speed_marks_ts ON speed_marks(ts);
 "#;
 
+/// Nominal spacing of PERSISTED raw samples, in seconds.
+///
+/// The BLE worker polls far faster than this (a poll every ~50 ms plus the radio
+/// round trip) but only writes a row this often — see `ble::SAMPLE_MIN_INTERVAL_S`,
+/// which is derived from this constant. It is a real unit, not a tuning knob:
+/// `duration_running_s` reconstructs "time spent walking" as
+/// `count(running samples) * SAMPLE_INTERVAL_S`, so the two must agree or that
+/// metric is wrong by their ratio.
+pub const SAMPLE_INTERVAL_S: f64 = 1.0;
+
 const ROLLUP_RESOLUTION_S: i64 = 60;
 const ROLLUP_KIND: &str = "samples_1m";
 /// Raw samples older than this are never (re)inserted by `import_dump` — a
@@ -1009,11 +1019,11 @@ impl Db {
             }
             "duration_running_s" => {
                 let raw_sql = format!(
-                    "SELECT {raw_bucket} AS bucket_ts, SUM(CASE WHEN status = 3 THEN 1 ELSE 0 END) * 2.5 AS value
+                    "SELECT {raw_bucket} AS bucket_ts, SUM(CASE WHEN status = 3 THEN 1 ELSE 0 END) * {SAMPLE_INTERVAL_S} AS value
                      FROM samples s WHERE s.ts >= ? AND s.ts < ? GROUP BY bucket_ts"
                 );
                 let roll_sql = format!(
-                    "SELECT {roll_bucket} AS bucket_ts, SUM(running_samples) * 2.5 AS value
+                    "SELECT {roll_bucket} AS bucket_ts, SUM(running_samples) * {SAMPLE_INTERVAL_S} AS value
                      FROM sample_rollups_1m r WHERE r.bucket_ts >= ? AND r.bucket_ts < ? GROUP BY bucket_ts"
                 );
                 Self::accumulate_sum(&c, &raw_sql, effective_start, end_ts, &mut merged)?;

@@ -279,6 +279,7 @@ async fn poll_sc110(
     let mut reader = Reader::new(&state.display_unit());
     let mut last_status: Option<u8> = None;
     let mut status_streak: i32 = 0;
+    let mut last_persist: f64 = 0.0;
     let mut idx = 0usize;
     let mut dead_polls: u32 = 0;
 
@@ -349,7 +350,7 @@ async fn poll_sc110(
             }
         };
 
-        ingest_sample(state, &telem, &mut last_status, &mut status_streak);
+        ingest_sample(state, &telem, &mut last_status, &mut status_streak, &mut last_persist);
         broadcast_state(state, &telem);
         tokio::time::sleep(POLL_INTERVAL).await;
     }
@@ -371,6 +372,7 @@ async fn stream_ftms(
 
     let mut last_status: Option<u8> = None;
     let mut status_streak: i32 = 0;
+    let mut last_persist: f64 = 0.0;
 
     while !state.stop.load(Ordering::Relaxed) {
         if state.is_paused() {
@@ -403,7 +405,7 @@ async fn stream_ftms(
             }
         };
         let telem = ftms_to_telemetry(&data, &state.display_unit());
-        ingest_sample(state, &telem, &mut last_status, &mut status_streak);
+        ingest_sample(state, &telem, &mut last_status, &mut status_streak, &mut last_persist);
         broadcast_state(state, &telem);
     }
     let _ = peripheral.disconnect().await;
@@ -471,14 +473,29 @@ fn ftms_to_telemetry(d: &ftms::FtmsTreadmillData, unit: &str) -> Telemetry {
     t
 }
 
+/// Minimum spacing between PERSISTED raw samples. We poll far faster than this
+/// (~50 ms plus the radio round trip, so 10–15 telemetry updates a second) but
+/// storing every one of them wrote ~1M rows per day of walking — bloating the
+/// database and making every day-total aggregation proportionally slower — for no
+/// extra fidelity: the rollups are per-minute and the UI ticks about once a
+/// second. Mirrors `db::SAMPLE_INTERVAL_S`, which converts a count of running
+/// samples back into seconds; the two MUST stay in step.
+const SAMPLE_MIN_INTERVAL_S: f64 = crate::db::SAMPLE_INTERVAL_S;
+
 fn ingest_sample(
     state: &Arc<AppState>,
     telem: &Telemetry,
     last_status: &mut Option<u8>,
     status_streak: &mut i32,
+    last_persist: &mut f64,
 ) {
     let now = unix_now();
     *state.last_state.lock().unwrap() = Some(telem.clone());
+
+    // Remember the status we came in with: the streak bookkeeping below overwrites
+    // `last_status`, but the persistence throttle needs to know whether this
+    // telemetry represents a transition.
+    let status_changed = telem.status.is_some() && telem.status != *last_status;
 
     if let Some(st) = telem.status {
         if Some(st) == *last_status {
@@ -517,6 +534,15 @@ fn ingest_sample(
         state.broadcast(json!({"type": "session_end", "id": sid}));
         *state.active_session_id.lock().unwrap() = None;
     }
+
+    // Persist at most one row per SAMPLE_MIN_INTERVAL_S. A status change is always
+    // written through, so a start/stop transition is never quietly dropped by the
+    // throttle. Session detection above runs off live telemetry, not stored rows,
+    // so throttling cannot affect it.
+    if !status_changed && now - *last_persist < SAMPLE_MIN_INTERVAL_S {
+        return;
+    }
+    *last_persist = now;
 
     if let Some(sid) = state.active_session() {
         if let Err(e) = state.db.update_active_session(
@@ -563,3 +589,69 @@ fn persist_close(state: &Arc<AppState>, sid: i64, telem: Option<&Telemetry>, rea
 }
 
 use serde_json::Value;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::Db;
+    use crate::protocol::STATUS_STANDBY;
+
+    fn running(steps: u32) -> Telemetry {
+        let mut t = Telemetry::new("km/h");
+        t.status = Some(STATUS_RUNNING);
+        t.status_name = Some("RUNNING".into());
+        t.is_running = true;
+        t.steps = Some(steps);
+        t
+    }
+
+    fn raw_count(db: &Db) -> i64 {
+        db.rollup_status().unwrap()["raw_samples"].as_i64().unwrap()
+    }
+
+    /// The worker produces 10-15 telemetry updates a second; storing every one of
+    /// them wrote ~1M rows per day of walking. At most one row per interval should
+    /// land — but a status transition must always be written through, so a
+    /// start/stop edge is never lost to the throttle.
+    #[test]
+    fn throttles_raw_writes_but_never_drops_a_transition() {
+        let db = Arc::new(Db::open(":memory:").unwrap());
+        let state = AppState::new(db.clone(), "km/h".into(), None, "tok".into());
+        let (mut last_status, mut streak, mut last_persist) = (None, 0i32, 0.0f64);
+
+        // A burst of same-status telemetry, all well inside one interval.
+        for i in 0..50 {
+            ingest_sample(
+                &state,
+                &running(i),
+                &mut last_status,
+                &mut streak,
+                &mut last_persist,
+            );
+        }
+        assert_eq!(
+            raw_count(&db),
+            1,
+            "a burst within one interval must collapse to a single stored sample"
+        );
+
+        // Stopping is a transition: it must be persisted immediately, even though
+        // we are still inside the throttle window.
+        let mut stopped = running(50);
+        stopped.status = Some(STATUS_STANDBY);
+        stopped.status_name = Some("STANDBY".into());
+        stopped.is_running = false;
+        ingest_sample(
+            &state,
+            &stopped,
+            &mut last_status,
+            &mut streak,
+            &mut last_persist,
+        );
+        assert_eq!(
+            raw_count(&db),
+            2,
+            "a status change must be written through the throttle"
+        );
+    }
+}
