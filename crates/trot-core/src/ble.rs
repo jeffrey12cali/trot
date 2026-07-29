@@ -505,17 +505,22 @@ fn ingest_sample(
     }
 
     if let Some(sid) = state.active_session() {
-        let _ = state.db.update_active_session(
+        if let Err(e) = state.db.update_active_session(
             sid,
             telem.steps,
             telem.duration_s,
             telem.distance_raw,
             telem.calories,
             telem.speed_raw,
-        );
+        ) {
+            tracing::warn!("could not update session {sid}: {e}");
+        }
     }
 
-    let _ = state.db.insert_sample(
+    // Persist the raw sample. Never silently swallow the error: a dropped write
+    // is lost walking, and when the cause is contention (a second daemon on the
+    // same database) the log line is the only way to notice.
+    if let Err(e) = state.db.insert_sample(
         state.active_session(),
         now,
         telem.steps,
@@ -524,7 +529,9 @@ fn ingest_sample(
         telem.distance_raw,
         telem.calories,
         telem.status,
-    );
+    ) {
+        tracing::warn!("could not persist sample: {e}");
+    }
     let _ = STATUS_RUNNING; // referenced via is_running
 }
 

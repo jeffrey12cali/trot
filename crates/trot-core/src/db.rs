@@ -393,7 +393,12 @@ pub struct Db {
 impl Db {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let conn = Connection::open(path)?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+        // busy_timeout: WAL allows one writer at a time, and a second process (or
+        // the rollup transaction overlapping a sample insert) would otherwise fail
+        // instantly with SQLITE_BUSY. Wait instead of dropping the write.
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;",
+        )?;
         conn.execute_batch(SCHEMA)?;
         // Additive columns for DBs created before they existed. `CREATE TABLE IF
         // NOT EXISTS` won't add columns to an existing table, so patch them in.

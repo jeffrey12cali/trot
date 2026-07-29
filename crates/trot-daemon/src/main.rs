@@ -93,6 +93,19 @@ fn run_daemon() -> Result<()> {
         )
         .init();
 
+    // Refuse to start a second daemon on the same data directory. Two daemons
+    // would fight over the Bluetooth adapter, both overwrite runtime.json (so the
+    // CLI would reach only one of them), and interleave writes into the same
+    // SQLite file. We probe for a *live* daemon rather than just a lock file, so a
+    // stale handshake left by a crash never blocks a legitimate restart.
+    if let Some((port, _)) = live_daemon() {
+        anyhow::bail!(
+            "a trot daemon is already running on this data directory \
+             (API on 127.0.0.1:{port}).\n\
+             Stop it first, or point this one somewhere else with TROT_DATA_DIR."
+        );
+    }
+
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
         let dir = data_dir()?;
