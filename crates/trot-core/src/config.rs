@@ -26,14 +26,34 @@ pub struct DevicesConfig {
     pub devices: Vec<Device>,
 }
 
-/// Write `data` to `path` atomically: write a sibling temp file, then `rename`
-/// it over the target (atomic on the same filesystem). A crash/power-loss can no
-/// longer leave a half-written JSON file that a reader would then treat as
-/// corrupt and silently reset to defaults. Used for every config/snapshot/handshake
-/// write across the engine and daemon.
+/// Write `data` to `path` atomically and privately.
+///
+/// Writes a sibling temp file, flushes it to disk, then `rename`s it over the
+/// target (atomic on the same filesystem), so a crash/power-loss can never leave
+/// a half-written JSON file that a reader would treat as corrupt and silently
+/// reset to defaults. Used for every config/snapshot/handshake write across the
+/// engine and daemon.
+///
+/// On Unix the temp file is created 0600 **before** any bytes are written, so the
+/// content is never briefly world-readable — this matters for `runtime.json`,
+/// which carries the API token. Setting the mode after the rename (as we used to)
+/// left exactly such a window. `sync_all` before the rename means the rename is
+/// durable, not just atomic.
 pub fn atomic_write(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
     let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, data)?;
+    {
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&tmp)?;
+        f.write_all(data)?;
+        f.sync_all()?;
+    }
     std::fs::rename(&tmp, path)
 }
 
@@ -248,5 +268,37 @@ pub fn display_unit() -> String {
         "mph".into()
     } else {
         "km/h".into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `runtime.json` carries the API token, so the file must never exist in a
+    /// world-readable state — not even briefly. Creating it 0600 up front (rather
+    /// than chmod-ing after the rename) is what guarantees that.
+    #[test]
+    #[cfg(unix)]
+    fn atomic_write_creates_private_files() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("trot-atomic-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("runtime.json");
+
+        atomic_write(&path, b"{\"token\":\"secret\"}").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "written file must be owner-only, got {mode:o}");
+        assert_eq!(std::fs::read(&path).unwrap(), b"{\"token\":\"secret\"}");
+
+        // Overwriting keeps both the contents and the private mode.
+        atomic_write(&path, b"second").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"second");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+
+        // No temp file is left behind.
+        assert!(!dir.join("runtime.tmp").exists(), "temp file must be renamed away");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -112,22 +112,14 @@ fn run_daemon() -> Result<()> {
         let engine = trot_core::start_engine(dir.clone()).await?;
 
         // Publish {port, token} so the CLI and Nowhere can reach the daemon. This
-        // file holds the API token, so write it atomically and lock it to the owner
-        // (0600) — it must not be world-readable on a shared host.
+        // file holds the API token; `atomic_write` creates it 0600 before writing
+        // a byte, so it is never briefly world-readable on a shared host.
         let runtime = serde_json::json!({ "port": engine.port, "token": engine.state.token });
         let runtime_path = dir.join("runtime.json");
         if let Err(e) =
             trot_core::config::atomic_write(&runtime_path, &serde_json::to_vec_pretty(&runtime)?)
         {
             tracing::warn!("could not write handshake file: {e}");
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(
-                &runtime_path,
-                std::fs::Permissions::from_mode(0o600),
-            );
         }
         tracing::info!(
             "trot daemon ready — API on 127.0.0.1:{} (handshake: {})",
