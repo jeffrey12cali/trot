@@ -170,6 +170,7 @@ pub async fn run(state: Arc<AppState>) {
         if let Some(sid) = active {
             let last = state.last_state.lock().unwrap().clone();
             persist_close(&state, sid, last.as_ref(), "ble_disconnect");
+            state.invalidate_today();
             state.broadcast(json!({"type": "session_end", "id": sid}));
             *state.active_session_id.lock().unwrap() = None;
         }
@@ -489,6 +490,7 @@ fn ingest_sample(
             source.as_deref(),
         ) {
             *state.active_session_id.lock().unwrap() = Some(sid);
+            state.invalidate_today();
             state.broadcast(json!({"type": "session_start", "id": sid}));
             tracing::info!("session {sid} started (start_steps={:?})", telem.steps);
         }
@@ -496,6 +498,7 @@ fn ingest_sample(
         let sid = active.unwrap();
         let reason = telem.status_name.clone().unwrap_or_else(|| "stopped".into());
         persist_close(state, sid, Some(telem), &reason);
+        state.invalidate_today();
         tracing::info!("session {sid} closed");
         state.broadcast(json!({"type": "session_end", "id": sid}));
         *state.active_session_id.lock().unwrap() = None;

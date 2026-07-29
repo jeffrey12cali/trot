@@ -615,6 +615,7 @@ async fn api_data_reset(State(s): State<Arc<AppState>>) -> Json<Value> {
     }
     *s.active_session_id.lock().unwrap() = None;
     *s.last_state.lock().unwrap() = None;
+    s.invalidate_today(); // the DB is now empty; don't serve cached totals
     // Genuine fresh-install state: forget the paired device and re-arm the
     // first-run wizard, so reopening the app starts setup from scratch.
     crate::config::clear_devices();
@@ -689,6 +690,7 @@ async fn api_data_restore(State(s): State<Arc<AppState>>) -> Json<Value> {
     };
     match s.db.import_dump(&dump, "replace") {
         Ok(res) => {
+            s.invalidate_today(); // history replaced; recompute totals now
             let mut out = json!({"ok": true});
             if let (Value::Object(o), Value::Object(r)) = (&mut out, res) {
                 for (k, v) in r {
@@ -802,6 +804,7 @@ async fn api_import(
     };
     match s.db.import_dump(&dump, &p.mode) {
         Ok(result) => {
+            s.invalidate_today(); // imported history may change today's totals
             let mut out = json!({"ok": true, "mode": p.mode});
             if let (Value::Object(ref mut o), Value::Object(r)) = (&mut out, result) {
                 for (k, v) in r {

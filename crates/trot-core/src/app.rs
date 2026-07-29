@@ -46,10 +46,26 @@ pub struct AppState {
     /// process doesn't die (taking the OS BLE handle with it) before the SC110
     /// gets a real GATT disconnect.
     pub ble_done: Notify,
+    /// Memoised `today_payload()` as `(computed_at, local_date, payload)`.
+    ///
+    /// Recomputing it means re-reading and de-glitch-walking EVERY raw sample of
+    /// the current day (see `Db::day_totals`), which is O(samples-so-far) — ~75 ms
+    /// at 10k samples, ~410 ms at 50k. The BLE worker broadcasts on every poll
+    /// (~10–15 Hz), so recomputing per poll made the engine DB-bound within ~10
+    /// minutes of walking and, because it all runs under the single DB mutex,
+    /// stalled every API read behind it. We cache for `TODAY_CACHE_TTL` and
+    /// invalidate explicitly on session start/end, so live numbers stay correct
+    /// to within one tick without the quadratic re-walk.
+    today_cache: Mutex<Option<(f64, String, Value)>>,
 }
 
 /// Max raw frames retained for diagnostics (~a few minutes at 20 Hz).
 const FRAME_RING_CAP: usize = 1200;
+
+/// How long a computed `today_payload()` stays fresh. One second keeps the live
+/// step counter visually real-time (the UI ticks at ~1 Hz anyway) while cutting
+/// the aggregation from ~15×/s to ~1×/s.
+const TODAY_CACHE_TTL: f64 = 1.0;
 
 impl AppState {
     pub fn new(
@@ -71,6 +87,7 @@ impl AppState {
             active_session_id: Mutex::new(None),
             last_state: Mutex::new(None),
             frames: Mutex::new(std::collections::VecDeque::with_capacity(FRAME_RING_CAP)),
+            today_cache: Mutex::new(None),
             wake: Notify::new(),
             stop: AtomicBool::new(false),
             ble_done: Notify::new(),
@@ -205,13 +222,39 @@ impl AppState {
     }
 
     /// `today` object combining day_totals + total_steps_live + avg speed.
+    ///
+    /// Served from a ~1 s cache (see `today_cache`): the underlying aggregation
+    /// walks every raw sample of the day, and the BLE worker asks for this on
+    /// every poll. Cheap correctness guards: the cache is keyed by local date (so
+    /// it can't serve yesterday's totals past midnight) and is dropped outright on
+    /// session start/end via `invalidate_today`.
     pub fn today_payload(&self) -> Value {
         let today = Self::today_str();
-        let mut day = self.db.day_totals(&today).unwrap_or_else(|_| json!({}));
+        let now = now_ts();
+        if let Some((at, ref date, ref payload)) = *self.today_cache.lock().unwrap() {
+            if date == &today && now - at < TODAY_CACHE_TTL {
+                return payload.clone();
+            }
+        }
+        let payload = self.compute_today_payload(&today);
+        *self.today_cache.lock().unwrap() = Some((now, today, payload.clone()));
+        payload
+    }
+
+    /// Drop the memoised `today` payload so the next read recomputes. Called when
+    /// something happens that must be reflected immediately rather than within the
+    /// cache TTL (a session opening or closing, or the data being wiped/restored).
+    pub fn invalidate_today(&self) {
+        *self.today_cache.lock().unwrap() = None;
+    }
+
+    /// The uncached aggregation. Only `today_payload` should call this.
+    fn compute_today_payload(&self, today: &str) -> Value {
+        let mut day = self.db.day_totals(today).unwrap_or_else(|_| json!({}));
         if let Value::Object(ref mut m) = day {
             let steps = m.get("steps").cloned().unwrap_or(json!(0));
             m.insert("total_steps_live".into(), steps);
-            if let Value::Object(avg) = self.avg_speed_payload(&today) {
+            if let Value::Object(avg) = self.avg_speed_payload(today) {
                 for (k, v) in avg {
                     m.insert(k, v);
                 }
@@ -259,4 +302,59 @@ pub fn state_dict(t: &Telemetry) -> Value {
 
 pub fn unix_now() -> f64 {
     now_ts()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state() -> Arc<AppState> {
+        let db = Arc::new(Db::open(":memory:").unwrap());
+        AppState::new(db, "km/h".into(), None, "tok".into())
+    }
+
+    /// The cache must not hide new walking beyond its TTL, and must be dropped
+    /// immediately when a session boundary invalidates it.
+    #[test]
+    fn today_cache_serves_then_invalidates() {
+        let s = state();
+        let today = AppState::today_str();
+        let sid = s
+            .db
+            .open_session(now_ts(), "km/h", Some(0), Some(0), None)
+            .unwrap();
+        s.db.insert_sample(Some(sid), now_ts(), Some(10), Some(1), Some(60), Some(0), Some(0), Some(3))
+            .unwrap();
+
+        let first = s.today_payload();
+        assert_eq!(first["steps"].as_i64().unwrap(), 10);
+
+        // More steps land, but within the TTL the cached value is still served.
+        s.db.insert_sample(Some(sid), now_ts(), Some(40), Some(2), Some(60), Some(0), Some(0), Some(3))
+            .unwrap();
+        assert_eq!(
+            s.today_payload()["steps"].as_i64().unwrap(),
+            10,
+            "within TTL the memoised payload is reused"
+        );
+
+        // An explicit invalidation (what session start/end does) recomputes now.
+        s.invalidate_today();
+        assert_eq!(
+            s.today_payload()["steps"].as_i64().unwrap(),
+            40,
+            "invalidate_today must force a recompute"
+        );
+
+        // Cache is keyed by local date, so a stale entry from another day is
+        // never served for today.
+        *s.today_cache.lock().unwrap() =
+            Some((now_ts(), "1999-12-31".to_string(), json!({"steps": 999})));
+        assert_eq!(
+            s.today_payload()["steps"].as_i64().unwrap(),
+            40,
+            "a cache entry for a different local date must be ignored"
+        );
+        assert_eq!(today, AppState::today_str());
+    }
 }
