@@ -182,11 +182,11 @@ pub async fn run(state: Arc<AppState>) {
         // Close any open session on link loss.
         let active = state.active_session();
         if let Some(sid) = active {
-            let last = state.last_state.lock().unwrap().clone();
+            let last = state.last_state();
             persist_close(&state, sid, last.as_ref(), "ble_disconnect");
             state.invalidate_today();
             state.broadcast(json!({"type": "session_end", "id": sid}));
-            *state.active_session_id.lock().unwrap() = None;
+            state.set_active_session(None);
         }
 
         tokio::select! {
@@ -490,7 +490,7 @@ fn ingest_sample(
     last_persist: &mut f64,
 ) {
     let now = unix_now();
-    *state.last_state.lock().unwrap() = Some(telem.clone());
+    state.set_last_state(Some(telem.clone()));
 
     // Remember the status we came in with: the streak bookkeeping below overwrites
     // `last_status`, but the persistence throttle needs to know whether this
@@ -520,7 +520,7 @@ fn ingest_sample(
             telem.duration_s,
             source.as_deref(),
         ) {
-            *state.active_session_id.lock().unwrap() = Some(sid);
+            state.set_active_session(Some(sid));
             state.invalidate_today();
             state.broadcast(json!({"type": "session_start", "id": sid}));
             tracing::info!("session {sid} started (start_steps={:?})", telem.steps);
@@ -532,7 +532,7 @@ fn ingest_sample(
         state.invalidate_today();
         tracing::info!("session {sid} closed");
         state.broadcast(json!({"type": "session_end", "id": sid}));
-        *state.active_session_id.lock().unwrap() = None;
+        state.set_active_session(None);
     }
 
     // Persist at most one row per SAMPLE_MIN_INTERVAL_S. A status change is always

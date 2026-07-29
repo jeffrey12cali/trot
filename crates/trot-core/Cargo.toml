@@ -22,3 +22,8 @@ thiserror = "2"
 tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"
+
+[dev-dependencies]
+# test-util gives tests a pausable clock, so supervisor/backoff tests don't
+# actually sleep through their retry delays.
+tokio = { version = "1", features = ["full", "test-util"] }

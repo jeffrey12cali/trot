@@ -59,6 +59,17 @@ pub struct AppState {
     today_cache: Mutex<Option<(f64, String, Value)>>,
 }
 
+/// Lock a state mutex, recovering from poisoning instead of cascading the panic.
+///
+/// A panic anywhere while one of these is held would otherwise poison it, and
+/// every later `.lock().unwrap()` would panic too — turning one bad frame into a
+/// dead BLE worker and a permanently 500-ing API. The data behind these locks is
+/// a cache/telemetry snapshot, so proceeding with it is strictly better than
+/// taking the whole engine down. `Db::conn()` already does exactly this.
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Max raw frames retained for diagnostics (~a few minutes at 20 Hz).
 const FRAME_RING_CAP: usize = 1200;
 
@@ -110,17 +121,17 @@ impl AppState {
 
     /// Current displayed unit ("km/h" or "mph").
     pub fn display_unit(&self) -> String {
-        self.display_unit.lock().unwrap().clone()
+        lock(&self.display_unit).clone()
     }
 
     /// Change the displayed unit at runtime (also persist via config elsewhere).
     pub fn set_display_unit(&self, unit: &str) {
-        *self.display_unit.lock().unwrap() = unit.to_string();
+        *lock(&self.display_unit) = unit.to_string();
     }
 
     /// Record a raw protocol frame for diagnostics (drops the oldest when full).
     pub fn record_frame(&self, opcode: u8, frame: &[u8]) {
-        let mut buf = self.frames.lock().unwrap();
+        let mut buf = lock(&self.frames);
         if buf.len() >= FRAME_RING_CAP {
             buf.pop_front();
         }
@@ -129,7 +140,7 @@ impl AppState {
 
     /// Recent raw frames as JSON `{ts, iso, opcode, hex}`, oldest first.
     pub fn frames_snapshot(&self) -> Vec<Value> {
-        let buf = self.frames.lock().unwrap();
+        let buf = lock(&self.frames);
         buf.iter()
             .map(|(ts, opcode, bytes)| {
                 let hex = bytes
@@ -157,11 +168,11 @@ impl AppState {
     }
 
     pub fn device_id(&self) -> Option<String> {
-        self.device_id.lock().unwrap().clone()
+        lock(&self.device_id).clone()
     }
 
     pub fn set_device_id(&self, id: Option<String>) {
-        *self.device_id.lock().unwrap() = id;
+        *lock(&self.device_id) = id;
         // A (re)paired or switched device should connect, even if we were paused
         // by a manual disconnect or had given up.
         self.paused.store(false, Ordering::Relaxed);
@@ -199,7 +210,22 @@ impl AppState {
     }
 
     pub fn active_session(&self) -> Option<i64> {
-        *self.active_session_id.lock().unwrap()
+        *lock(&self.active_session_id)
+    }
+
+    /// Set (or clear) the session the worker is currently recording into.
+    pub fn set_active_session(&self, id: Option<i64>) {
+        *lock(&self.active_session_id) = id;
+    }
+
+    /// Latest decoded telemetry, if the treadmill has reported since connect.
+    pub fn last_state(&self) -> Option<Telemetry> {
+        lock(&self.last_state).clone()
+    }
+
+    /// Record the latest decoded telemetry.
+    pub fn set_last_state(&self, telem: Option<Telemetry>) {
+        *lock(&self.last_state) = telem;
     }
 
     fn today_str() -> String {
@@ -231,13 +257,13 @@ impl AppState {
     pub fn today_payload(&self) -> Value {
         let today = Self::today_str();
         let now = now_ts();
-        if let Some((at, ref date, ref payload)) = *self.today_cache.lock().unwrap() {
+        if let Some((at, ref date, ref payload)) = *lock(&self.today_cache) {
             if date == &today && now - at < TODAY_CACHE_TTL {
                 return payload.clone();
             }
         }
         let payload = self.compute_today_payload(&today);
-        *self.today_cache.lock().unwrap() = Some((now, today, payload.clone()));
+        *lock(&self.today_cache) = Some((now, today, payload.clone()));
         payload
     }
 
@@ -245,7 +271,7 @@ impl AppState {
     /// something happens that must be reflected immediately rather than within the
     /// cache TTL (a session opening or closing, or the data being wiped/restored).
     pub fn invalidate_today(&self) {
-        *self.today_cache.lock().unwrap() = None;
+        *lock(&self.today_cache) = None;
     }
 
     /// The uncached aggregation. Only `today_payload` should call this.
@@ -271,7 +297,7 @@ impl AppState {
             "connect_failed": self.is_connect_failed(),
             "display_unit": self.display_unit(),
             "device_id": self.device_id(),
-            "state": self.last_state.lock().unwrap().clone(),
+            "state": lock(&self.last_state).clone(),
             "active_session_id": self.active_session(),
             "today": self.today_payload(),
         })
@@ -348,7 +374,7 @@ mod tests {
 
         // Cache is keyed by local date, so a stale entry from another day is
         // never served for today.
-        *s.today_cache.lock().unwrap() =
+        *lock(&s.today_cache) =
             Some((now_ts(), "1999-12-31".to_string(), json!({"steps": 999})));
         assert_eq!(
             s.today_payload()["steps"].as_i64().unwrap(),

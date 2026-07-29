@@ -613,8 +613,8 @@ async fn api_data_reset(State(s): State<Arc<AppState>>) -> Json<Value> {
     if let Err(e) = s.db.wipe_all() {
         return Json(json!({"ok": false, "error": format!("wipe failed: {e}")}));
     }
-    *s.active_session_id.lock().unwrap() = None;
-    *s.last_state.lock().unwrap() = None;
+    s.set_active_session(None);
+    s.set_last_state(None);
     s.invalidate_today(); // the DB is now empty; don't serve cached totals
     // Genuine fresh-install state: forget the paired device and re-arm the
     // first-run wizard, so reopening the app starts setup from scratch.
