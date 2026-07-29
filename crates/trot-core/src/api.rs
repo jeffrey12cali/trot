@@ -156,7 +156,10 @@ async fn guard(State(s): State<Arc<AppState>>, req: Request, next: Next) -> Resp
 
     // 2. Require the session token on mutating API requests. Reads stay open so
     //    same-origin GETs work without ceremony; CORS + the Origin guard above
-    //    already prevent cross-site reading of responses.
+    //    already prevent cross-site reading of responses. Note this means any
+    //    process running as YOU can read your activity data if it discovers the
+    //    port — which is no worse than it reading the SQLite file directly. Other
+    //    users are kept out by the 0700 data dir / 0600 handshake. See README.
     let is_write = matches!(
         *req.method(),
         Method::POST | Method::PUT | Method::DELETE | Method::PATCH
@@ -172,7 +175,14 @@ async fn guard(State(s): State<Arc<AppState>>, req: Request, next: Next) -> Resp
         }
     }
 
-    next.run(req).await
+    let mut resp = next.run(req).await;
+    // We only ever serve JSON. Stop a browser from content-sniffing a response
+    // into something executable.
+    resp.headers_mut().insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    resp
 }
 
 // ---- REST ------------------------------------------------------------------

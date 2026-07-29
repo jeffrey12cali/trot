@@ -2,10 +2,49 @@
 
 All notable changes to `trot` are documented here.
 
+## 0.2.0
+
+New device controls, plus a second audit pass that turned up a performance
+problem and a couple of real bugs.
+
+### Added
+- `POST /api/connect` / `POST /api/disconnect` — reversibly drop the Bluetooth
+  link while leaving the treadmill paired and the engine (and sync) running.
+- `GET /api/steps/by-device` — daily step totals split by the device that
+  recorded them, with `device_name` added to `/api/settings`.
+- The daemon gives up auto-connecting after repeated failures and waits for a
+  manual reconnect, instead of scanning forever.
+- The README now documents the whole `/api` + `/ws` surface and the security
+  model.
+
+### Fixed
+- **Today's totals are no longer recomputed on every Bluetooth poll.** They were
+  recalculated 10–15 times a second, each time re-walking every raw sample of the
+  day (~410 ms once a day had 50k samples) while holding the database lock, which
+  made the engine progressively slower during a walk and stalled API reads behind
+  it. Now cached for a second and invalidated on session boundaries.
+- **`duration_running_s` was wrong by roughly 30×** — it converted a sample count
+  to seconds with a hardcoded 2.5 s spacing that never matched the real rate.
+- **A reconnect could be silently ignored.** A wake arriving in a narrow window
+  was dropped, leaving the worker parked forever while `/api/connect` reported
+  success.
+- Raw samples are stored once a second rather than on every poll (~1M rows a day
+  before), with status transitions always written through.
+- A second `trot daemon` on the same data directory is now refused instead of
+  both fighting over the adapter and the database.
+- Failed database writes are logged instead of silently discarded, and
+  `busy_timeout` lets a contended write wait rather than fail.
+- The BLE worker and rollup loop are restarted if they panic; a panic can no
+  longer poison a lock and take the API down with it.
+- Config, snapshot and handshake files are created private (0600) *before* being
+  written, and flushed to disk, closing a window where the API token was briefly
+  world-readable.
+- Responses carry `X-Content-Type-Options: nosniff`.
+
 ## 0.1.1
 
-Hardening + correctness pass from a pre-launch security & code audit. No CLI,
-`/api`, or `/ws` route/shape changes — the public contract is unchanged.
+Hardening + correctness pass from a pre-launch security & code audit. No CLI or
+`/ws` route/shape changes.
 
 - **Security:** the request guard now rejects disallowed browser `Origin`s on
   every request, closing the `/ws` upgrade (which CORS does not cover) to
