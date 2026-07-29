@@ -99,11 +99,15 @@ const IMPORT_MAX_RAW_AGE_S: f64 = 7.0 * 86400.0;
 /// re-written.
 const ROLLUP_DEGLITCH_LOOKBACK_S: f64 = 180.0;
 
+/// Seconds since the Unix epoch. A clock set before 1970 yields 0.0 rather than
+/// panicking — the timestamp would be wrong either way, but this is called from
+/// the ingest hot path and taking the whole engine down over a misconfigured
+/// clock helps nobody. Matches `config::now()`.
 pub fn now_ts() -> f64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs_f64()
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
 }
 
 fn local_date(ts: f64) -> String {
@@ -651,17 +655,16 @@ impl Db {
         })
     }
 
-    /// Steps added per hour on the given date (24 buckets, "00".."23").
-    ///
-    /// Drives off the same `deglitch_walk` as `day_totals`, attributing each
-    /// accepted increment to the local hour of its sample — so the bars sum to
-    /// the day's step total and a stale frame can't spike a single hour (this is
-    /// what made one afternoon hour show the day's max after a reconnect).
     /// Daily step totals grouped by recording device (`source`) for every local
     /// day >= `since_local_date`. Built from the per-minute rollups (de-glitched
-    /// and permanent), so past days are exact; today may lag the last unrolled
-    /// minute. Sessions recorded before device attribution have no source and
-    /// group under an empty string (surfaced as "Unknown" by the client).
+    /// and permanent), so past days are exact; today lags by however much of the
+    /// current minute has not been rolled up yet — `/api/steps/by-device` returns
+    /// `complete_through_ts` so a client can say so. Sessions recorded before
+    /// device attribution have no source and group under an empty string
+    /// (surfaced as "Unknown" by the client).
+    ///
+    /// `source` is captured when the session opens, so renaming this install
+    /// splits its history between the old and new label rather than rewriting it.
     pub fn steps_by_device(&self, since_local_date: &str) -> Result<Vec<Value>> {
         let c = self.conn();
         let mut stmt = c.prepare(
@@ -688,6 +691,12 @@ impl Db {
         Ok(rows)
     }
 
+    /// Steps added per hour on the given date (24 buckets, "00".."23").
+    ///
+    /// Drives off the same `deglitch_walk` as `day_totals`, attributing each
+    /// accepted increment to the local hour of its sample — so the bars sum to
+    /// the day's step total and a stale frame can't spike a single hour (this is
+    /// what made one afternoon hour show the day's max after a reconnect).
     pub fn hourly_steps(&self, local_date_s: &str) -> Result<Vec<Value>> {
         let mut buckets = [0i64; 24];
         let c = self.conn();

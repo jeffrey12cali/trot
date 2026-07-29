@@ -360,7 +360,24 @@ async fn api_steps_by_device(
         .format("%Y-%m-%d")
         .to_string();
     match s.db.steps_by_device(&since) {
-        Ok(rows) => Json(json!({ "since": since, "days": days, "rows": rows })).into_response(),
+        Ok(rows) => {
+            // These totals come from the per-minute rollups, so the current
+            // (un-rolled) minutes aren't in them yet. Tell the client how far the
+            // data is actually complete instead of letting it present a slightly
+            // low "today" as final.
+            let complete_through_ts = s
+                .db
+                .rollup_status()
+                .ok()
+                .and_then(|st| st.get("last_rolled_ts").and_then(|v| v.as_f64()));
+            Json(json!({
+                "since": since,
+                "days": days,
+                "rows": rows,
+                "complete_through_ts": complete_through_ts,
+            }))
+            .into_response()
+        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
@@ -675,7 +692,17 @@ async fn api_settings_set(
         st.setup_complete = c;
     }
     if let Some(n) = p.device_name {
-        st.device_name = n.trim().chars().take(40).collect();
+        // This label is stored on every session row and echoed back in the
+        // by-device breakdown, so keep it to printable text: strip control
+        // characters (newlines included) before trimming and capping.
+        st.device_name = n
+            .chars()
+            .filter(|c| !c.is_control())
+            .collect::<String>()
+            .trim()
+            .chars()
+            .take(40)
+            .collect();
     }
     crate::config::save_settings(&st);
     Json(json!({
