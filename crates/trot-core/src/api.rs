@@ -908,3 +908,54 @@ async fn ws_loop(mut socket: WebSocket, s: Arc<AppState>) {
         }
     }
 }
+
+#[cfg(test)]
+mod origin_tests {
+    use super::is_allowed_origin;
+    use axum::http::HeaderValue;
+
+    fn allowed(origin: &str) -> bool {
+        is_allowed_origin(&HeaderValue::from_str(origin).unwrap())
+    }
+
+    /// Every origin a Tauri webview can actually present, per platform and mode.
+    ///
+    /// These are not guesses — they are what `tauri-2.11`'s `tauri_protocol_url`
+    /// and `PROXY_DEV_SERVER` produce:
+    ///   * `windows || android` → `http(s)://tauri.localhost`
+    ///   * everything else      → `tauri://localhost`
+    ///   * desktop dev          → the devUrl verbatim (localhost)
+    ///   * mobile dev           → `tauri://localhost`, because PROXY_DEV_SERVER
+    ///     (`cfg!(all(dev, mobile))`) proxies a LAN devUrl through the custom
+    ///     protocol rather than loading `http://192.168.x.x:5199` directly.
+    ///
+    /// If this list ever fails, the app gets 403 on every `/api` call and `/ws`
+    /// refuses to upgrade — a total, silent outage of the UI on that platform.
+    /// That is why it is a test and not a note in a document.
+    #[test]
+    fn every_platform_webview_origin_is_allowed() {
+        for origin in [
+            "tauri://localhost",        // macOS, iOS, Linux (prod); all mobile dev
+            "http://tauri.localhost",   // Windows, Android (prod)
+            "https://tauri.localhost",  // ditto, with useHttpsScheme
+            "http://localhost:5199",    // desktop dev server
+            "http://127.0.0.1:5199",
+            "http://[::1]:5199",
+        ] {
+            assert!(allowed(origin), "webview origin must be allowed: {origin}");
+        }
+    }
+
+    #[test]
+    fn a_hostile_page_is_rejected() {
+        for origin in [
+            "https://evil.example",
+            "http://localhost.evil.example",   // suffix trick
+            "http://127.0.0.1.evil.example",
+            "https://tauri.localhost.evil.example",
+            "http://192.168.1.105:5199",       // a LAN page is not the app
+        ] {
+            assert!(!allowed(origin), "must be rejected: {origin}");
+        }
+    }
+}
