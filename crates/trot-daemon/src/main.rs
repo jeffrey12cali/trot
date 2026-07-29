@@ -12,7 +12,11 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 #[derive(Parser)]
-#[command(name = "trot", version, about = "TROT — it's really only treadmilling.")]
+#[command(
+    name = "trot",
+    version,
+    about = "TROT — it's really only treadmilling."
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -241,7 +245,8 @@ fn get(path: &str) -> Result<serde_json::Value> {
 /// POST to the daemon. Mutating routes require the per-launch token (loopback
 /// Host + `x-sc110-token`), so we read both from the handshake file.
 fn post(path: &str, body: serde_json::Value) -> Result<serde_json::Value> {
-    let (port, token) = runtime().context("no running trot daemon — start it with `trot daemon`")?;
+    let (port, token) =
+        runtime().context("no running trot daemon — start it with `trot daemon`")?;
     let url = format!("http://127.0.0.1:{port}{path}");
     let resp = ureq::post(&url)
         .set("x-sc110-token", &token)
@@ -274,8 +279,14 @@ fn cmd_today() -> Result<()> {
     let unit = v["display_unit"].as_str().unwrap_or("km/h");
     println!("Today · {}", v["date"].as_str().unwrap_or(""));
     println!("  steps      {}", t["steps"].as_i64().unwrap_or(0));
-    println!("  distance   {}", fmt_dist(t["distance_raw"].as_i64().unwrap_or(0), unit));
-    println!("  time       {}", fmt_dur(t["duration_s"].as_i64().unwrap_or(0)));
+    println!(
+        "  distance   {}",
+        fmt_dist(t["distance_raw"].as_i64().unwrap_or(0), unit)
+    );
+    println!(
+        "  time       {}",
+        fmt_dur(t["duration_s"].as_i64().unwrap_or(0))
+    );
     println!("  calories   {}", t["calories"].as_i64().unwrap_or(0));
     println!("  sessions   {}", t["sessions"].as_i64().unwrap_or(0));
     Ok(())
@@ -359,7 +370,10 @@ fn cmd_scan(seconds: f64, all: bool, list: bool) -> Result<()> {
     if list || !std::io::stdout().is_terminal() {
         for d in devices {
             let id = d["device_id"].as_str().unwrap_or("");
-            let sig = d["rssi"].as_i64().map(|r| format!("   {r} dBm")).unwrap_or_default();
+            let sig = d["rssi"]
+                .as_i64()
+                .map(|r| format!("   {r} dBm"))
+                .unwrap_or_default();
             println!("  {}{sig}", name_of(d));
             println!("      {id}");
         }
@@ -369,7 +383,10 @@ fn cmd_scan(seconds: f64, all: bool, list: bool) -> Result<()> {
     let labels: Vec<String> = devices
         .iter()
         .map(|d| {
-            let sig = d["rssi"].as_i64().map(|r| format!("  ·  {r} dBm")).unwrap_or_default();
+            let sig = d["rssi"]
+                .as_i64()
+                .map(|r| format!("  ·  {r} dBm"))
+                .unwrap_or_default();
             format!("{}{sig}", name_of(d))
         })
         .collect();
@@ -442,7 +459,10 @@ fn cmd_pair(device_id: String, name: Option<String>) -> Result<()> {
 fn do_pair(id: &str, name: Option<String>) -> Result<()> {
     let label = name.clone().unwrap_or_else(|| id.to_string());
     if live_daemon().is_some() {
-        post("/api/pair", serde_json::json!({ "device_id": id, "name": name }))?;
+        post(
+            "/api/pair",
+            serde_json::json!({ "device_id": id, "name": name }),
+        )?;
         println!("Paired \"{label}\". The running daemon is connecting to it now.");
     } else {
         trot_core::config::init_paths(&data_dir()?);

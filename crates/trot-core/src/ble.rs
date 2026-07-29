@@ -10,9 +10,7 @@ use crate::protocol::{
     NOTIFY_CHAR_UUID, STATUS_RUNNING, WRITE_CHAR_UUID,
 };
 use anyhow::{anyhow, Result};
-use btleplug::api::{
-    Central, Manager as _, Peripheral as _, ScanFilter, WriteType,
-};
+use btleplug::api::{Central, Manager as _, Peripheral as _, ScanFilter, WriteType};
 use btleplug::platform::{Adapter, Manager, Peripheral};
 use futures::{FutureExt, StreamExt};
 use serde_json::json;
@@ -313,7 +311,9 @@ async fn poll_sc110(
             Ok(Err(e)) => return Err(e.into()), // real BLE error → reconnect
             Err(_) => {
                 dead_polls += 1;
-                tracing::warn!("timeout writing opcode 0x{opcode:02x} ({dead_polls}/{MAX_DEAD_POLLS})");
+                tracing::warn!(
+                    "timeout writing opcode 0x{opcode:02x} ({dead_polls}/{MAX_DEAD_POLLS})"
+                );
                 if dead_polls >= MAX_DEAD_POLLS {
                     return Err(anyhow!("link unresponsive; forcing reconnect"));
                 }
@@ -350,7 +350,13 @@ async fn poll_sc110(
             }
         };
 
-        ingest_sample(state, &telem, &mut last_status, &mut status_streak, &mut last_persist);
+        ingest_sample(
+            state,
+            &telem,
+            &mut last_status,
+            &mut status_streak,
+            &mut last_persist,
+        );
         broadcast_state(state, &telem);
         tokio::time::sleep(POLL_INTERVAL).await;
     }
@@ -405,7 +411,13 @@ async fn stream_ftms(
             }
         };
         let telem = ftms_to_telemetry(&data, &state.display_unit());
-        ingest_sample(state, &telem, &mut last_status, &mut status_streak, &mut last_persist);
+        ingest_sample(
+            state,
+            &telem,
+            &mut last_status,
+            &mut status_streak,
+            &mut last_persist,
+        );
         broadcast_state(state, &telem);
     }
     let _ = peripheral.disconnect().await;
@@ -462,7 +474,8 @@ fn ftms_to_telemetry(d: &ftms::FtmsTreadmillData, unit: &str) -> Telemetry {
         t.distance_raw = Some(raw);
         t.distance_m = Some(protocol::distance_meters(raw));
         t.distance_km = Some(protocol::distance_meters(raw) as f64 / 1000.0);
-        t.distance_mi = Some(protocol::distance_meters(raw) as f64 / 1000.0 / protocol::KMH_PER_MPH);
+        t.distance_mi =
+            Some(protocol::distance_meters(raw) as f64 / 1000.0 / protocol::KMH_PER_MPH);
     }
     if let Some(s) = d.elapsed_time_s {
         t.duration_s = Some(s);
@@ -527,7 +540,10 @@ fn ingest_sample(
         }
     } else if confirmed && !telem.is_running && active.is_some() {
         let sid = active.unwrap();
-        let reason = telem.status_name.clone().unwrap_or_else(|| "stopped".into());
+        let reason = telem
+            .status_name
+            .clone()
+            .unwrap_or_else(|| "stopped".into());
         persist_close(state, sid, Some(telem), &reason);
         state.invalidate_today();
         tracing::info!("session {sid} closed");

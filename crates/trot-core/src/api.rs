@@ -5,6 +5,9 @@
 use crate::app::AppState;
 use crate::ble;
 use crate::protocol::{speed_kmh, speed_mph};
+use axum::extract::{DefaultBodyLimit, Request};
+use axum::http::{HeaderName, HeaderValue};
+use axum::middleware::{self, Next};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -15,9 +18,6 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use axum::extract::{DefaultBodyLimit, Request};
-use axum::http::{HeaderName, HeaderValue};
-use axum::middleware::{self, Next};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -29,7 +29,9 @@ use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 /// read responses; writes additionally require the token (see `guard`).
 fn cors() -> CorsLayer {
     CorsLayer::new()
-        .allow_origin(AllowOrigin::predicate(|origin, _req| is_allowed_origin(origin)))
+        .allow_origin(AllowOrigin::predicate(|origin, _req| {
+            is_allowed_origin(origin)
+        }))
         .allow_methods(Any)
         .allow_headers([
             axum::http::header::CONTENT_TYPE,
@@ -68,7 +70,10 @@ fn origin_host(origin: &str) -> Option<&str> {
     let host = if let Some(rest) = authority.strip_prefix('[') {
         rest.split(']').next().unwrap_or("") // [::1]:port
     } else {
-        authority.rsplit_once(':').map(|(h, _)| h).unwrap_or(authority)
+        authority
+            .rsplit_once(':')
+            .map(|(h, _)| h)
+            .unwrap_or(authority)
     };
     (!host.is_empty()).then_some(host)
 }
@@ -103,7 +108,10 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/api/data/snapshot", get(api_data_snapshot))
         .route("/api/data/reset", post(api_data_reset))
         .route("/api/data/restore", post(api_data_restore))
-        .route("/api/settings", get(api_settings_get).post(api_settings_set))
+        .route(
+            "/api/settings",
+            get(api_settings_get).post(api_settings_set),
+        )
         .route("/api/import", post(api_import))
         .route("/ws", get(ws_handler))
         // Security guard (runs first): rejects non-loopback Host headers
@@ -365,11 +373,10 @@ async fn api_steps_by_device(
             // (un-rolled) minutes aren't in them yet. Tell the client how far the
             // data is actually complete instead of letting it present a slightly
             // low "today" as final.
-            let complete_through_ts = s
-                .db
-                .rollup_status()
-                .ok()
-                .and_then(|st| st.get("last_rolled_ts").and_then(|v| v.as_f64()));
+            let complete_through_ts =
+                s.db.rollup_status()
+                    .ok()
+                    .and_then(|st| st.get("last_rolled_ts").and_then(|v| v.as_f64()));
             Json(json!({
                 "since": since,
                 "days": days,
@@ -399,10 +406,7 @@ async fn api_sessions(
     Json(json!({"sessions": rows}))
 }
 
-async fn api_session_detail(
-    State(s): State<Arc<AppState>>,
-    Path(id): Path<i64>,
-) -> Json<Value> {
+async fn api_session_detail(State(s): State<Arc<AppState>>, Path(id): Path<i64>) -> Json<Value> {
     match s.db.get_session(id).ok().flatten() {
         Some(sess) => Json(serde_json::to_value(sess).unwrap_or(Value::Null)),
         None => Json(json!({"error": "not_found"})),
@@ -552,10 +556,9 @@ async fn api_rollup_run(
         // Safe full-history backfill over the entire raw range (0..now): upserts
         // buckets only where raw exists, never deletes — data-loss-free once raw
         // pruning is real.
-        let res = s
-            .db
-            .backfill_rollups(0.0, crate::db::now_ts())
-            .unwrap_or_else(|_| json!({}));
+        let res =
+            s.db.backfill_rollups(0.0, crate::db::now_ts())
+                .unwrap_or_else(|_| json!({}));
         let mut out = json!({"ok": true, "pruned_samples": 0, "rebuilt": true});
         if let (Value::Object(ref mut o), Value::Object(r)) = (&mut out, res) {
             for (k, v) in r {
@@ -567,7 +570,9 @@ async fn api_rollup_run(
     let res = s.db.rollup_samples().unwrap_or_else(|_| json!({}));
     let mut pruned = 0usize;
     if p.prune {
-        pruned = s.db.prune_raw_samples(RETENTION_DAYS * 86400.0).unwrap_or(0);
+        pruned =
+            s.db.prune_raw_samples(RETENTION_DAYS * 86400.0)
+                .unwrap_or(0);
     }
     let mut out = json!({"ok": true, "pruned_samples": pruned});
     if let (Value::Object(ref mut o), Value::Object(r)) = (&mut out, res) {
@@ -586,10 +591,7 @@ struct ExportParams {
     include: String,
 }
 
-async fn api_export(
-    State(s): State<Arc<AppState>>,
-    Query(p): Query<ExportParams>,
-) -> Response {
+async fn api_export(State(s): State<Arc<AppState>>, Query(p): Query<ExportParams>) -> Response {
     let include_raw = p.include.eq_ignore_ascii_case("raw");
     let dump = s.db.export_all(include_raw).unwrap_or_else(|_| json!({}));
     let body = serde_json::to_string(&dump).unwrap_or_default();
@@ -623,7 +625,12 @@ async fn api_data_reset(State(s): State<Arc<AppState>>) -> Json<Value> {
     // Refuse to reset an already-empty DB: otherwise a second reset would export
     // nothing and overwrite the *first* reset's good snapshot with an empty one,
     // making the earlier data unrecoverable. Restore first if that's the intent.
-    let count = |k: &str| dump.get(k).and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+    let count = |k: &str| {
+        dump.get(k)
+            .and_then(|v| v.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0)
+    };
     let has_data = ["sessions", "samples", "rollups_1m", "speed_marks"]
         .iter()
         .any(|k| count(k) > 0);
@@ -634,7 +641,9 @@ async fn api_data_reset(State(s): State<Arc<AppState>>) -> Json<Value> {
         }));
     }
     let path = crate::config::snapshot_path();
-    if let Err(e) = crate::config::atomic_write(&path, &serde_json::to_vec(&dump).unwrap_or_default()) {
+    if let Err(e) =
+        crate::config::atomic_write(&path, &serde_json::to_vec(&dump).unwrap_or_default())
+    {
         return Json(json!({"ok": false, "error": format!("could not save snapshot: {e}")}));
     }
     if let Err(e) = s.db.wipe_all() {
@@ -643,14 +652,16 @@ async fn api_data_reset(State(s): State<Arc<AppState>>) -> Json<Value> {
     s.set_active_session(None);
     s.set_last_state(None);
     s.invalidate_today(); // the DB is now empty; don't serve cached totals
-    // Genuine fresh-install state: forget the paired device and re-arm the
-    // first-run wizard, so reopening the app starts setup from scratch.
+                          // Genuine fresh-install state: forget the paired device and re-arm the
+                          // first-run wizard, so reopening the app starts setup from scratch.
     crate::config::clear_devices();
     let mut st = crate::config::load_settings();
     st.setup_complete = false;
     crate::config::save_settings(&st);
     s.set_device_id(None); // stops the worker and wakes it to wait for re-pair
-    Json(json!({"ok": true, "snapshot_sessions": count("sessions"), "snapshot_samples": count("samples")}))
+    Json(
+        json!({"ok": true, "snapshot_sessions": count("sessions"), "snapshot_samples": count("samples")}),
+    )
 }
 
 #[derive(Deserialize)]
@@ -684,7 +695,11 @@ async fn api_settings_set(
         st.locale = if l == "de" { "de".into() } else { "en".into() };
     }
     if let Some(u) = p.display_unit {
-        let u = if u.to_lowercase() == "mph" { "mph".to_string() } else { "km/h".to_string() };
+        let u = if u.to_lowercase() == "mph" {
+            "mph".to_string()
+        } else {
+            "km/h".to_string()
+        };
         st.display_unit = u.clone();
         s.set_display_unit(&u);
     }
@@ -719,7 +734,9 @@ async fn api_data_restore(State(s): State<Arc<AppState>>) -> Json<Value> {
     let path = crate::config::snapshot_path();
     let bytes = match std::fs::read(&path) {
         Ok(b) => b,
-        Err(e) => return Json(json!({"ok": false, "error": format!("no snapshot to restore: {e}")})),
+        Err(e) => {
+            return Json(json!({"ok": false, "error": format!("no snapshot to restore: {e}")}))
+        }
     };
     let dump: Value = match serde_json::from_slice(&bytes) {
         Ok(d) => d,
@@ -746,8 +763,15 @@ async fn api_data_snapshot(State(_s): State<Arc<AppState>>) -> Json<Value> {
     match std::fs::read(&path) {
         Ok(bytes) => {
             let v: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-            let count = |k: &str| v.get(k).and_then(|x| x.as_array()).map(|a| a.len()).unwrap_or(0);
-            Json(json!({"exists": true, "sessions": count("sessions"), "samples": count("samples")}))
+            let count = |k: &str| {
+                v.get(k)
+                    .and_then(|x| x.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0)
+            };
+            Json(
+                json!({"exists": true, "sessions": count("sessions"), "samples": count("samples")}),
+            )
         }
         Err(_) => Json(json!({"exists": false})),
     }
@@ -866,11 +890,7 @@ async fn ws_loop(mut socket: WebSocket, s: Arc<AppState>) {
     if let Value::Object(ref mut m) = snap {
         m.insert("type".into(), json!("snapshot"));
     }
-    if socket
-        .send(Message::Text(snap.to_string()))
-        .await
-        .is_err()
-    {
+    if socket.send(Message::Text(snap.to_string())).await.is_err() {
         return;
     }
     let mut rx = s.hub.subscribe();
@@ -890,4 +910,3 @@ async fn ws_loop(mut socket: WebSocket, s: Arc<AppState>) {
         }
     }
 }
-

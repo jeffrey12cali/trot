@@ -345,19 +345,36 @@ mod tests {
     fn today_cache_serves_then_invalidates() {
         let s = state();
         let today = AppState::today_str();
-        let sid = s
-            .db
-            .open_session(now_ts(), "km/h", Some(0), Some(0), None)
-            .unwrap();
-        s.db.insert_sample(Some(sid), now_ts(), Some(10), Some(1), Some(60), Some(0), Some(0), Some(3))
-            .unwrap();
+        let sid =
+            s.db.open_session(now_ts(), "km/h", Some(0), Some(0), None)
+                .unwrap();
+        s.db.insert_sample(
+            Some(sid),
+            now_ts(),
+            Some(10),
+            Some(1),
+            Some(60),
+            Some(0),
+            Some(0),
+            Some(3),
+        )
+        .unwrap();
 
         let first = s.today_payload();
         assert_eq!(first["steps"].as_i64().unwrap(), 10);
 
         // More steps land, but within the TTL the cached value is still served.
-        s.db.insert_sample(Some(sid), now_ts(), Some(40), Some(2), Some(60), Some(0), Some(0), Some(3))
-            .unwrap();
+        s.db.insert_sample(
+            Some(sid),
+            now_ts(),
+            Some(40),
+            Some(2),
+            Some(60),
+            Some(0),
+            Some(0),
+            Some(3),
+        )
+        .unwrap();
         assert_eq!(
             s.today_payload()["steps"].as_i64().unwrap(),
             10,
@@ -374,8 +391,7 @@ mod tests {
 
         // Cache is keyed by local date, so a stale entry from another day is
         // never served for today.
-        *lock(&s.today_cache) =
-            Some((now_ts(), "1999-12-31".to_string(), json!({"steps": 999})));
+        *lock(&s.today_cache) = Some((now_ts(), "1999-12-31".to_string(), json!({"steps": 999})));
         assert_eq!(
             s.today_payload()["steps"].as_i64().unwrap(),
             40,

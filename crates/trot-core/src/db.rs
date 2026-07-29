@@ -465,7 +465,16 @@ impl Db {
             "UPDATE sessions SET ended_ts=?, steps_end=?, duration_s_end=?, distance_raw_end=?,
                                  calories_end=?, speed_raw_last=?, closed_reason=?
              WHERE id=? AND ended_ts IS NULL",
-            params![ts, steps, duration_s, distance_raw, calories, speed_raw, reason, session_id],
+            params![
+                ts,
+                steps,
+                duration_s,
+                distance_raw,
+                calories,
+                speed_raw,
+                reason,
+                session_id
+            ],
         )?;
         Ok(())
     }
@@ -483,7 +492,14 @@ impl Db {
         c.execute(
             "UPDATE sessions SET steps_end=?, duration_s_end=?, distance_raw_end=?,
                                  calories_end=?, speed_raw_last=? WHERE id=?",
-            params![steps, duration_s, distance_raw, calories, speed_raw, session_id],
+            params![
+                steps,
+                duration_s,
+                distance_raw,
+                calories,
+                speed_raw,
+                session_id
+            ],
         )?;
         Ok(())
     }
@@ -499,8 +515,7 @@ impl Db {
 
     pub fn list_sessions(&self, limit: i64) -> Result<Vec<Session>> {
         let c = self.conn();
-        let mut stmt =
-            c.prepare("SELECT * FROM sessions ORDER BY started_ts DESC LIMIT ?")?;
+        let mut stmt = c.prepare("SELECT * FROM sessions ORDER BY started_ts DESC LIMIT ?")?;
         let rows = stmt
             .query_map(params![limit], row_to_session)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -510,7 +525,11 @@ impl Db {
     pub fn get_session(&self, id: i64) -> Result<Option<Session>> {
         let c = self.conn();
         let row = c
-            .query_row("SELECT * FROM sessions WHERE id=?", params![id], row_to_session)
+            .query_row(
+                "SELECT * FROM sessions WHERE id=?",
+                params![id],
+                row_to_session,
+            )
             .optional()?;
         Ok(row)
     }
@@ -622,8 +641,15 @@ impl Db {
         };
 
         let steps = combine(&c, r_steps, &steps_v, 50, 10, "steps_end", "start_steps")?;
-        let duration_s =
-            combine(&c, r_dur, &dur_v, 600, 10, "duration_s_end", "start_duration_s")?;
+        let duration_s = combine(
+            &c,
+            r_dur,
+            &dur_v,
+            600,
+            10,
+            "duration_s_end",
+            "start_duration_s",
+        )?;
         let calories = combine(&c, r_cal, &cal_v, 100, 10, "calories_end", "")?;
         let distance_raw = combine(&c, r_dist, &dist_v, 200, 10, "distance_raw_end", "")?;
 
@@ -635,7 +661,6 @@ impl Db {
             "distance_raw": distance_raw,
         }))
     }
-
 
     /// Mean speed_raw across moving samples (>0) for the day.
     pub fn day_avg_speed_raw(&self, local_date_s: &str) -> Result<Option<f64>> {
@@ -771,8 +796,8 @@ impl Db {
     /// Most recent speed marks (newest first) for display + diagnostics.
     pub fn recent_speed_marks(&self, limit: i64) -> Result<Vec<Value>> {
         let c = self.conn();
-        let mut stmt = c
-            .prepare("SELECT ts, set_speed, unit FROM speed_marks ORDER BY ts DESC LIMIT ?")?;
+        let mut stmt =
+            c.prepare("SELECT ts, set_speed, unit FROM speed_marks ORDER BY ts DESC LIMIT ?")?;
         let rows = stmt
             .query_map(params![limit], |r| {
                 let ts: f64 = r.get(0)?;
@@ -929,7 +954,8 @@ impl Db {
         let effective_start = start_ts.max(raw_floor);
 
         // merge helpers
-        let mut merged: std::collections::BTreeMap<i64, (f64, f64)> = std::collections::BTreeMap::new();
+        let mut merged: std::collections::BTreeMap<i64, (f64, f64)> =
+            std::collections::BTreeMap::new();
 
         match metric {
             "steps" | "calories" | "distance_raw" => {
@@ -1055,7 +1081,10 @@ impl Db {
     ) -> Result<()> {
         let mut stmt = c.prepare(sql)?;
         let rows = stmt.query_map(params![a, b], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, Option<f64>>(1)?.unwrap_or(0.0)))
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, Option<f64>>(1)?.unwrap_or(0.0),
+            ))
         })?;
         for row in rows {
             let (ts, v) = row?;
@@ -1135,7 +1164,9 @@ impl Db {
                  ON CONFLICT(kind) DO UPDATE SET last_run_ts=excluded.last_run_ts",
                 params![ROLLUP_KIND, last_rolled, now],
             )?;
-            return Ok(json!({"buckets_written": 0, "last_rolled_ts": last_rolled, "cutoff_ts": cutoff}));
+            return Ok(
+                json!({"buckets_written": 0, "last_rolled_ts": last_rolled, "cutoff_ts": cutoff}),
+            );
         }
 
         let tx = c.transaction()?;
@@ -1321,7 +1352,10 @@ impl Db {
         if effective_cutoff <= 0.0 {
             return Ok(0);
         }
-        let n = c.execute("DELETE FROM samples WHERE ts < ?", params![effective_cutoff])?;
+        let n = c.execute(
+            "DELETE FROM samples WHERE ts < ?",
+            params![effective_cutoff],
+        )?;
         Ok(n)
     }
 
@@ -1374,10 +1408,22 @@ impl Db {
             anyhow::bail!("mode must be 'merge' or 'replace', got {mode}");
         }
         let empty: Vec<Value> = Vec::new();
-        let sessions = dump.get("sessions").and_then(|v| v.as_array()).unwrap_or(&empty);
-        let samples = dump.get("samples").and_then(|v| v.as_array()).unwrap_or(&empty);
-        let rollups = dump.get("rollups_1m").and_then(|v| v.as_array()).unwrap_or(&empty);
-        let speed_marks = dump.get("speed_marks").and_then(|v| v.as_array()).unwrap_or(&empty);
+        let sessions = dump
+            .get("sessions")
+            .and_then(|v| v.as_array())
+            .unwrap_or(&empty);
+        let samples = dump
+            .get("samples")
+            .and_then(|v| v.as_array())
+            .unwrap_or(&empty);
+        let rollups = dump
+            .get("rollups_1m")
+            .and_then(|v| v.as_array())
+            .unwrap_or(&empty);
+        let speed_marks = dump
+            .get("speed_marks")
+            .and_then(|v| v.as_array())
+            .unwrap_or(&empty);
 
         // Belt-and-braces retention guard: never let an import (a stale peer or an
         // old full backup) resurrect raw samples older than the live retention
@@ -1387,8 +1433,14 @@ impl Db {
 
         let mut counts = serde_json::Map::new();
         for k in [
-            "sessions", "samples", "rollups", "speed_marks",
-            "skipped_sessions", "skipped_samples", "skipped_rollups", "skipped_speed_marks",
+            "sessions",
+            "samples",
+            "rollups",
+            "speed_marks",
+            "skipped_sessions",
+            "skipped_samples",
+            "skipped_rollups",
+            "skipped_speed_marks",
             "skipped_old_samples",
         ] {
             counts.insert(k.into(), json!(0));
@@ -1558,7 +1610,11 @@ impl Db {
             }
             tx.execute(
                 "INSERT INTO speed_marks(ts, set_speed, unit) VALUES (?, ?, ?)",
-                params![ts, set_speed, str_of(mk, "unit").unwrap_or_else(|| "km/h".into())],
+                params![
+                    ts,
+                    set_speed,
+                    str_of(mk, "unit").unwrap_or_else(|| "km/h".into())
+                ],
             )?;
             bump(&mut counts, "speed_marks");
         }
@@ -1578,7 +1634,11 @@ impl Db {
         let midnight = match local_midnight(date) {
             Some(m) => m,
             // Unparseable date → empty rather than error (caller validated shape).
-            None => return Ok(json!({"date": date, "until_sod": until_sod, "steps": 0, "distance_raw": 0})),
+            None => {
+                return Ok(
+                    json!({"date": date, "until_sod": until_sod, "steps": 0, "distance_raw": 0}),
+                )
+            }
         };
         let end = midnight + until_sod as f64;
         let floor = raw_floor(&c);
@@ -1734,14 +1794,30 @@ mod tests {
     fn day_totals_accumulates_across_counter_reset() {
         let db = mem();
         let today = local_date(now_ts());
-        let sid = db.open_session(now_ts(), "km/h", Some(0), Some(0), None).unwrap();
+        let sid = db
+            .open_session(now_ts(), "km/h", Some(0), Some(0), None)
+            .unwrap();
         let base = now_ts();
         // Walk 1: steps climb 0->10, then a reset (new walk) 0->5 => total 15.
         for (i, steps) in [0u32, 4, 10, 0, 3, 5].iter().enumerate() {
-            db.insert_sample(Some(sid), base + i as f64, Some(*steps), Some(0), Some(60), Some(0), Some(0), Some(3)).unwrap();
+            db.insert_sample(
+                Some(sid),
+                base + i as f64,
+                Some(*steps),
+                Some(0),
+                Some(60),
+                Some(0),
+                Some(0),
+                Some(3),
+            )
+            .unwrap();
         }
         let totals = db.day_totals(&today).unwrap();
-        assert_eq!(totals["steps"].as_i64().unwrap(), 15, "monotonic accumulator should sum positive deltas + reset value");
+        assert_eq!(
+            totals["steps"].as_i64().unwrap(),
+            15,
+            "monotonic accumulator should sum positive deltas + reset value"
+        );
     }
 
     #[test]
@@ -1749,7 +1825,10 @@ mod tests {
         // Real-world shape from a crash/reconnect: a stale low frame (346) wedged
         // between 1800 and 1891. The old accumulator added 346 + (1891-346)=~1500
         // phantom steps; the de-glitcher drops the spike and keeps the real climb.
-        assert_eq!(deglitch_total(&[1797, 1800, 346, 1891, 1896, 1901], 50, 10), 1901);
+        assert_eq!(
+            deglitch_total(&[1797, 1800, 346, 1891, 1896, 1901], 50, 10),
+            1901
+        );
         // Genuine power-cycle reset to ~0 then a fresh climb: 0..10 then 0..5 = 15.
         assert_eq!(deglitch_total(&[0, 4, 10, 0, 3, 5], 50, 10), 15);
         // A one-off dip that reverts (not a reset) is dropped, never re-added.
@@ -1768,11 +1847,23 @@ mod tests {
     fn day_totals_ignores_stale_reconnect_frame() {
         let db = mem();
         let today = local_date(now_ts());
-        let sid = db.open_session(now_ts(), "km/h", Some(0), Some(0), None).unwrap();
+        let sid = db
+            .open_session(now_ts(), "km/h", Some(0), Some(0), None)
+            .unwrap();
         let base = now_ts();
         // 1800 -> stale 346 -> 1891 -> 1901: only +101 of real climb after 1800.
         for (i, steps) in [1797u32, 1800, 346, 1891, 1896, 1901].iter().enumerate() {
-            db.insert_sample(Some(sid), base + i as f64, Some(*steps), Some(0), Some(60), Some(0), Some(0), Some(3)).unwrap();
+            db.insert_sample(
+                Some(sid),
+                base + i as f64,
+                Some(*steps),
+                Some(0),
+                Some(60),
+                Some(0),
+                Some(0),
+                Some(3),
+            )
+            .unwrap();
         }
         let totals = db.day_totals(&today).unwrap();
         assert_eq!(
@@ -1786,10 +1877,22 @@ mod tests {
     fn hourly_steps_reconcile_with_day_total() {
         let db = mem();
         let today = local_date(now_ts());
-        let sid = db.open_session(now_ts(), "km/h", Some(0), Some(0), None).unwrap();
+        let sid = db
+            .open_session(now_ts(), "km/h", Some(0), Some(0), None)
+            .unwrap();
         let base = now_ts();
         for (i, steps) in [1797u32, 1800, 346, 1891, 1896, 1901].iter().enumerate() {
-            db.insert_sample(Some(sid), base + i as f64, Some(*steps), Some(0), Some(60), Some(0), Some(0), Some(3)).unwrap();
+            db.insert_sample(
+                Some(sid),
+                base + i as f64,
+                Some(*steps),
+                Some(0),
+                Some(60),
+                Some(0),
+                Some(0),
+                Some(3),
+            )
+            .unwrap();
         }
         let day = db.day_totals(&today).unwrap()["steps"].as_i64().unwrap();
         let sum: i64 = db
@@ -1799,18 +1902,33 @@ mod tests {
             .map(|h| h["steps"].as_i64().unwrap())
             .sum();
         assert_eq!(day, 1901);
-        assert_eq!(sum, day, "hourly buckets must sum to the de-glitched day total");
+        assert_eq!(
+            sum, day,
+            "hourly buckets must sum to the de-glitched day total"
+        );
     }
 
     #[test]
     fn rollup_deglitches_stale_frame() {
         let db = mem();
-        let sid = db.open_session(now_ts() - 600.0, "km/h", Some(0), Some(0), None).unwrap();
+        let sid = db
+            .open_session(now_ts() - 600.0, "km/h", Some(0), Some(0), None)
+            .unwrap();
         // Align to a minute boundary ~10 min ago so all samples share one bucket
         // and fall before the rollup cutoff (now - 60s).
         let base = (((now_ts() as i64 - 600) / 60) * 60) as f64 + 1.0;
         for (i, steps) in [1797u32, 1800, 346, 1891, 1896, 1901].iter().enumerate() {
-            db.insert_sample(Some(sid), base + i as f64, Some(*steps), Some(0), Some(60), Some(0), Some(0), Some(3)).unwrap();
+            db.insert_sample(
+                Some(sid),
+                base + i as f64,
+                Some(*steps),
+                Some(0),
+                Some(60),
+                Some(0),
+                Some(0),
+                Some(3),
+            )
+            .unwrap();
         }
         db.rollup_samples().unwrap();
         let delta: i64 = db
@@ -1829,12 +1947,24 @@ mod tests {
     fn timeseries_deglitches_raw_tail() {
         let db = mem();
         let base = now_ts() - 100.0;
-        let sid = db.open_session(base, "km/h", Some(0), Some(0), None).unwrap();
+        let sid = db
+            .open_session(base, "km/h", Some(0), Some(0), None)
+            .unwrap();
         // Same stale-frame shape as the day/hour tests: 346 wedged between 1800
         // and 1891. Nothing is rolled yet (floor 0), so this exercises the pure
         // raw-tail path of `timeseries`.
         for (i, steps) in [1797u32, 1800, 346, 1891, 1896, 1901].iter().enumerate() {
-            db.insert_sample(Some(sid), base + i as f64, Some(*steps), Some(0), Some(60), Some(0), Some(0), Some(3)).unwrap();
+            db.insert_sample(
+                Some(sid),
+                base + i as f64,
+                Some(*steps),
+                Some(0),
+                Some(60),
+                Some(0),
+                Some(0),
+                Some(3),
+            )
+            .unwrap();
         }
         let series = db
             .timeseries("steps", 3600, now_ts() - 86_400.0, now_ts() + 1.0)
@@ -1842,7 +1972,10 @@ mod tests {
         let total: f64 = series.iter().map(|b| b["value"].as_f64().unwrap()).sum();
         // De-glitched increments = 3 + 91 + 5 + 5 = 104. The old MAX-MIN path gave
         // 1901 - 346 = 1555 — a phantom spike the day/hour views never showed.
-        assert_eq!(total as i64, 104, "timeseries raw tail must de-glitch, not MAX-MIN");
+        assert_eq!(
+            total as i64, 104,
+            "timeseries raw tail must de-glitch, not MAX-MIN"
+        );
     }
 
     #[test]
@@ -1852,8 +1985,28 @@ mod tests {
         let db = mem();
         let t = now_ts() - 100.0;
         let sid = db.open_session(t, "km/h", Some(0), Some(0), None).unwrap();
-        db.insert_sample(Some(sid), t + 1.0, Some(5), Some(10), Some(60), Some(2), Some(1), Some(3)).unwrap();
-        db.close_session(sid, t + 2.0, Some(5), Some(10), Some(2), Some(1), Some(60), "stopped").unwrap();
+        db.insert_sample(
+            Some(sid),
+            t + 1.0,
+            Some(5),
+            Some(10),
+            Some(60),
+            Some(2),
+            Some(1),
+            Some(3),
+        )
+        .unwrap();
+        db.close_session(
+            sid,
+            t + 2.0,
+            Some(5),
+            Some(10),
+            Some(2),
+            Some(1),
+            Some(60),
+            "stopped",
+        )
+        .unwrap();
         let dump = db.export_all(true).unwrap();
 
         let db2 = mem();
@@ -1870,7 +2023,9 @@ mod tests {
     #[test]
     fn rejects_foreign_dump() {
         let db = mem();
-        assert!(db.import_dump(&serde_json::json!({"format": "nope"}), "merge").is_err());
+        assert!(db
+            .import_dump(&serde_json::json!({"format": "nope"}), "merge")
+            .is_err());
     }
 
     #[test]
@@ -1878,25 +2033,43 @@ mod tests {
         let db = mem();
         let base = (((now_ts() as i64 - 600) / 60) * 60) as f64 + 1.0;
         let make = |src: Option<&str>, start: f64, steps: &[u32]| {
-            let sid = db.open_session(start, "km/h", Some(0), Some(0), src).unwrap();
+            let sid = db
+                .open_session(start, "km/h", Some(0), Some(0), src)
+                .unwrap();
             for (i, st) in steps.iter().enumerate() {
-                db.insert_sample(Some(sid), start + i as f64, Some(*st), Some(i as u32),
-                    Some(60), Some(0), Some(0), Some(3)).unwrap();
+                db.insert_sample(
+                    Some(sid),
+                    start + i as f64,
+                    Some(*st),
+                    Some(i as u32),
+                    Some(60),
+                    Some(0),
+                    Some(0),
+                    Some(3),
+                )
+                .unwrap();
             }
         };
-        make(Some("Mac"), base, &[0, 10, 20, 30]);       // 30 steps
-        make(Some("iPhone"), base + 5.0, &[0, 5, 10]);   // 10 steps
-        make(None, base + 10.0, &[0, 40]);               // 40 steps, legacy (no source)
+        make(Some("Mac"), base, &[0, 10, 20, 30]); // 30 steps
+        make(Some("iPhone"), base + 5.0, &[0, 5, 10]); // 10 steps
+        make(None, base + 10.0, &[0, 40]); // 40 steps, legacy (no source)
         db.rollup_samples().unwrap();
 
         let rows = db.steps_by_device(&local_date(base)).unwrap();
         let mut got = std::collections::HashMap::new();
         for r in &rows {
-            got.insert(r["source"].as_str().unwrap().to_string(), r["steps"].as_i64().unwrap());
+            got.insert(
+                r["source"].as_str().unwrap().to_string(),
+                r["steps"].as_i64().unwrap(),
+            );
         }
         assert_eq!(got.get("Mac"), Some(&30));
         assert_eq!(got.get("iPhone"), Some(&10));
-        assert_eq!(got.get(""), Some(&40), "sessions with no source group under empty string");
+        assert_eq!(
+            got.get(""),
+            Some(&40),
+            "sessions with no source group under empty string"
+        );
     }
 
     // --- Phase 0: retention refactor -------------------------------------
@@ -1906,17 +2079,34 @@ mod tests {
     /// session id and the local date the samples belong to.
     fn seed_rollable_session(db: &Db, offset_ago_s: i64, steps: &[u32]) -> (i64, String) {
         let base = (((now_ts() as i64 - offset_ago_s) / 60) * 60) as f64 + 1.0;
-        let sid = db.open_session(base, "km/h", Some(0), Some(0), None).unwrap();
+        let sid = db
+            .open_session(base, "km/h", Some(0), Some(0), None)
+            .unwrap();
         for (i, st) in steps.iter().enumerate() {
             // distance tracks steps/4, calories steps/10, duration = seconds.
             db.insert_sample(
-                Some(sid), base + i as f64, Some(*st), Some(i as u32),
-                Some(60), Some(*st / 4), Some(*st / 10), Some(3),
-            ).unwrap();
+                Some(sid),
+                base + i as f64,
+                Some(*st),
+                Some(i as u32),
+                Some(60),
+                Some(*st / 4),
+                Some(*st / 10),
+                Some(3),
+            )
+            .unwrap();
         }
-        db.close_session(sid, base + steps.len() as f64, steps.last().copied(),
-            Some(steps.len() as u32), Some(steps.last().copied().unwrap_or(0) / 4),
-            Some(steps.last().copied().unwrap_or(0) / 10), Some(60), "stopped").unwrap();
+        db.close_session(
+            sid,
+            base + steps.len() as f64,
+            steps.last().copied(),
+            Some(steps.len() as u32),
+            Some(steps.last().copied().unwrap_or(0) / 4),
+            Some(steps.last().copied().unwrap_or(0) / 10),
+            Some(60),
+            "stopped",
+        )
+        .unwrap();
         (sid, local_date(base))
     }
 
@@ -1951,24 +2141,42 @@ mod tests {
 
         // Golden: raw-only totals (nothing rolled yet, floor == 0).
         let raw_day = db.day_totals(&date).unwrap()["steps"].as_i64().unwrap();
-        let raw_hour_sum: i64 = db.hourly_steps(&date).unwrap().iter()
-            .map(|h| h["steps"].as_i64().unwrap()).sum();
+        let raw_hour_sum: i64 = db
+            .hourly_steps(&date)
+            .unwrap()
+            .iter()
+            .map(|h| h["steps"].as_i64().unwrap())
+            .sum();
         assert_eq!(raw_day, 90);
         assert_eq!(raw_hour_sum, 90);
 
         // Roll every sample up (all < cutoff → floor advances past them).
         db.rollup_samples().unwrap();
         // With raw still present, the union (rollups + empty tail) must match.
-        assert_eq!(db.day_totals(&date).unwrap()["steps"].as_i64().unwrap(), raw_day);
-        let rolled_hour_sum: i64 = db.hourly_steps(&date).unwrap().iter()
-            .map(|h| h["steps"].as_i64().unwrap()).sum();
+        assert_eq!(
+            db.day_totals(&date).unwrap()["steps"].as_i64().unwrap(),
+            raw_day
+        );
+        let rolled_hour_sum: i64 = db
+            .hourly_steps(&date)
+            .unwrap()
+            .iter()
+            .map(|h| h["steps"].as_i64().unwrap())
+            .sum();
         assert_eq!(rolled_hour_sum, raw_hour_sum);
 
         // Now DELETE all raw — totals must be unchanged (pure rollup path).
         db.conn().execute("DELETE FROM samples", []).unwrap();
-        assert_eq!(db.day_totals(&date).unwrap()["steps"].as_i64().unwrap(), raw_day);
-        let pruned_hour_sum: i64 = db.hourly_steps(&date).unwrap().iter()
-            .map(|h| h["steps"].as_i64().unwrap()).sum();
+        assert_eq!(
+            db.day_totals(&date).unwrap()["steps"].as_i64().unwrap(),
+            raw_day
+        );
+        let pruned_hour_sum: i64 = db
+            .hourly_steps(&date)
+            .unwrap()
+            .iter()
+            .map(|h| h["steps"].as_i64().unwrap())
+            .sum();
         assert_eq!(pruned_hour_sum, raw_hour_sum);
     }
 
@@ -1979,10 +2187,18 @@ mod tests {
         let (_sid, _date) = seed_rollable_session(&db, 600, &steps);
 
         let count = |db: &Db| -> i64 {
-            db.conn().query_row("SELECT COUNT(*) FROM sample_rollups_1m", [], |r| r.get(0)).unwrap()
+            db.conn()
+                .query_row("SELECT COUNT(*) FROM sample_rollups_1m", [], |r| r.get(0))
+                .unwrap()
         };
         let sum = |db: &Db| -> i64 {
-            db.conn().query_row("SELECT COALESCE(SUM(steps_delta),0) FROM sample_rollups_1m", [], |r| r.get(0)).unwrap()
+            db.conn()
+                .query_row(
+                    "SELECT COALESCE(SUM(steps_delta),0) FROM sample_rollups_1m",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap()
         };
 
         db.backfill_rollups(0.0, now_ts()).unwrap();
@@ -2000,7 +2216,11 @@ mod tests {
         db.conn().execute("DELETE FROM samples", []).unwrap();
         let res = db.backfill_rollups(0.0, now_ts()).unwrap();
         assert_eq!(res["buckets_written"].as_i64().unwrap(), 0);
-        assert_eq!(count(&db), c1, "buckets whose raw is gone must survive backfill");
+        assert_eq!(
+            count(&db),
+            c1,
+            "buckets whose raw is gone must survive backfill"
+        );
         assert_eq!(sum(&db), s1);
     }
 
@@ -2032,7 +2252,11 @@ mod tests {
         assert_eq!(res["sessions"].as_i64().unwrap(), 1);
         assert_eq!(res["rollups"].as_i64().unwrap(), 1);
         assert_eq!(res["samples"].as_i64().unwrap(), 1, "recent raw kept");
-        assert_eq!(res["skipped_old_samples"].as_i64().unwrap(), 1, "ancient raw dropped");
+        assert_eq!(
+            res["skipped_old_samples"].as_i64().unwrap(),
+            1,
+            "ancient raw dropped"
+        );
     }
 
     #[test]
@@ -2049,7 +2273,10 @@ mod tests {
         assert_eq!(old_total_before, 80);
 
         let m1 = db.run_startup_migration(7.0 * 86400.0).unwrap();
-        assert!(m1["ran"].as_bool().unwrap(), "first run must perform the migration");
+        assert!(
+            m1["ran"].as_bool().unwrap(),
+            "first run must perform the migration"
+        );
         assert!(m1["pruned_samples"].as_i64().unwrap() >= old_steps.len() as i64);
 
         // Old raw is gone...
@@ -2058,7 +2285,10 @@ mod tests {
             params![old_date], |r| r.get(0)).unwrap();
         assert_eq!(old_raw, 0, "old raw pruned");
         // ...but the day total survives, served from rollups.
-        assert_eq!(db.day_totals(&old_date).unwrap()["steps"].as_i64().unwrap(), old_total_before);
+        assert_eq!(
+            db.day_totals(&old_date).unwrap()["steps"].as_i64().unwrap(),
+            old_total_before
+        );
 
         // Idempotent: a second run is a no-op (no further prune / vacuum).
         let m2 = db.run_startup_migration(7.0 * 86400.0).unwrap();
@@ -2071,8 +2301,20 @@ mod tests {
         // Build a day two hours ago: hour A gets +30 steps, hour B gets +40.
         let midnight = local_midnight(&local_date(now_ts())).unwrap();
         // Place buckets at 09:00 (sod 32400) and 10:00 (sod 36000) local.
-        let sid = db.open_session(midnight + 100.0, "km/h", Some(0), Some(0), None).unwrap();
-        db.close_session(sid, midnight + 4000.0, Some(70), Some(60), Some(17), Some(7), Some(60), "stopped").unwrap();
+        let sid = db
+            .open_session(midnight + 100.0, "km/h", Some(0), Some(0), None)
+            .unwrap();
+        db.close_session(
+            sid,
+            midnight + 4000.0,
+            Some(70),
+            Some(60),
+            Some(17),
+            Some(7),
+            Some(60),
+            "stopped",
+        )
+        .unwrap();
         let insert_bucket = |sod: i64, steps: i64, dist: i64| {
             db.conn().execute(
                 "INSERT INTO sample_rollups_1m(bucket_ts, session_id, steps_delta, distance_raw_delta,

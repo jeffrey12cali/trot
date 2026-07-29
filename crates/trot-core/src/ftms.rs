@@ -387,7 +387,10 @@ mod tests {
     fn empty_buffer_returns_err() {
         assert_eq!(
             parse_treadmill_data(&[]).unwrap_err(),
-            FtmsError::TooShort { expected: 2, got: 0 }
+            FtmsError::TooShort {
+                expected: 2,
+                got: 0
+            }
         );
     }
 }

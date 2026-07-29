@@ -210,7 +210,9 @@ impl Telemetry {
         self.speed_kmh = self.speed_raw.map(|r| speed_kmh(r, &self.display_unit));
         self.speed_mph = self.speed_raw.map(|r| speed_mph(r, &self.display_unit));
         self.distance_m = self.distance_raw.map(distance_meters);
-        self.distance_km = self.distance_raw.map(|r| distance_meters(r) as f64 / 1000.0);
+        self.distance_km = self
+            .distance_raw
+            .map(|r| distance_meters(r) as f64 / 1000.0);
         self.distance_mi = self
             .distance_raw
             .map(|r| distance_meters(r) as f64 / 1000.0 / KMH_PER_MPH);
@@ -299,13 +301,22 @@ mod tests {
         assert_eq!(decode_calories(&hx("a1 aa 00 02 00 00")).unwrap(), 2);
         assert_eq!(decode_distance_raw(&hx("a1 aa 01 1f 00 00")).unwrap(), 287);
         assert_eq!(decode_speed_raw(&hx("a1 aa 00 3c 00 00")).unwrap(), 60);
-        assert_eq!(decode_duration_seconds(&hx("a1 aa 00 01 0b 00")).unwrap(), 71);
-        assert_eq!(decode_duration_seconds(&hx("a1 aa 00 00 0e 00")).unwrap(), 14);
+        assert_eq!(
+            decode_duration_seconds(&hx("a1 aa 00 01 0b 00")).unwrap(),
+            71
+        );
+        assert_eq!(
+            decode_duration_seconds(&hx("a1 aa 00 00 0e 00")).unwrap(),
+            14
+        );
         assert_eq!(
             decode_duration_seconds(&hx("a1 aa 00 3b 3b 00")).unwrap(),
             59 * 60 + 59
         );
-        assert_eq!(decode_duration_seconds(&hx("a1 aa 01 00 00 00")).unwrap(), 3600);
+        assert_eq!(
+            decode_duration_seconds(&hx("a1 aa 01 00 00 00")).unwrap(),
+            3600
+        );
     }
 
     #[test]

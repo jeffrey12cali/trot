@@ -183,7 +183,11 @@ pub fn load_devices() -> DevicesConfig {
             if !id.is_empty() {
                 let cfg = DevicesConfig {
                     active: Some(id.clone()),
-                    devices: vec![Device { id, name: "Treadmill".into(), last_seen: now() }],
+                    devices: vec![Device {
+                        id,
+                        name: "Treadmill".into(),
+                        last_seen: now(),
+                    }],
                 };
                 save_devices(&cfg);
                 return cfg;
@@ -215,7 +219,10 @@ pub fn add_and_activate(id: &str, name: Option<&str>) -> DevicesConfig {
         }
         None => cfg.devices.push(Device {
             id: id.to_string(),
-            name: name.filter(|n| !n.is_empty()).unwrap_or("Treadmill").to_string(),
+            name: name
+                .filter(|n| !n.is_empty())
+                .unwrap_or("Treadmill")
+                .to_string(),
             last_seen: now(),
         }),
     }
@@ -261,7 +268,11 @@ pub fn active_device_id() -> Option<String> {
 pub fn display_unit() -> String {
     // Env override wins (legacy/testing); otherwise the persisted setting.
     if let Ok(u) = std::env::var("SC110_DISPLAY_UNIT") {
-        return if u.to_lowercase() == "mph" { "mph".into() } else { "km/h".into() };
+        return if u.to_lowercase() == "mph" {
+            "mph".into()
+        } else {
+            "km/h".into()
+        };
     }
     let u = load_settings().display_unit.to_lowercase();
     if u == "mph" {
@@ -298,7 +309,10 @@ mod tests {
         assert_eq!(mode, 0o600);
 
         // No temp file is left behind.
-        assert!(!dir.join("runtime.tmp").exists(), "temp file must be renamed away");
+        assert!(
+            !dir.join("runtime.tmp").exists(),
+            "temp file must be renamed away"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
