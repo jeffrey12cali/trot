@@ -143,6 +143,15 @@ fn run_daemon() -> Result<()> {
 /// killing us, orphaning the daemon with the treadmill still connected. Watching
 /// for the orphan lets us disconnect cleanly instead of leaking the BLE link
 /// until the treadmill is power-cycled. (Also covers a Nowhere crash.)
+///
+/// **Windows has no parent arm.** There is no `getppid()` equivalent, and the
+/// supported way to bind a child's lifetime to its parent is for the PARENT to
+/// create a Job Object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` and assign this
+/// process to it — the OS then terminates us when the parent's handle closes.
+/// That is the embedding app's job, not something the child can arrange for
+/// itself. Until Nowhere does that on Windows, a parent that dies without
+/// signalling leaves the daemon running and the Bluetooth link held; `trot`
+/// still exits cleanly on Ctrl-C, and `POST /api/shutdown` always works.
 async fn wait_for_shutdown_signal() {
     #[cfg(unix)]
     {

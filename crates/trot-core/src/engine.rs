@@ -75,7 +75,7 @@ pub async fn start_engine(data_dir: PathBuf) -> anyhow::Result<Engine> {
     // still cheerfully serving stale data.
     let worker_state = state.clone();
     tokio::spawn(async move {
-        supervise("ble worker", worker_state, |s| ble::run(s)).await;
+        supervise("ble worker", worker_state, ble::run).await;
     });
 
     // Rollup + prune loop (catch up at startup, then every interval). Also

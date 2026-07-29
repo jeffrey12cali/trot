@@ -2049,7 +2049,7 @@ mod tests {
         assert_eq!(old_total_before, 80);
 
         let m1 = db.run_startup_migration(7.0 * 86400.0).unwrap();
-        assert_eq!(m1["ran"].as_bool().unwrap(), true);
+        assert!(m1["ran"].as_bool().unwrap(), "first run must perform the migration");
         assert!(m1["pruned_samples"].as_i64().unwrap() >= old_steps.len() as i64);
 
         // Old raw is gone...
@@ -2062,7 +2062,7 @@ mod tests {
 
         // Idempotent: a second run is a no-op (no further prune / vacuum).
         let m2 = db.run_startup_migration(7.0 * 86400.0).unwrap();
-        assert_eq!(m2["ran"].as_bool().unwrap(), false);
+        assert!(!m2["ran"].as_bool().unwrap(), "second run must be a no-op");
     }
 
     #[test]
