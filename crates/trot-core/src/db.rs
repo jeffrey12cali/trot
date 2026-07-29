@@ -87,6 +87,13 @@ CREATE INDEX IF NOT EXISTS idx_speed_marks_ts ON speed_marks(ts);
 /// metric is wrong by their ratio.
 pub const SAMPLE_INTERVAL_S: f64 = 1.0;
 
+/// How long raw samples are kept before the retention loop prunes them. History
+/// older than this is served from the per-minute rollups. Reported verbatim by
+/// `/api/rollup/status`, so it lives here rather than being restated per module.
+pub const RETENTION_DAYS: f64 = 7.0;
+/// How often the rollup + prune loop runs.
+pub const ROLLUP_INTERVAL_S: f64 = 300.0;
+
 const ROLLUP_RESOLUTION_S: i64 = 60;
 const ROLLUP_KIND: &str = "samples_1m";
 /// Raw samples older than this are never (re)inserted by `import_dump` — a

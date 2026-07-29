@@ -2,13 +2,11 @@
 //! the rollup/prune loop. No window, no tray — just the tracking engine.
 
 use crate::app::AppState;
+use crate::db::{RETENTION_DAYS, ROLLUP_INTERVAL_S};
 use crate::{api, ble, config, db};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-
-const RETENTION_DAYS: f64 = 7.0;
-const ROLLUP_INTERVAL_S: f64 = 300.0;
 
 /// A running engine: the shared state plus the loopback port the API is on.
 pub struct Engine {

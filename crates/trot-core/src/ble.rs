@@ -7,7 +7,7 @@ use crate::app::{state_dict, unix_now, AppState};
 use crate::ftms;
 use crate::protocol::{
     self, build_request, Reader, Telemetry, ADV_NAME_PREFIXES, DEFAULT_POLL_ROTATION,
-    NOTIFY_CHAR_UUID, STATUS_RUNNING, WRITE_CHAR_UUID,
+    NOTIFY_CHAR_UUID, WRITE_CHAR_UUID,
 };
 use anyhow::{anyhow, Result};
 use btleplug::api::{Central, Manager as _, Peripheral as _, ScanFilter, WriteType};
@@ -588,7 +588,6 @@ fn ingest_sample(
     ) {
         tracing::warn!("could not persist sample: {e}");
     }
-    let _ = STATUS_RUNNING; // referenced via is_running
 }
 
 fn persist_close(state: &Arc<AppState>, sid: i64, telem: Option<&Telemetry>, reason: &str) {
@@ -610,6 +609,7 @@ use serde_json::Value;
 mod tests {
     use super::*;
     use crate::db::Db;
+    use crate::protocol::STATUS_RUNNING;
     use crate::protocol::STATUS_STANDBY;
 
     fn running(steps: u32) -> Telemetry {

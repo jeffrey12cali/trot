@@ -1,4 +1,37 @@
-# Trot pre-launch audit — prioritized fix checklist
+# Trot audit — prioritized fix checklist
+
+## Audit #2 (v0.2.0) — full re-audit, everything below is DONE
+
+Covered performance, correctness, concurrency, security, packaging, licensing,
+CI and portability. Findings were re-verified against the tree as it stood, which
+by then included three commits (BLE pause/resume, connect backoff, per-device
+attribution) that the first audit never saw.
+
+| # | Severity | Finding | Resolution |
+|---|---|---|---|
+| H1 | High | `today_payload()` re-walked every raw sample of the day on **every BLE poll** (~10–15 Hz) under the DB lock. Measured 75 ms @10k samples, 412 ms @50k | 1 s cache, keyed by local date, invalidated on session/data boundaries |
+| H2 | High | Lost wakeup — `notify_waiters()` stores no permit, so a wake between the flag check and the await parked the worker forever; `/api/connect` reported success | register with `Notified::enable()` before reading flags; same future reused for backoff |
+| H3 | High | No single-instance guard, no `busy_timeout`, and `SQLITE_BUSY` discarded by `let _ =` | refuse a second daemon (live probe, so a stale handshake still allows restart), `busy_timeout=5000`, log failed writes |
+| M1 | Medium | ~1M raw rows per day of walking | throttled to 1 row/s, status transitions written through |
+| M1b | Medium | **New find:** `duration_running_s` converted sample counts to seconds with a hardcoded 2.5 s spacing — wrong by ~30× | shared `db::SAMPLE_INTERVAL_S` used by writer and both timeseries branches |
+| M2 | Medium | Unauthenticated GET reads | documented the threat model honestly in the README (same-user processes can read the SQLite file anyway); added `nosniff` |
+| M3 | Medium | `atomic_write` temp file got default perms; token file briefly world-readable; no fsync | open 0600 before writing, `sync_all()` before rename |
+| M4 | Medium | 3 new routes shipped with no changelog/README/version | README API table + security section, 0.2.0 changelog, version bump |
+| M5 | Medium | Detached tasks unsupervised; a panic killed ingestion silently | `supervise()` restarts with backoff; AppState locks recover from poisoning |
+| L1–L9 | Low | doc-comment hijack, by-device lag not signalled, `device_name` control chars, `now_ts()` panic, no CI, no `cargo audit`, not rustfmt-clean, Windows orphan gap | all fixed except Windows (documented: needs a parent-side Job Object) |
+
+**Verified, not assumed:** the single-instance guard and 0600/0700 permissions were
+tested against a running daemon; `cargo audit` reports no advisories across 272
+deps; release archives already ship `LICENSE` (GPLv3 §4 satisfied).
+
+**Consciously declined:** rate limiting (loopback-only, writes token-gated, and the
+one real amplifier — `/api/analytics` — is now bucket-capped); token-gating GET
+reads (would break the published contract for Nowhere for no gain against a
+same-user attacker).
+
+---
+
+# Audit #1 (v0.1.1) — prioritized fix checklist
 
 Derived from the Fable5 security/correctness audit (2026-07-21). Severity is judged
 against the real threat model: a **single-user, loopback-only** desktop engine.

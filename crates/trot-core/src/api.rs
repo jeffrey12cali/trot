@@ -4,6 +4,7 @@
 
 use crate::app::AppState;
 use crate::ble;
+use crate::db::{RETENTION_DAYS, ROLLUP_INTERVAL_S};
 use crate::protocol::{speed_kmh, speed_mph};
 use axum::extract::{DefaultBodyLimit, Request};
 use axum::http::{HeaderName, HeaderValue};
@@ -77,9 +78,6 @@ fn origin_host(origin: &str) -> Option<&str> {
     };
     (!host.is_empty()).then_some(host)
 }
-
-const RETENTION_DAYS: f64 = 7.0;
-const ROLLUP_INTERVAL_S: f64 = 300.0;
 
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
