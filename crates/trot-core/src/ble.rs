@@ -114,12 +114,26 @@ pub async fn run(state: Arc<AppState>) {
 
     let mut fails: u32 = 0;
     while !state.stop.load(Ordering::Relaxed) {
+        // Register interest in `wake` BEFORE reading any of the state it guards.
+        //
+        // `Notify::notify_waiters()` (what set_paused / set_device_id call) only
+        // wakes waiters that are ALREADY registered — unlike `notify_one()` it
+        // stores no permit. Checking a flag and only then awaiting would drop a
+        // wake that lands in between, parking the worker forever while
+        // `/api/connect` cheerfully returned {"ok":true}. `enable()` registers us
+        // up front, so such a wake is delivered to this future and the await
+        // returns immediately. The same future is reused for the reconnect
+        // backoff below, so no wake can be swallowed mid-iteration either.
+        let wake = state.wake.notified();
+        tokio::pin!(wake);
+        wake.as_mut().enable();
+
         let device_id = state.device_id();
         if device_id.is_none() {
             state.connected.store(false, Ordering::Relaxed);
             state.broadcast(json!({"type": "status", "connected": false, "paired": false}));
             tracing::info!("no device paired; waiting for /api/pair");
-            state.wake.notified().await;
+            wake.as_mut().await;
             continue;
         }
         let device_id = device_id.unwrap();
@@ -133,7 +147,7 @@ pub async fn run(state: Arc<AppState>) {
                 "type": "status", "connected": false, "paired": true,
                 "paused": state.is_paused(), "connect_failed": state.is_connect_failed()
             }));
-            state.wake.notified().await;
+            wake.as_mut().await;
             continue;
         }
 
@@ -177,7 +191,7 @@ pub async fn run(state: Arc<AppState>) {
 
         tokio::select! {
             _ = tokio::time::sleep(RECONNECT_DELAY) => {}
-            _ = state.wake.notified() => {}
+            _ = wake.as_mut() => {}
         }
     }
 

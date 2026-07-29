@@ -357,4 +357,29 @@ mod tests {
         );
         assert_eq!(today, AppState::today_str());
     }
+
+    /// The BLE worker parks on `wake.notified()` when paused. `notify_waiters()`
+    /// stores no permit, so a wake arriving between the worker's flag check and
+    /// its await would be lost — leaving the worker asleep forever while
+    /// `/api/connect` reported success. The worker registers with `enable()`
+    /// first; this pins that contract down.
+    #[tokio::test]
+    async fn wake_sent_after_enable_is_not_lost() {
+        let s = state();
+        s.set_paused(true);
+
+        // Worker registers interest, but hasn't awaited yet.
+        let wake = s.wake.notified();
+        tokio::pin!(wake);
+        wake.as_mut().enable();
+
+        // User hits "Connect" in exactly that window.
+        s.set_paused(false);
+
+        tokio::time::timeout(std::time::Duration::from_millis(500), wake)
+            .await
+            .expect("a wake delivered after enable() must not be lost");
+        assert!(!s.is_paused());
+        assert!(!s.is_connect_failed());
+    }
 }
