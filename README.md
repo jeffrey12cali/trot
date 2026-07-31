@@ -1,14 +1,24 @@
-# TROT
+<p align="center">
+  <img src="./docs/brand/readme-header.svg" alt="Trot — the open-source engine under the desk" width="100%">
+</p>
 
-**TROT's Really Only Treadmilling.**
+<p align="center">
+  <a href="https://github.com/marcuspuchalla/trot/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/marcuspuchalla/trot?style=flat-square&color=87E939&labelColor=111A17"></a>
+  <a href="./LICENSE"><img alt="GPLv3" src="https://img.shields.io/badge/license-GPLv3-87E939?style=flat-square&labelColor=111A17"></a>
+  <img alt="Rust" src="https://img.shields.io/badge/Rust-stable-EAF4EC?style=flat-square&logo=rust&logoColor=EAF4EC&labelColor=111A17">
+  <img alt="Local first" src="https://img.shields.io/badge/data-local--first-87E939?style=flat-square&labelColor=111A17">
+</p>
 
-An honest little tracker for treadmill walking — a CLI + background daemon that
-talks to your under-desk treadmill, records sessions, and exposes clean data.
-No opinions about presentation; it does the modest thing and says so on the tin.
+> **TROT's Really Only Treadmilling.** An honest little tracker for treadmill
+> walking — a CLI + background daemon that talks to your under-desk treadmill,
+> records sessions, and exposes clean data. No opinions about presentation; it
+> does the modest thing and says so on the tin.
+
+**Bluetooth in. Local API out. Nothing leaves your machine.**
 
 - **Website:** [trot.fmp.dev](https://trot.fmp.dev)
 - **License:** GPLv3.
-- **Status:** early days — `v0.1` builds a working `trot` CLI + daemon for
+- **Status:** early days — `v0.2` builds a working `trot` CLI + daemon for
   LifeSpan (native) and generic FTMS treadmills. Interfaces may still shift.
 
 ## What it does
@@ -158,6 +168,11 @@ The daemon **connects to the paired treadmill on start and disconnects it cleanl
 on stop** (Ctrl-C or SIGTERM), so the belt's Bluetooth link isn't left open.
 
 ## Structure
+
+<p align="center">
+  <img src="./docs/brand/architecture.svg" alt="Treadmill over BLE into the trot daemon (Rust engine + local SQLite), out over localhost as HTTP + WebSocket to CLI, app and script clients" width="100%">
+</p>
+
 ```
 Cargo.toml               # workspace
 crates/
@@ -183,6 +198,10 @@ of their respective owners. The **Bluetooth®** word mark and logos are register
 trademarks owned by Bluetooth SIG, Inc. All other product and company names are the
 property of their respective holders; their use here is for identification and
 compatibility purposes only.
+
+Trot's own name and mark are reserved and are **not** covered by the GPLv3 that
+covers the code — see [`docs/brand/`](docs/brand/README.md). Fork the code freely;
+just give your fork its own name.
 
 ## Acknowledgements
 Trot's LifeSpan / Omni protocol support was bootstrapped from and cross-checked

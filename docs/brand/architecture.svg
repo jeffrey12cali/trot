@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 380">
+<defs><pattern id="grid" width="24" height="24" patternUnits="userSpaceOnUse"><path d="M24 0H0V24" fill="none" stroke="#9BF43E" stroke-opacity=".045"/></pattern></defs>
+<rect width="1200" height="380" rx="24" fill="#0B1210"/>
+<rect width="1200" height="380" rx="24" fill="url(#grid)"/>
+<text x="52" y="58" fill="#EAF4EC" font-family="Inter, system-ui, sans-serif" font-size="26" font-weight="700">One binary between your treadmill and everything else.</text>
+<text x="52" y="92" fill="#91A099" font-family="Inter, system-ui, sans-serif" font-size="17">The product boundary is intentionally boring: Bluetooth on one side, a documented local API on the other.</text>
+<g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace">
+  <rect x="52" y="150" width="190" height="132" rx="14" fill="#111A17" stroke="#24302B" stroke-width="2"/>
+  <text x="147" y="190" text-anchor="middle" fill="#9BF43E" font-size="16">TREADMILL</text>
+  <path d="M92 241H194M103 226H185L194 241" stroke="#9BF43E" stroke-width="5" fill="none" stroke-linecap="square"/>
+  <text x="147" y="266" text-anchor="middle" fill="#91A099" font-size="13">LifeSpan / FTMS</text>
+
+  <path d="M258 216H333" stroke="#87E939" stroke-width="3"/><path d="M326 208L338 216L326 224" fill="none" stroke="#87E939" stroke-width="3"/>
+  <text x="296" y="198" text-anchor="middle" fill="#91A099" font-size="13">BLE</text>
+
+  <rect x="354" y="150" width="252" height="132" rx="14" fill="#111A17" stroke="#9BF43E" stroke-width="2"/>
+  <text x="480" y="194" text-anchor="middle" fill="#9BF43E" font-size="18">$ trot daemon</text>
+  <text x="480" y="226" text-anchor="middle" fill="#EAF4EC" font-size="14">Rust engine + local SQLite</text>
+  <text x="480" y="256" text-anchor="middle" fill="#91A099" font-size="13">sessions · totals · analytics</text>
+
+  <path d="M622 216H697" stroke="#87E939" stroke-width="3"/><path d="M690 208L702 216L690 224" fill="none" stroke="#87E939" stroke-width="3"/>
+  <text x="660" y="198" text-anchor="middle" fill="#91A099" font-size="13">localhost</text>
+
+  <rect x="718" y="150" width="190" height="132" rx="14" fill="#111A17" stroke="#24302B" stroke-width="2"/>
+  <text x="813" y="194" text-anchor="middle" fill="#9BF43E" font-size="17">HTTP + WS</text>
+  <text x="813" y="226" text-anchor="middle" fill="#EAF4EC" font-size="14">/api/*</text>
+  <text x="813" y="254" text-anchor="middle" fill="#91A099" font-size="13">live state + history</text>
+
+  <path d="M924 216H999" stroke="#87E939" stroke-width="3"/><path d="M992 208L1004 216L992 224" fill="none" stroke="#87E939" stroke-width="3"/>
+
+  <rect x="1020" y="150" width="128" height="132" rx="14" fill="#111A17" stroke="#24302B" stroke-width="2"/>
+  <text x="1084" y="194" text-anchor="middle" fill="#9BF43E" font-size="15">CLIENTS</text>
+  <text x="1084" y="226" text-anchor="middle" fill="#EAF4EC" font-size="13">CLI · app</text>
+  <text x="1084" y="250" text-anchor="middle" fill="#91A099" font-size="12">script · dashboard</text>
+</g>
+<text x="52" y="338" fill="#91A099" font-family="Inter, system-ui, sans-serif" font-size="15">No account. No cloud. No telemetry. The loopback API is the public surface.</text>
+</svg>
