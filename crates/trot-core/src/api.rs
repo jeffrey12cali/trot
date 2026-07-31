@@ -944,10 +944,10 @@ mod origin_tests {
     #[test]
     fn every_platform_webview_origin_is_allowed() {
         for origin in [
-            "tauri://localhost",        // macOS, iOS, Linux (prod); all mobile dev
-            "http://tauri.localhost",   // Windows, Android (prod)
-            "https://tauri.localhost",  // ditto, with useHttpsScheme
-            "http://localhost:5199",    // desktop dev server
+            "tauri://localhost",       // macOS, iOS, Linux (prod); all mobile dev
+            "http://tauri.localhost",  // Windows, Android (prod)
+            "https://tauri.localhost", // ditto, with useHttpsScheme
+            "http://localhost:5199",   // desktop dev server
             "http://127.0.0.1:5199",
             "http://[::1]:5199",
         ] {
@@ -959,10 +959,10 @@ mod origin_tests {
     fn a_hostile_page_is_rejected() {
         for origin in [
             "https://evil.example",
-            "http://localhost.evil.example",   // suffix trick
+            "http://localhost.evil.example", // suffix trick
             "http://127.0.0.1.evil.example",
             "https://tauri.localhost.evil.example",
-            "http://192.168.1.105:5199",       // a LAN page is not the app
+            "http://192.168.1.105:5199", // a LAN page is not the app
         ] {
             assert!(!allowed(origin), "must be rejected: {origin}");
         }
