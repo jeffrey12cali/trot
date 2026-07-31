@@ -181,6 +181,44 @@ crates/
                          # subcommands (scan/pair/today/…) drive it over that API
 ```
 
+## Development & testing
+
+```sh
+cargo test --workspace          # the whole suite
+cargo clippy --workspace --all-targets   # lints (CI runs these with -D warnings)
+cargo fmt --all --check         # formatting
+```
+
+**CI runs the same gate on every push and pull request** — formatting, Clippy and
+the test suite on Linux, macOS *and* Windows, plus `cargo audit` for dependency
+advisories. That gate lives in one reusable workflow
+([`test.yml`](.github/workflows/test.yml)) which the release pipeline also calls
+via dist's `plan-jobs`, so **a release cannot be built unless the tests pass** —
+every build job depends on it, and publishing depends on those.
+
+Coverage runs on each CI build (`cargo llvm-cov`): the per-file table is printed
+into the run summary, and an LCOV + browsable HTML report is attached to the run
+as the `coverage` artifact.
+
+Roughly where it stands — the protocol and storage layers are the parts worth
+trusting, and they're the well-covered ones:
+
+| Area | Lines |
+|---|---|
+| `protocol.rs` — LifeSpan frame decoding | ~99% |
+| `ftms.rs` — Bluetooth FTMS parsing | ~96% |
+| `db.rs` — storage, de-glitching, rollups | ~82% |
+| `app.rs` — shared state, today-cache | ~70% |
+| `api.rs` — routes + security guard | ~33% |
+| `ble.rs` — the device worker | ~21% |
+| `main.rs` — CLI | 0% |
+| **total** | **~58%** |
+
+`ble.rs` and the CLI are low because they want a real treadmill and a real
+terminal; the security-critical half of `api.rs` (the request guard, the bounds
+checks) is covered by [`tests/api_guard.rs`](crates/trot-core/tests/api_guard.rs),
+which drives the actual router over HTTP.
+
 ## Design rules
 - Presentation-agnostic. Local-first. Privacy-respecting (no cloud required).
 - The API is the product's public surface — keep it stable and documented.
