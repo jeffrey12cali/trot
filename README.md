@@ -36,7 +36,7 @@ directory; that's how the CLI and any UI find it.
 
 | Route | Method | What it gives you |
 |---|---|---|
-| `/api/health` | GET | Is the daemon up, is a treadmill connected |
+| `/api/health` | GET | Is the daemon up, is a treadmill connected, and which engine version |
 | `/api/state` | GET | Full snapshot: connection, live telemetry, today's totals |
 | `/api/today` | GET | Today's totals plus a 24-hour step breakdown |
 | `/api/sessions`, `/api/sessions/:id` | GET | Recorded sessions |

@@ -202,7 +202,16 @@ async fn api_today(State(s): State<Arc<AppState>>) -> Json<Value> {
 }
 
 async fn api_health(State(s): State<Arc<AppState>>) -> Json<Value> {
-    Json(json!({"ok": true, "connected": s.is_connected()}))
+    // `version` is the engine's own version, which is not the same thing as the
+    // app's — desktop ships the engine as a separate sidecar binary that can be
+    // older than the app bundling it. Exposing it on the cheapest endpoint (not
+    // only in the /api/diag dump) lets a client show both without asking a user
+    // to run a diagnostic.
+    Json(json!({
+        "ok": true,
+        "connected": s.is_connected(),
+        "version": env!("CARGO_PKG_VERSION"),
+    }))
 }
 
 /// Gracefully disconnect the treadmill and stop the BLE worker, then respond.

@@ -2,6 +2,14 @@
 
 All notable changes to `trot` are documented here.
 
+## 0.2.1
+
+### Added
+- `/api/health` now reports the engine's own `version`. The desktop app ships
+  the engine as a separate sidecar binary, so it can be older than the app
+  bundling it — this lets a client show both without asking the user to run a
+  diagnostic dump.
+
 ## 0.2.0
 
 New device controls, plus a second audit pass that turned up a performance
