@@ -10,14 +10,20 @@ installers = ["shell", "powershell"]
 # Ship the third-party (treadspan MIT) notice alongside the binary in every archive.
 include = ["THIRD-PARTY-NOTICES.md"]
 targets = [
-    "x86_64-apple-darwin",      # macOS Intel
-    "aarch64-apple-darwin",     # macOS Apple Silicon
-    "x86_64-pc-windows-msvc",   # Windows
-    "x86_64-unknown-linux-gnu", # Linux
+    "x86_64-apple-darwin",       # macOS Intel
+    "aarch64-apple-darwin",      # macOS Apple Silicon
+    "x86_64-pc-windows-msvc",    # Windows x64
+    "x86_64-unknown-linux-gnu",  # Linux x64
+    "aarch64-unknown-linux-gnu", # Linux arm64 — Raspberry Pi, ARM servers
 ]
 
-# btleplug needs D-Bus headers + pkg-config to build on Linux.
-# Only installed on the Linux runner; macOS/Windows need nothing.
+# btleplug needs D-Bus headers + pkg-config to build on Linux; macOS and Windows
+# need nothing. Scoped to the Linux targets rather than declared globally so the
+# packages aren't requested on runners that have no use for them.
+#
+# Deliberately NO `version` key: writing `{ version = '*', targets = [...] }`
+# generates `apt-get install libdbus-1-dev=*`, which is an invalid apt version
+# pin and fails the build.
 [dist.dependencies.apt]
-libdbus-1-dev = '*'
-pkg-config = '*'
+libdbus-1-dev = { targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"] }
+pkg-config = { targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"] }

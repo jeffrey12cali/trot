@@ -29,6 +29,51 @@ No opinions about presentation; it does the modest thing and says so on the tin.
   trot log --week       # the week's ledger
   ```
 
+## Install
+
+**Prebuilt binaries** for every release live on the
+[Releases page](https://github.com/marcuspuchalla/trot/releases/latest). One-liners:
+
+```sh
+# macOS & Linux
+curl -LsSf https://github.com/marcuspuchalla/trot/releases/latest/download/trot-installer.sh | sh
+```
+```powershell
+# Windows (PowerShell)
+irm https://github.com/marcuspuchalla/trot/releases/latest/download/trot-installer.ps1 | iex
+```
+
+| Platform | Archive |
+|---|---|
+| macOS · Apple Silicon | `trot-aarch64-apple-darwin.tar.xz` |
+| macOS · Intel | `trot-x86_64-apple-darwin.tar.xz` |
+| Linux · x86_64 | `trot-x86_64-unknown-linux-gnu.tar.xz` |
+| Linux · arm64 (Raspberry Pi, ARM servers) | `trot-aarch64-unknown-linux-gnu.tar.xz` |
+| Windows · x64 | `trot-x86_64-pc-windows-msvc.zip` |
+
+Every archive carries the binary plus `LICENSE`, `README.md`, `CHANGELOG.md` and
+`THIRD-PARTY-NOTICES.md`, and each has a `.sha256` alongside it.
+
+> **macOS:** the binaries are not signed or notarized (Trot is a one-person
+> project and an Apple Developer account is a yearly fee). The `curl … | sh`
+> installer is unaffected, but if you download an archive **in a browser** macOS
+> quarantines it. Clear that with:
+> ```sh
+> xattr -dr com.apple.quarantine ./trot
+> ```
+
+**Linux** needs BlueZ at runtime (`libdbus`/`bluez` — present on any desktop
+distro). **Windows** needs Bluetooth LE support, which is standard on Windows 10+.
+
+### Build from source
+Needs a [Rust toolchain](https://rustup.rs); on Linux also `libdbus-1-dev` and
+`pkg-config`.
+
+```sh
+git clone https://github.com/marcuspuchalla/trot
+cd trot && cargo build --release   # binary at target/release/trot
+```
+
 ## The local API
 The daemon serves JSON over HTTP plus a live WebSocket stream on an **ephemeral
 loopback port**. On start it writes `runtime.json` (`{port, token}`) into the data
