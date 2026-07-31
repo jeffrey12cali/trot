@@ -1,0 +1,104 @@
+# Notarize the macOS binaries after a release is published.
+#
+# WHY THIS EXISTS: dist signs the macOS binaries (macos-sign = true) but it does
+# NOT notarize — there is no notarytool anywhere in dist 0.32.0. Since macOS
+# 10.15, a *signed but un-notarized* download is still blocked by Gatekeeper; the
+# dialog just changes wording. Notarization is the part that actually removes the
+# warning, so it happens here.
+#
+# HOW IT WORKS: notarization binds a ticket to the binary's code hash, published
+# by Apple and checked online at first launch. A bare CLI binary cannot be
+# "stapled" (stapling only works on .app/.dmg/.pkg), so we do NOT need to modify
+# or re-upload the release archives — we notarize the exact bytes that already
+# shipped, and Gatekeeper resolves the ticket on the user's machine.
+#
+# REQUIREMENTS: the binaries must already be signed with a Developer ID *and* the
+# hardened runtime (CODESIGN_OPTIONS=runtime), or Apple rejects the submission.
+name: Notarize macOS
+
+on:
+  release:
+    types: [published]
+  # Allow re-running against an existing tag if a submission needs a retry.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to notarize (e.g. v0.2.2)"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  notarize:
+    # notarytool ships with Xcode, so this must run on macOS.
+    runs-on: macos-14
+    steps:
+      - name: Resolve the tag
+        id: tag
+        run: echo "tag=${{ github.event.inputs.tag || github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+
+      - name: Check that the notarization secrets are present
+        id: guard
+        env:
+          KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+        run: |
+          if [ -z "$KEY_ID" ]; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Notarization secrets are not configured; skipping. See docs/macos-signing.md."
+          else
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download the macOS archives from the release
+        if: steps.guard.outputs.ready == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download "${{ steps.tag.outputs.tag }}" \
+            -R "${{ github.repository }}" \
+            -p 'trot-*-apple-darwin.tar.xz' -D archives
+          ls -la archives
+
+      - name: Notarize each macOS binary
+        if: steps.guard.outputs.ready == 'true'
+        env:
+          API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          # The .p8 is stored base64-encoded so the private key survives being a
+          # single-line GitHub secret.
+          umask 077
+          printf '%s' "$API_KEY_P8" | base64 --decode > /tmp/AuthKey.p8
+
+          for archive in archives/*.tar.xz; do
+            name="$(basename "$archive" .tar.xz)"
+            echo "::group::$name"
+            rm -rf work && mkdir work
+            tar xf "$archive" -C work
+
+            bin="$(find work -type f -name trot -perm +111 | head -1)"
+            if [ -z "$bin" ]; then echo "no trot binary in $archive"; exit 1; fi
+
+            # Fail loudly if dist did not actually sign this build — notarization
+            # of an unsigned binary is rejected, and silently "succeeding" here
+            # would be worse than stopping.
+            codesign --verify --strict --verbose=2 "$bin"
+            codesign -d --verbose=2 "$bin" 2>&1 | grep -q 'flags=.*runtime' \
+              || { echo "binary is not hardened-runtime signed; set CODESIGN_OPTIONS=runtime"; exit 1; }
+
+            # notarytool takes an archive, not a bare executable.
+            ditto -c -k --keepParent "$bin" "/tmp/$name.zip"
+            xcrun notarytool submit "/tmp/$name.zip" \
+              --key /tmp/AuthKey.p8 \
+              --key-id "$API_KEY_ID" \
+              --issuer "$API_ISSUER_ID" \
+              --wait --timeout 30m
+            echo "::endgroup::"
+          done
+
+      - name: Clean up the private key
+        if: always()
+        run: rm -f /tmp/AuthKey.p8
