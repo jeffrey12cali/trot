@@ -284,14 +284,17 @@ pub fn display_unit() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     /// `runtime.json` carries the API token, so the file must never exist in a
     /// world-readable state — not even briefly. Creating it 0600 up front (rather
     /// than chmod-ing after the rename) is what guarantees that.
+    ///
+    /// Unix-only: Windows has no mode bits. The import lives inside the function
+    /// rather than at module scope so it doesn't become an unused-import error on
+    /// Windows, where this is the only test and it compiles away.
     #[test]
     #[cfg(unix)]
     fn atomic_write_creates_private_files() {
+        use super::*;
         use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("trot-atomic-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
