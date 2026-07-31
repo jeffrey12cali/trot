@@ -27,3 +27,7 @@ chrono = "0.4"
 # test-util gives tests a pausable clock, so supervisor/backoff tests don't
 # actually sleep through their retry delays.
 tokio = { version = "1", features = ["full", "test-util"] }
+# Drive the axum Router directly in tests (ServiceExt::oneshot) so the API's
+# security guard can be exercised without binding a real port.
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

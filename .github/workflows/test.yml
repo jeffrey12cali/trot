@@ -1,0 +1,62 @@
+# The quality gate: formatting, lints and the test suite on all three desktop
+# platforms.
+#
+# This is a REUSABLE workflow (`workflow_call`) with exactly one definition and
+# two callers:
+#   * ci.yml           — on every push and pull request
+#   * release.yml      — via dist's `plan-jobs`, so a release cannot be built
+#                        unless this passes first
+#
+# Keeping it in one file means the gate that guards a release is provably the
+# same one that runs on a pull request, rather than two lists that drift apart.
+name: Test
+
+on:
+  workflow_call:
+  # Lets you run the gate by hand against a branch without pushing.
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Warnings fail the build, so lint debt can't accumulate quietly.
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Don't cancel the other platforms when one fails — a Windows-only or
+      # macOS-only break is exactly what this matrix exists to surface, and
+      # seeing all three results at once saves a round trip.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      # btleplug talks to BlueZ over D-Bus on Linux; macOS/Windows need nothing.
+      - name: Install Linux Bluetooth build deps
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets
+
+      - name: Test
+        run: cargo test --workspace -- --nocapture
+
+      # A green matrix is easy to skim; a summary line says what actually ran.
+      - name: Summarise
+        if: always()
+        shell: bash
+        # Block scalar, not a plain one: the text contains ": ", which YAML
+        # would otherwise read as a mapping and refuse to parse.
+        run: |
+          echo "- **${{ matrix.os }}** — fmt, clippy, tests — ${{ job.status }}" >> "$GITHUB_STEP_SUMMARY"

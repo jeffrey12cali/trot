@@ -7,6 +7,11 @@ members = ["cargo:."]
 cargo-dist-version = "0.32.0"
 ci = "github"
 installers = ["shell", "powershell"]
+# Gate the release on the test suite. `plan` is the first stage and every build
+# job depends on it, so if ./test fails NOTHING is built, uploaded or published.
+# It reuses .github/workflows/test.yml — the same gate a pull request runs, so a
+# release can't be cut against code a PR would have rejected.
+plan-jobs = ["./test"]
 # Ship the third-party (treadspan MIT) notice alongside the binary in every archive.
 include = ["THIRD-PARTY-NOTICES.md"]
 targets = [
