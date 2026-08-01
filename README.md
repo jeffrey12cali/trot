@@ -102,8 +102,8 @@ profile instead. Pre-generated scripts for every shell also ship in each release
 archive under `completions/`.
 
 ### Build from source
-Needs a [Rust toolchain](https://rustup.rs); on Linux also `libdbus-1-dev` and
-`pkg-config`.
+Needs a [Rust toolchain](https://rustup.rs) — **1.85 or newer** — and on Linux
+also `libdbus-1-dev` and `pkg-config`.
 
 ```sh
 git clone https://github.com/marcuspuchalla/trot

@@ -4,6 +4,10 @@ All notable changes to `trot` are documented here.
 
 ## Unreleased
 
+### Changed
+- **Minimum supported Rust is now 1.85** (was 1.77), so `clap_complete` can track
+  its 4.6 line rather than being pinned back to 4.5 to keep the old floor true.
+
 ### Added
 - `trot completions <shell>` — shell completion for the subcommands and flags,
   so `trot da<Tab>` becomes `trot daemon`. `--install` writes the script where

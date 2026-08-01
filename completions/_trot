@@ -93,7 +93,7 @@ _arguments "${_arguments_options[@]}" : \
 ;;
 (help)
 _arguments "${_arguments_options[@]}" : \
-":: :_trot__help_commands" \
+":: :_trot__subcmd__help_commands" \
 "*::: :->help" \
 && ret=0
 
@@ -168,23 +168,23 @@ _trot_commands() {
     )
     _describe -t commands 'trot commands' commands "$@"
 }
-(( $+functions[_trot__completions_commands] )) ||
-_trot__completions_commands() {
+(( $+functions[_trot__subcmd__completions_commands] )) ||
+_trot__subcmd__completions_commands() {
     local commands; commands=()
     _describe -t commands 'trot completions commands' commands "$@"
 }
-(( $+functions[_trot__daemon_commands] )) ||
-_trot__daemon_commands() {
+(( $+functions[_trot__subcmd__daemon_commands] )) ||
+_trot__subcmd__daemon_commands() {
     local commands; commands=()
     _describe -t commands 'trot daemon commands' commands "$@"
 }
-(( $+functions[_trot__devices_commands] )) ||
-_trot__devices_commands() {
+(( $+functions[_trot__subcmd__devices_commands] )) ||
+_trot__subcmd__devices_commands() {
     local commands; commands=()
     _describe -t commands 'trot devices commands' commands "$@"
 }
-(( $+functions[_trot__help_commands] )) ||
-_trot__help_commands() {
+(( $+functions[_trot__subcmd__help_commands] )) ||
+_trot__subcmd__help_commands() {
     local commands; commands=(
 'daemon:Run the tracking daemon (talks to the treadmill, serves the API)' \
 'today:Today'\''s totals' \
@@ -199,83 +199,83 @@ _trot__help_commands() {
     )
     _describe -t commands 'trot help commands' commands "$@"
 }
-(( $+functions[_trot__help__completions_commands] )) ||
-_trot__help__completions_commands() {
+(( $+functions[_trot__subcmd__help__subcmd__completions_commands] )) ||
+_trot__subcmd__help__subcmd__completions_commands() {
     local commands; commands=()
     _describe -t commands 'trot help completions commands' commands "$@"
 }
-(( $+functions[_trot__help__daemon_commands] )) ||
-_trot__help__daemon_commands() {
+(( $+functions[_trot__subcmd__help__subcmd__daemon_commands] )) ||
+_trot__subcmd__help__subcmd__daemon_commands() {
     local commands; commands=()
     _describe -t commands 'trot help daemon commands' commands "$@"
 }
-(( $+functions[_trot__help__devices_commands] )) ||
-_trot__help__devices_commands() {
+(( $+functions[_trot__subcmd__help__subcmd__devices_commands] )) ||
+_trot__subcmd__help__subcmd__devices_commands() {
     local commands; commands=()
     _describe -t commands 'trot help devices commands' commands "$@"
 }
-(( $+functions[_trot__help__help_commands] )) ||
-_trot__help__help_commands() {
+(( $+functions[_trot__subcmd__help__subcmd__help_commands] )) ||
+_trot__subcmd__help__subcmd__help_commands() {
     local commands; commands=()
     _describe -t commands 'trot help help commands' commands "$@"
 }
-(( $+functions[_trot__help__log_commands] )) ||
-_trot__help__log_commands() {
+(( $+functions[_trot__subcmd__help__subcmd__log_commands] )) ||
+_trot__subcmd__help__subcmd__log_commands() {
     local commands; commands=()
     _describe -t commands 'trot help log commands' commands "$@"
 }
-(( $+functions[_trot__help__pair_commands] )) ||
-_trot__help__pair_commands() {
+(( $+functions[_trot__subcmd__help__subcmd__pair_commands] )) ||
+_trot__subcmd__help__subcmd__pair_commands() {
     local commands; commands=()
     _describe -t commands 'trot help pair commands' commands "$@"
 }
-(( $+functions[_trot__help__scan_commands] )) ||
-_trot__help__scan_commands() {
+(( $+functions[_trot__subcmd__help__subcmd__scan_commands] )) ||
+_trot__subcmd__help__subcmd__scan_commands() {
     local commands; commands=()
     _describe -t commands 'trot help scan commands' commands "$@"
 }
-(( $+functions[_trot__help__status_commands] )) ||
-_trot__help__status_commands() {
+(( $+functions[_trot__subcmd__help__subcmd__status_commands] )) ||
+_trot__subcmd__help__subcmd__status_commands() {
     local commands; commands=()
     _describe -t commands 'trot help status commands' commands "$@"
 }
-(( $+functions[_trot__help__today_commands] )) ||
-_trot__help__today_commands() {
+(( $+functions[_trot__subcmd__help__subcmd__today_commands] )) ||
+_trot__subcmd__help__subcmd__today_commands() {
     local commands; commands=()
     _describe -t commands 'trot help today commands' commands "$@"
 }
-(( $+functions[_trot__help__unpair_commands] )) ||
-_trot__help__unpair_commands() {
+(( $+functions[_trot__subcmd__help__subcmd__unpair_commands] )) ||
+_trot__subcmd__help__subcmd__unpair_commands() {
     local commands; commands=()
     _describe -t commands 'trot help unpair commands' commands "$@"
 }
-(( $+functions[_trot__log_commands] )) ||
-_trot__log_commands() {
+(( $+functions[_trot__subcmd__log_commands] )) ||
+_trot__subcmd__log_commands() {
     local commands; commands=()
     _describe -t commands 'trot log commands' commands "$@"
 }
-(( $+functions[_trot__pair_commands] )) ||
-_trot__pair_commands() {
+(( $+functions[_trot__subcmd__pair_commands] )) ||
+_trot__subcmd__pair_commands() {
     local commands; commands=()
     _describe -t commands 'trot pair commands' commands "$@"
 }
-(( $+functions[_trot__scan_commands] )) ||
-_trot__scan_commands() {
+(( $+functions[_trot__subcmd__scan_commands] )) ||
+_trot__subcmd__scan_commands() {
     local commands; commands=()
     _describe -t commands 'trot scan commands' commands "$@"
 }
-(( $+functions[_trot__status_commands] )) ||
-_trot__status_commands() {
+(( $+functions[_trot__subcmd__status_commands] )) ||
+_trot__subcmd__status_commands() {
     local commands; commands=()
     _describe -t commands 'trot status commands' commands "$@"
 }
-(( $+functions[_trot__today_commands] )) ||
-_trot__today_commands() {
+(( $+functions[_trot__subcmd__today_commands] )) ||
+_trot__subcmd__today_commands() {
     local commands; commands=()
     _describe -t commands 'trot today commands' commands "$@"
 }
-(( $+functions[_trot__unpair_commands] )) ||
-_trot__unpair_commands() {
+(( $+functions[_trot__subcmd__unpair_commands] )) ||
+_trot__subcmd__unpair_commands() {
     local commands; commands=()
     _describe -t commands 'trot unpair commands' commands "$@"
 }
