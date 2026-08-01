@@ -2,6 +2,19 @@
 
 All notable changes to `trot` are documented here.
 
+## Unreleased
+
+### Added
+- `trot completions <shell>` — shell completion for the subcommands and flags,
+  so `trot da<Tab>` becomes `trot daemon`. `--install` writes the script where
+  the shell will find it and guesses the shell from `$SHELL`; bash, zsh, fish,
+  PowerShell and Elvish are supported. Pre-generated scripts also ship in every
+  release archive under `completions/` for packagers. CI regenerates them and
+  fails if they've drifted from the command tree.
+- `trot --help` draws the Trot mark as ASCII art, in the logo's own colours.
+  Terminal only — piped output stays clean and greppable — and it honours
+  `NO_COLOR` and falls back on 16-colour terminals.
+
 ## 0.2.1
 
 ### Added

@@ -12,8 +12,10 @@ installers = ["shell", "powershell"]
 # It reuses .github/workflows/test.yml — the same gate a pull request runs, so a
 # release can't be cut against code a PR would have rejected.
 plan-jobs = ["./test"]
-# Ship the third-party (treadspan MIT) notice alongside the binary in every archive.
-include = ["THIRD-PARTY-NOTICES.md"]
+# Ship the third-party (treadspan MIT) notice and the shell completions alongside
+# the binary in every archive, so packagers can install completions to system
+# paths. Everyone else can run `trot completions --install`.
+include = ["THIRD-PARTY-NOTICES.md", "completions"]
 targets = [
     "x86_64-apple-darwin",       # macOS Intel
     "aarch64-apple-darwin",      # macOS Apple Silicon

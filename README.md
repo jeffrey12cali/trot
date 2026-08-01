@@ -61,8 +61,9 @@ irm https://github.com/marcuspuchalla/trot/releases/latest/download/trot-install
 | Linux · arm64 (Raspberry Pi, ARM servers) | `trot-aarch64-unknown-linux-gnu.tar.xz` |
 | Windows · x64 | `trot-x86_64-pc-windows-msvc.zip` |
 
-Every archive carries the binary plus `LICENSE`, `README.md`, `CHANGELOG.md` and
-`THIRD-PARTY-NOTICES.md`, and each has a `.sha256` alongside it.
+Every archive carries the binary plus `LICENSE`, `README.md`, `CHANGELOG.md`,
+`THIRD-PARTY-NOTICES.md` and a `completions/` directory, and each has a `.sha256`
+alongside it.
 
 > **macOS:** the binaries are not signed or notarized (Trot is a one-person
 > project and an Apple Developer account is a yearly fee). The `curl … | sh`
@@ -74,6 +75,31 @@ Every archive carries the binary plus `LICENSE`, `README.md`, `CHANGELOG.md` and
 
 **Linux** needs BlueZ at runtime (`libdbus`/`bluez` — present on any desktop
 distro). **Windows** needs Bluetooth LE support, which is standard on Windows 10+.
+
+### Shell completions
+`trot` can complete its own subcommands and flags — `trot da<Tab>` becomes
+`trot daemon`.
+
+```sh
+trot completions --install        # guesses your shell from $SHELL
+trot completions zsh --install    # or name it
+```
+
+That writes the script where your shell looks for it (`~/.zfunc/_trot`,
+`~/.local/share/bash-completion/completions/trot`,
+`~/.config/fish/completions/trot.fish`) and prints anything you still need to add
+to your rc file. Restart the shell afterwards.
+
+Prefer to place it yourself, or packaging Trot? The script goes to stdout without
+`--install`:
+
+```sh
+trot completions bash > /usr/local/etc/bash_completion.d/trot
+```
+
+PowerShell and Elvish have no drop-in directory, so append the output to your
+profile instead. Pre-generated scripts for every shell also ship in each release
+archive under `completions/`.
 
 ### Build from source
 Needs a [Rust toolchain](https://rustup.rs); on Linux also `libdbus-1-dev` and

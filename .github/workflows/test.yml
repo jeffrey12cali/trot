@@ -52,6 +52,23 @@ jobs:
       - name: Test
         run: cargo test --workspace -- --nocapture
 
+      # The committed completion scripts ship inside every release archive, so
+      # they must match the current command tree. Regenerate and diff rather
+      # than trusting anyone to remember.
+      - name: Shell completions are up to date
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          cargo run --quiet --bin trot -- completions bash       > completions/trot.bash
+          cargo run --quiet --bin trot -- completions zsh        > completions/_trot
+          cargo run --quiet --bin trot -- completions fish       > completions/trot.fish
+          cargo run --quiet --bin trot -- completions powershell > completions/_trot.ps1
+          cargo run --quiet --bin trot -- completions elvish     > completions/trot.elv
+          if ! git diff --exit-code -- completions; then
+            echo "::error::completions/ is stale — regenerate it (see completions/README.md)"
+            exit 1
+          fi
+
       # A green matrix is easy to skim; a summary line says what actually ran.
       - name: Summarise
         if: always()
