@@ -28,7 +28,10 @@ on:
     inputs:
       tag:
         description: "Release tag to notarize (e.g. v0.3.0)"
-        required: true
+        required: false
+      submission_id:
+        description: "Existing submission UUID to query instead of submitting again"
+        required: false
 
 permissions:
   contents: read
@@ -64,8 +67,30 @@ jobs:
             -p 'trot-*-apple-darwin.tar.xz' -D archives
           ls -la archives
 
+      # Notarization failures are opaque: the submit call only says "Invalid".
+      # `notarytool log` is the only thing that says WHY, so it gets its own
+      # entry point — a submission UUID can be inspected without resubmitting.
+      - name: Inspect an existing submission
+        if: steps.guard.outputs.ready == 'true' && inputs.submission_id
+        env:
+          API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          umask 077
+          printf '%s' "$API_KEY_P8" | base64 --decode > /tmp/AuthKey.p8
+          AUTH=(--key /tmp/AuthKey.p8 --key-id "$API_KEY_ID" --issuer "$API_ISSUER_ID")
+          echo "::group::info"
+          xcrun notarytool info "${{ inputs.submission_id }}" "${AUTH[@]}"
+          echo "::endgroup::"
+          echo "::group::log"
+          xcrun notarytool log "${{ inputs.submission_id }}" "${AUTH[@]}" || \
+            echo "(no log yet — Apple only publishes one once processing finishes)"
+          echo "::endgroup::"
+
       - name: Notarize each macOS binary
-        if: steps.guard.outputs.ready == 'true'
+        if: steps.guard.outputs.ready == 'true' && !inputs.submission_id
         env:
           API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
           API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
@@ -95,11 +120,22 @@ jobs:
 
             # notarytool takes an archive, not a bare executable.
             ditto -c -k --keepParent "$bin" "/tmp/$name.zip"
-            xcrun notarytool submit "/tmp/$name.zip" \
-              --key /tmp/AuthKey.p8 \
-              --key-id "$API_KEY_ID" \
-              --issuer "$API_ISSUER_ID" \
-              --wait --timeout 30m
+            # Apple's queue is usually minutes but has no SLA; 30m proved too
+            # short for v0.3.0. On rejection, print the log — "Invalid" on its
+            # own tells you nothing.
+            AUTH=(--key /tmp/AuthKey.p8 --key-id "$API_KEY_ID" --issuer "$API_ISSUER_ID")
+            id=$(xcrun notarytool submit "/tmp/$name.zip" "${AUTH[@]}" \
+                   --wait --timeout 60m --output-format json | tee /dev/stderr \
+                 | python3 -c "import json,sys; print(json.load(sys.stdin).get('id',''))") || true
+            status=$(xcrun notarytool info "$id" "${AUTH[@]}" --output-format json \
+                     | python3 -c "import json,sys; print(json.load(sys.stdin).get('status',''))")
+            echo "submission $id -> $status"
+            if [ "$status" != "Accepted" ]; then
+              echo "::group::notarytool log for $id"
+              xcrun notarytool log "$id" "${AUTH[@]}" || true
+              echo "::endgroup::"
+              exit 1
+            fi
             echo "::endgroup::"
           done
 
