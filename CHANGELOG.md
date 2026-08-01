@@ -2,7 +2,9 @@
 
 All notable changes to `trot` are documented here.
 
-## Unreleased
+## 0.3.0
+
+Shell completions and a signed macOS build.
 
 ### Changed
 - **Minimum supported Rust is now 1.85** (was 1.77), so `clap_complete` can track
@@ -18,6 +20,12 @@ All notable changes to `trot` are documented here.
 - `trot --help` draws the Trot mark as ASCII art, in the logo's own colours.
   Terminal only — piped output stays clean and greppable — and it honours
   `NO_COLOR` and falls back on 16-colour terminals.
+- **macOS binaries are now signed** with a Developer ID certificate and the
+  hardened runtime, and notarized with Apple after the release publishes. A
+  browser-downloaded archive should no longer need
+  `xattr -dr com.apple.quarantine`.
+- Prebuilt binaries for **Linux arm64** (Raspberry Pi, ARM servers), alongside
+  macOS (Intel + Apple Silicon), Linux x86_64 and Windows x64.
 
 ## 0.2.1
 
