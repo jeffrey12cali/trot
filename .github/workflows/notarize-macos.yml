@@ -16,14 +16,18 @@
 # hardened runtime (CODESIGN_OPTIONS=runtime), or Apple rejects the submission.
 name: Notarize macOS
 
+# Runs as the last stage of the release pipeline (dist's `post-announce-jobs`),
+# NOT on `release: published`. GitHub deliberately does not trigger workflows
+# from events raised with GITHUB_TOKEN — and dist publishes the release as
+# github-actions[bot] — so a release trigger silently never fires. Learned the
+# hard way on v0.3.0.
 on:
-  release:
-    types: [published]
-  # Allow re-running against an existing tag if a submission needs a retry.
+  workflow_call:
+  # Re-run by hand against an existing tag if a submission needs a retry.
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to notarize (e.g. v0.2.2)"
+        description: "Release tag to notarize (e.g. v0.3.0)"
         required: true
 
 permissions:
@@ -36,7 +40,7 @@ jobs:
     steps:
       - name: Resolve the tag
         id: tag
-        run: echo "tag=${{ github.event.inputs.tag || github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+        run: echo "tag=${{ github.event.inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
 
       - name: Check that the notarization secrets are present
         id: guard

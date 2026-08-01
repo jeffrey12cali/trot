@@ -305,3 +305,12 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+
+  custom-notarize-macos:
+    needs:
+      - plan
+      - announce
+    uses: ./.github/workflows/notarize-macos.yml
+    with:
+      plan: ${{ needs.plan.outputs.val }}
+    secrets: inherit
