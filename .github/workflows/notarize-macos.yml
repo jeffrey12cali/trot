@@ -58,7 +58,7 @@ jobs:
           fi
 
       - name: Download the macOS archives from the release
-        if: steps.guard.outputs.ready == 'true'
+        if: steps.guard.outputs.ready == 'true' && !inputs.submission_id
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
