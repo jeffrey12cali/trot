@@ -120,19 +120,30 @@ jobs:
 
             # notarytool takes an archive, not a bare executable.
             ditto -c -k --keepParent "$bin" "/tmp/$name.zip"
-            # Apple's queue is usually minutes but has no SLA; 30m proved too
-            # short for v0.3.0. On rejection, print the log — "Invalid" on its
-            # own tells you nothing.
+            # Submit WITHOUT --wait and poll ourselves. `--wait` mixes progress
+            # text into stdout and, on timeout, exits non-zero having printed
+            # only a message — so the submission id is lost exactly when it is
+            # most needed. Submitting plainly gives clean JSON with the id up
+            # front, which stays useful even if this job later times out.
             AUTH=(--key /tmp/AuthKey.p8 --key-id "$API_KEY_ID" --issuer "$API_ISSUER_ID")
-            id=$(xcrun notarytool submit "/tmp/$name.zip" "${AUTH[@]}" \
-                   --wait --timeout 60m --output-format json | tee /dev/stderr \
-                 | python3 -c "import json,sys; print(json.load(sys.stdin).get('id',''))") || true
-            status=$(xcrun notarytool info "$id" "${AUTH[@]}" --output-format json \
-                     | python3 -c "import json,sys; print(json.load(sys.stdin).get('status',''))")
-            echo "submission $id -> $status"
+            id=$(xcrun notarytool submit "/tmp/$name.zip" "${AUTH[@]}" --output-format json \
+                 | python3 -c "import json,sys; print(json.load(sys.stdin)['id'])")
+            echo "submitted $name -> $id"
+
+            status="In Progress"
+            for _ in $(seq 1 80); do    # 80 x 45s = 60 minutes
+              sleep 45
+              status=$(xcrun notarytool info "$id" "${AUTH[@]}" --output-format json \
+                       | python3 -c "import json,sys; print(json.load(sys.stdin).get('status',''))")
+              echo "  $id: $status"
+              [ "$status" = "In Progress" ] || break
+            done
+
             if [ "$status" != "Accepted" ]; then
+              echo "::error::$name was not accepted (status: $status). Submission id: $id"
               echo "::group::notarytool log for $id"
-              xcrun notarytool log "$id" "${AUTH[@]}" || true
+              xcrun notarytool log "$id" "${AUTH[@]}" || \
+                echo "(no log — Apple publishes one only once processing finishes)"
               echo "::endgroup::"
               exit 1
             fi
