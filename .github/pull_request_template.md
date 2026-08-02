@@ -1,0 +1,24 @@
+<!-- Thanks for contributing. Keep this short — a sentence or two is fine. -->
+
+## What this changes
+
+<!-- And why. If it fixes an issue: "Fixes #123". -->
+
+## How it was checked
+
+<!-- Tests you added, or how you verified it by hand. If you tested against a
+     real treadmill, say which one — that's the part we can't reproduce. -->
+
+- [ ] `cargo test --workspace` passes
+- [ ] `cargo clippy --workspace --all-targets` is clean (CI treats warnings as errors)
+- [ ] `cargo fmt --all --check` passes
+
+## Anything worth flagging
+
+<!-- Delete what doesn't apply. -->
+
+- [ ] Changes the `/api` or `/ws` surface — that's a public contract; adding is
+      fine, changing or removing is breaking
+- [ ] Changes CLI commands or flags — regenerate `completions/` (CI diffs them)
+- [ ] Touches the de-glitching in `db.rs` — please add the data shape that broke
+- [ ] Adds a network dependency — Trot is local-first, so this needs discussing

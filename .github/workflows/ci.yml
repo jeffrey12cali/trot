@@ -10,6 +10,11 @@ on:
     branches: [main]
   pull_request:
 
+# Read-only by default; the coverage job needs to push its badge JSON to the
+# `badges` branch and asks for write itself.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
@@ -22,6 +27,8 @@ jobs:
   coverage:
     name: coverage
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # only to update the badges branch
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -62,6 +69,35 @@ jobs:
             lcov.info
             coverage-html
           retention-days: 30
+
+      # Publish the number as a shields.io endpoint so the README badge is real
+      # rather than a hand-updated guess. The JSON lives on an orphan `badges`
+      # branch: shields reads it over raw.githubusercontent, and main never sees
+      # a bot commit. No third-party coverage service, no token beyond the one
+      # Actions already has.
+      - name: Publish the coverage badge
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          pct=$(cargo llvm-cov report --json --summary-only \
+                | python3 -c "import json,sys; print(round(json.load(sys.stdin)['data'][0]['totals']['lines']['percent'],1))")
+          # green >=80, yellow >=60, orange >=40, else red
+          colour=$(python3 -c "p=$pct; print('brightgreen' if p>=80 else 'yellow' if p>=60 else 'orange' if p>=40 else 'red')")
+          printf '{"schemaVersion":1,"label":"coverage","message":"%s%%","color":"%s"}\n' "$pct" "$colour" > /tmp/coverage.json
+          echo "coverage: $pct% ($colour)"
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin badges --depth=1 2>/dev/null && git checkout badges \
+            || git checkout --orphan badges && git rm -rf --cached . >/dev/null 2>&1 || true
+          find . -maxdepth 1 ! -name . ! -name .git ! -name coverage.json -exec rm -rf {} + 2>/dev/null || true
+          cp /tmp/coverage.json coverage.json
+          git add coverage.json
+          # Only commit when the number actually moved.
+          git diff --cached --quiet || git commit -m "coverage: $pct%"
+          git push origin badges
 
   audit:
     name: cargo audit

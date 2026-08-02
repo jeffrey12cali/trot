@@ -1,0 +1,66 @@
+name: Bug report
+description: Something Trot does is wrong or broken.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time. If this is about a treadmill Trot can't read,
+        please use the **Treadmill support** template instead — it asks for the
+        specific things needed to add an adapter.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you expect, and what did you get instead?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How can it be reproduced?
+      placeholder: |
+        1. trot pair …
+        2. trot daemon
+        3. walk for a minute
+        4. trot today shows …
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Trot version
+      description: "Output of `trot --version`."
+      placeholder: trot 0.3.0
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - macOS (Apple Silicon)
+        - macOS (Intel)
+        - Linux (x86_64)
+        - Linux (arm64 / Raspberry Pi)
+        - Windows
+    validations:
+      required: true
+  - type: input
+    id: treadmill
+    attributes:
+      label: Treadmill
+      placeholder: LifeSpan TR1200-DT3, or "none — this isn't device-related"
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or diagnostics
+      description: |
+        Daemon output is often enough. For anything about wrong numbers or a
+        dropped connection, a diagnostic dump is far more useful:
+        `curl "http://127.0.0.1:<port>/api/diag" > diag.json` — the port is in
+        `runtime.json` in Trot's data directory.
+
+        The dump contains your activity for that day (steps, timestamps, raw
+        device frames). No account data or tokens. Have a look before attaching.
+      render: shell

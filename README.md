@@ -3,10 +3,10 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/marcuspuchalla/trot/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/marcuspuchalla/trot/ci.yml?branch=main&style=flat-square&label=tests&labelColor=111A17&color=87E939"></a>
+  <a href="https://github.com/marcuspuchalla/trot/actions/workflows/ci.yml"><img alt="Coverage" src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/marcuspuchalla/trot/badges/coverage.json&style=flat-square&labelColor=111A17"></a>
   <a href="https://github.com/marcuspuchalla/trot/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/marcuspuchalla/trot?style=flat-square&color=87E939&labelColor=111A17"></a>
   <a href="./LICENSE"><img alt="GPLv3" src="https://img.shields.io/badge/license-GPLv3-87E939?style=flat-square&labelColor=111A17"></a>
-  <img alt="Rust" src="https://img.shields.io/badge/Rust-stable-EAF4EC?style=flat-square&logo=rust&logoColor=EAF4EC&labelColor=111A17">
-  <img alt="Local first" src="https://img.shields.io/badge/data-local--first-87E939?style=flat-square&labelColor=111A17">
 </p>
 
 > **TROT's Really Only Treadmilling.** An honest little tracker for treadmill
@@ -18,14 +18,16 @@
 
 - **Website:** [trot.fmp.dev](https://trot.fmp.dev)
 - **License:** GPLv3.
-- **Status:** early days — `v0.2` builds a working `trot` CLI + daemon for
-  LifeSpan (native) and generic FTMS treadmills. Interfaces may still shift.
+- **Status:** early days — `v0.3` is a working CLI + daemon for LifeSpan
+  (native) and generic FTMS treadmills, with signed macOS builds and shell
+  completions. Interfaces may still shift before 1.0.
 
 ## What it does
 - Device connectivity for under-desk treadmills (LifeSpan/Omni + generic FTMS
   first; architected for more adapters).
-- Session lifecycle (start/stop/pause/resume), streaks, local-first history.
-- Metrics: distance, time, cadence, speed, derived calories.
+- Automatic session detection (starts when the belt moves, closes when it stops),
+  with per-minute rollups and local-first history that survives retention pruning.
+- Metrics: steps, distance, time, speed and calories, as the console reports them.
 - A stable local **HTTP + WebSocket API** — the contract anything on top consumes.
 - A real terminal surface:
   ```
@@ -37,6 +39,7 @@
   trot status           # is the daemon up? treadmill connected?
   trot today            # what you did today
   trot log --week       # the week's ledger
+  trot completions zsh --install   # tab-completion for your shell
   ```
 
 ## Install
@@ -245,6 +248,14 @@ terminal; the security-critical half of `api.rs` (the request guard, the bounds
 checks) is covered by [`tests/api_guard.rs`](crates/trot-core/tests/api_guard.rs),
 which drives the actual router over HTTP.
 
+## Contributing
+
+The most useful contribution is a **treadmill report**: if Trot can't read yours,
+a `trot scan --all` listing tells us more than anything else — only LifeSpan is
+tested here on real hardware. See [CONTRIBUTING.md](CONTRIBUTING.md) for how to
+build and what CI expects, and [SECURITY.md](SECURITY.md) before reporting
+anything security-related (please don't open a public issue for that).
+
 ## Design rules
 - Presentation-agnostic. Local-first. Privacy-respecting (no cloud required).
 - The API is the product's public surface — keep it stable and documented.
@@ -263,9 +274,9 @@ trademarks owned by Bluetooth SIG, Inc. All other product and company names are 
 property of their respective holders; their use here is for identification and
 compatibility purposes only.
 
-Trot's own name and mark are reserved and are **not** covered by the GPLv3 that
-covers the code — see [`docs/brand/`](docs/brand/README.md). Fork the code freely;
-just give your fork its own name.
+Trot's own name and the runner mark are reserved and are **not** covered by the
+GPLv3 that covers the code — GPLv3 §7(e) expressly allows this. Fork the code
+freely; just give your fork its own name and mark.
 
 ## Acknowledgements
 Trot's LifeSpan / Omni protocol support was bootstrapped from and cross-checked

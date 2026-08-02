@@ -52,7 +52,7 @@ jobs:
         run: |
           if [ -z "$KEY_ID" ]; then
             echo "ready=false" >> "$GITHUB_OUTPUT"
-            echo "::warning::Notarization secrets are not configured; skipping. See docs/macos-signing.md."
+            echo "::warning::Notarization secrets are not configured; skipping (this is expected on forks)."
           else
             echo "ready=true" >> "$GITHUB_OUTPUT"
           fi
