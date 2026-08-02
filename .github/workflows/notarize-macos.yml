@@ -107,6 +107,7 @@ jobs:
           umask 077
           printf '%s' "$API_KEY_P8" | base64 --decode > /tmp/AuthKey.p8
 
+          stalled=0
           for archive in archives/*.tar.xz; do
             name="$(basename "$archive" .tar.xz)"
             echo "::group::$name"
@@ -144,16 +145,33 @@ jobs:
               [ "$status" = "In Progress" ] || break
             done
 
-            if [ "$status" != "Accepted" ]; then
-              echo "::error::$name was not accepted (status: $status). Submission id: $id"
-              echo "::group::notarytool log for $id"
-              xcrun notarytool log "$id" "${AUTH[@]}" || \
-                echo "(no log — Apple publishes one only once processing finishes)"
-              echo "::endgroup::"
-              exit 1
-            fi
+            # Distinguish "Apple refused our binary" from "Apple never got round
+            # to it". A rejection is our bug and must fail loudly. A submission
+            # still In Progress after an hour is Apple's queue, and failing the
+            # job for it would paint a perfectly good release red — this job runs
+            # after the release is already published.
+            case "$status" in
+              Accepted)
+                echo "$name notarized ($id)" ;;
+              "In Progress")
+                echo "::warning::$name is still In Progress after 60 minutes — Apple has not \
+                  processed it. The release is unaffected; the binary is signed but not yet \
+                  notarized. Submission id: $id"
+                stalled=1 ;;
+              *)
+                echo "::error::$name was REJECTED (status: $status). Submission id: $id"
+                echo "::group::notarytool log for $id"
+                xcrun notarytool log "$id" "${AUTH[@]}" || true
+                echo "::endgroup::"
+                exit 1 ;;
+            esac
             echo "::endgroup::"
           done
+          if [ "$stalled" = "1" ]; then
+            echo "::warning::One or more submissions never left Apple's queue. Re-run this \
+              workflow with the submission id to check later — a notarization ticket applies \
+              retroactively, so nothing needs re-releasing when it clears."
+          fi
 
       - name: Clean up the private key
         if: always()
