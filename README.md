@@ -68,8 +68,9 @@ Every archive carries the binary plus `LICENSE`, `README.md`, `CHANGELOG.md`,
 `THIRD-PARTY-NOTICES.md` and a `completions/` directory, and each has a `.sha256`
 alongside it.
 
-> **macOS:** the binaries are not signed or notarized (Trot is a one-person
-> project and an Apple Developer account is a yearly fee). The `curl … | sh`
+> **macOS:** the binaries are signed with a Developer ID certificate and the
+> hardened runtime, but they are **not yet notarized** — Apple's Notary Service
+> is currently accepting submissions and never completing them. The `curl … | sh`
 > installer is unaffected, but if you download an archive **in a browser** macOS
 > quarantines it. Clear that with:
 > ```sh

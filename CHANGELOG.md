@@ -21,9 +21,10 @@ Shell completions and a signed macOS build.
   Terminal only — piped output stays clean and greppable — and it honours
   `NO_COLOR` and falls back on 16-colour terminals.
 - **macOS binaries are now signed** with a Developer ID certificate and the
-  hardened runtime, and notarized with Apple after the release publishes. A
-  browser-downloaded archive should no longer need
-  `xattr -dr com.apple.quarantine`.
+  hardened runtime. Notarization is wired up but **not yet working**: Apple's
+  Notary Service has accepted every submission and then left it `In Progress`
+  indefinitely, so a browser-downloaded archive still needs
+  `xattr -dr com.apple.quarantine` for now.
 - Prebuilt binaries for **Linux arm64** (Raspberry Pi, ARM servers), alongside
   macOS (Intel + Apple Silicon), Linux x86_64 and Windows x64.
 
