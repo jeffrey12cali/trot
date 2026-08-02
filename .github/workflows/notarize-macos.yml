@@ -81,6 +81,11 @@ jobs:
           umask 077
           printf '%s' "$API_KEY_P8" | base64 --decode > /tmp/AuthKey.p8
           AUTH=(--key /tmp/AuthKey.p8 --key-id "$API_KEY_ID" --issuer "$API_ISSUER_ID")
+          # History first: it shows every recent submission and its status in one
+          # view, which is what you actually want when submissions are stalling.
+          echo "::group::history (all recent submissions for this team)"
+          xcrun notarytool history "${AUTH[@]}" || echo "(history unavailable)"
+          echo "::endgroup::"
           echo "::group::info"
           xcrun notarytool info "${{ inputs.submission_id }}" "${AUTH[@]}"
           echo "::endgroup::"
