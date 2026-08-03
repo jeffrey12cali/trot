@@ -216,10 +216,14 @@ fn deglitch_bucketed(
     resolution_s: i64,
     spike: i64,
     reset_max: i64,
+    // Last accepted value before this window, at ANY age. Without it the walk
+    // restarts blind after a sample gap longer than the lookback and the
+    // increment accrued across that gap is never banked.
+    seed: Option<i64>,
 ) -> std::collections::HashMap<(i64, i64), i64> {
     let n = samples.len();
     let mut out: std::collections::HashMap<(i64, i64), i64> = std::collections::HashMap::new();
-    let mut prev: Option<i64> = None;
+    let mut prev: Option<i64> = seed;
     for i in 0..n {
         let (ts, sess, v) = samples[i];
         if i > 0 && i + 1 < n {
@@ -230,7 +234,24 @@ fn deglitch_bucketed(
             }
         }
         match prev {
-            None => prev = Some(v),
+            None => {
+                // No prior context anywhere: this reading is steps ALREADY
+                // walked (the belt was moving before the app connected), so it
+                // is a baseline that must be banked — `deglitch_walk` banks it,
+                // and if the rollups do not, the day total silently shrinks by
+                // the pre-connect walk as soon as the rollup loop runs, then
+                // becomes unrecoverable once raw is pruned.
+                // Same stale-HIGH opening guard as deglitch_walk.
+                if i + 1 < n && v - samples[i + 1].2 > spike {
+                    continue;
+                }
+                let base = v.max(0);
+                if base > 0 {
+                    let bucket = (ts / resolution_s) * resolution_s;
+                    *out.entry((bucket, sess)).or_insert(0) += base;
+                }
+                prev = Some(v);
+            }
             Some(pv) => {
                 let d = v - pv;
                 if d > 0 {
@@ -254,8 +275,11 @@ fn deglitch_bucketed(
 /// *context* (so the increment straddling the rollup boundary is judged and
 /// counted correctly against its true predecessor). This lets a day's total be
 /// composed as `SUM(rollup deltas below floor) + tail(raw at/above floor)`
-/// without double-counting the boundary and without a first-reading baseline
-/// that the rollups (which never store one) would not carry.
+/// without double-counting the boundary. Since 0.3.2 the rollups DO bank the
+/// first-reading baseline (a day's opening value is steps already walked, and
+/// dropping it made the total shrink as soon as anything was rolled), so the
+/// tail must not bank it again once `floor > 0` — which is exactly what the
+/// `counts` gate below achieves.
 ///
 /// When `floor == 0` (nothing rolled yet) every sample counts *including* the
 /// first-reading baseline, so this degrades exactly to the historical
@@ -361,10 +385,26 @@ fn metric_total(
     } else {
         format!("COALESCE(se.{start_col}, 0)")
     };
-    let sql = format!(
-        "SELECT COALESCE(SUM(COALESCE(se.{end_col}, 0) - {start_expr}), 0)
-         FROM sessions se WHERE se.local_date = ?"
-    );
+    // When the end value is BELOW the recorded start, the counter reset during
+    // the session and the baseline is stale — the end value IS the session's
+    // total. Subtracting anyway yields a negative that silently eats other
+    // sessions' steps from the day (measured: 1391 instead of 2688 on a real
+    // day). This path only runs for dates with neither rollups nor raw samples,
+    // i.e. legacy summary-only imports, which cannot be recomputed.
+    let sql = if start_col.is_empty() {
+        format!(
+            "SELECT COALESCE(SUM(COALESCE(se.{end_col}, 0)), 0)
+             FROM sessions se WHERE se.local_date = ?"
+        )
+    } else {
+        format!(
+            "SELECT COALESCE(SUM(
+                 CASE WHEN COALESCE(se.{end_col}, 0) < {start_expr}
+                      THEN COALESCE(se.{end_col}, 0)
+                      ELSE COALESCE(se.{end_col}, 0) - {start_expr} END), 0)
+             FROM sessions se WHERE se.local_date = ?"
+        )
+    };
     Ok(c.query_row(&sql, params![local_date_s], |r| r.get(0))?)
 }
 
@@ -496,6 +536,43 @@ impl Db {
         speed_raw: Option<u32>,
     ) -> Result<()> {
         let c = self.conn();
+
+        // Self-heal a stale baseline before recording progress.
+        //
+        // open_session stores the telemetry that OPENED the session, but the
+        // SC110 zeroes its counters shortly AFTER the belt starts — so that
+        // value is often still the PREVIOUS session's total (observed:
+        // start_steps=765 on a session whose own samples run 0→87). Left alone
+        // it makes steps_end - start_steps negative, which shows as a session
+        // of 0 steps in the UI and in `trot log`.
+        //
+        // Within the first seconds of a session, a reading near zero — or below
+        // half the recorded baseline — IS the true post-reset baseline. The 5 s
+        // window is what stops a later stale low frame rebaselining a live
+        // session, and the `< start_steps` guard leaves genuine mid-walk
+        // adoption (counter never resets, next reading is higher) untouched.
+        let now = now_ts();
+        if let Some(v) = steps {
+            c.execute(
+                "UPDATE sessions SET start_steps = ?1
+                 WHERE id = ?2 AND ended_ts IS NULL
+                   AND start_steps IS NOT NULL AND ?1 < start_steps
+                   AND (?1 <= 10 OR ?1 * 2 < start_steps)
+                   AND ?3 - started_ts <= 5.0",
+                params![v as i64, session_id, now],
+            )?;
+        }
+        if let Some(v) = duration_s {
+            c.execute(
+                "UPDATE sessions SET start_duration_s = ?1
+                 WHERE id = ?2 AND ended_ts IS NULL
+                   AND start_duration_s IS NOT NULL AND ?1 < start_duration_s
+                   AND (?1 <= 10 OR ?1 * 2 < start_duration_s)
+                   AND ?3 - started_ts <= 5.0",
+                params![v as i64, session_id, now],
+            )?;
+        }
+
         c.execute(
             "UPDATE sessions SET steps_end=?, duration_s_end=?, distance_raw_end=?,
                                  calories_end=?, speed_raw_last=? WHERE id=?",
@@ -1254,10 +1331,26 @@ impl Db {
                 }
             }
         }
-        let steps_d = deglitch_bucketed(&steps_s, res_s, 50, 10);
-        let dist_d = deglitch_bucketed(&dist_s, res_s, 200, 10);
-        let cal_d = deglitch_bucketed(&cal_s, res_s, 100, 10);
-        let dur_d = deglitch_bucketed(&dur_s, res_s, 600, 10);
+        // One seed per metric: the last recorded value at or before the read
+        // window, at ANY age. The 180 s lookback only widens the READ; after a
+        // longer outage the walk would otherwise restart with no predecessor and
+        // drop the increment the treadmill accrued while we were away.
+        let seed_of = |col: &str| -> Result<Option<i64>> {
+            Ok(c.query_row(
+                &format!(
+                    "SELECT s.{col} FROM samples s
+                     WHERE s.ts <= ? AND s.{col} IS NOT NULL AND s.session_id IS NOT NULL
+                     ORDER BY s.ts DESC, s.id DESC LIMIT 1"
+                ),
+                params![deglitch_start],
+                |r| r.get(0),
+            )
+            .optional()?)
+        };
+        let steps_d = deglitch_bucketed(&steps_s, res_s, 50, 10, seed_of("steps")?);
+        let dist_d = deglitch_bucketed(&dist_s, res_s, 200, 10, seed_of("distance_raw")?);
+        let cal_d = deglitch_bucketed(&cal_s, res_s, 100, 10, seed_of("calories")?);
+        let dur_d = deglitch_bucketed(&dur_s, res_s, 600, 10, seed_of("duration_s")?);
 
         // Stateless speed/running/total aggregates per (bucket,session) over the
         // [agg_start, agg_end) window — the authoritative bucket set.
@@ -1723,24 +1816,90 @@ impl Db {
             let c = self.conn();
             c.pragma_query_value(None, "user_version", |r| r.get(0))?
         };
-        if version >= 1 {
+        if version >= 2 {
             return Ok(json!({"ran": false, "user_version": version}));
         }
-        // (a) build rollups from all raw still on disk (before it can be pruned).
-        let backfill = self.backfill_rollups(0.0, now_ts())?;
-        // (b) prune raw beyond retention (safe now that history is in rollups).
-        let pruned = self.prune_raw_samples(retention_s)?;
-        // (c) reclaim freed pages, then mark the migration done.
+        let mut out = serde_json::Map::new();
+
+        if version < 1 {
+            // Phase 0 (unchanged): build rollups over ALL raw before pruning —
+            // the last moment minute-grain history can be derived — then prune
+            // and reclaim.
+            let backfill = self.backfill_rollups(0.0, now_ts())?;
+            let pruned = self.prune_raw_samples(retention_s)?;
+            {
+                let c = self.conn();
+                c.execute_batch("VACUUM;")?;
+            }
+            out.insert("backfill".into(), backfill);
+            out.insert("pruned_samples".into(), json!(pruned));
+        }
+
+        // Phase 1 (0.3.2): repair the damage done by the pre-0.3.1 mid-bucket
+        // truncation, recomputing every bucket from whatever raw the retention
+        // window still holds. Upsert-only, so days whose raw has already been
+        // pruned keep their (under-counted) totals — which is exactly why this
+        // is worth shipping promptly rather than perfectly.
+        let repair = self.backfill_rollups(0.0, now_ts())?;
+        let rebaselined = self.repair_session_baselines()?;
         {
             let c = self.conn();
-            c.execute_batch("VACUUM;")?;
-            c.pragma_update(None, "user_version", 1)?;
+            c.pragma_update(None, "user_version", 2)?;
         }
-        Ok(json!({
-            "ran": true,
-            "backfill": backfill,
-            "pruned_samples": pruned,
-        }))
+        out.insert("repair_backfill".into(), repair);
+        out.insert("rebaselined_sessions".into(), json!(rebaselined));
+        out.insert("ran".into(), json!(true));
+        Ok(Value::Object(out))
+    }
+
+    /// Repair sessions whose `start_steps` / `start_duration_s` were captured
+    /// stale. `open_session` records the telemetry that opened the session, but
+    /// the treadmill zeroes its counters shortly AFTER the belt starts, so the
+    /// baseline can still be the previous session's total (observed:
+    /// start_steps=765 on a session whose own samples run 0→87).
+    ///
+    /// Two tiers, strongest evidence first:
+    ///   1. Sessions that still have raw samples — the baseline becomes the
+    ///      session's own first recorded reading. Ground truth.
+    ///   2. Sessions without raw (pruned, or a summary-only import) — a session
+    ///      ending BELOW its recorded start can only be a post-reset session, so
+    ///      the baseline is zeroed. A stale baseline the session later outgrew
+    ///      is indistinguishable from genuine mid-walk adoption without raw, and
+    ///      is deliberately left alone.
+    pub fn repair_session_baselines(&self) -> Result<usize> {
+        let c = self.conn();
+        let mut n = 0usize;
+        n += c.execute(
+            "UPDATE sessions SET start_steps = (
+                 SELECT s.steps FROM samples s
+                 WHERE s.session_id = sessions.id AND s.steps IS NOT NULL
+                 ORDER BY s.ts, s.id LIMIT 1)
+             WHERE EXISTS (SELECT 1 FROM samples s
+                           WHERE s.session_id = sessions.id AND s.steps IS NOT NULL)",
+            [],
+        )?;
+        n += c.execute(
+            "UPDATE sessions SET start_duration_s = (
+                 SELECT s.duration_s FROM samples s
+                 WHERE s.session_id = sessions.id AND s.duration_s IS NOT NULL
+                 ORDER BY s.ts, s.id LIMIT 1)
+             WHERE EXISTS (SELECT 1 FROM samples s
+                           WHERE s.session_id = sessions.id AND s.duration_s IS NOT NULL)",
+            [],
+        )?;
+        n += c.execute(
+            "UPDATE sessions SET start_steps = 0
+             WHERE steps_end IS NOT NULL AND start_steps IS NOT NULL
+               AND steps_end < start_steps",
+            [],
+        )?;
+        n += c.execute(
+            "UPDATE sessions SET start_duration_s = 0
+             WHERE duration_s_end IS NOT NULL AND start_duration_s IS NOT NULL
+               AND duration_s_end < start_duration_s",
+            [],
+        )?;
+        Ok(n)
     }
 }
 
@@ -1969,8 +2128,18 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        // Old MAX-MIN gave 1901-346 = 1555; de-glitched increments = 3+91+5+5.
-        assert_eq!(delta, 104, "rollup writer must drop the stale 346 frame");
+        // 1797 baseline + de-glitched increments (3 + 91 + 5 + 5) = 1901.
+        //
+        // The baseline is banked deliberately: a day's first reading is steps
+        // already walked, and if the rollups don't carry it, the day total
+        // shrinks by that amount the moment the rollup loop runs. (This
+        // assertion used to be 104 — the value that made the pre-connect walk
+        // disappear.)
+        //
+        // The stale 346 frame is still what this test is about: without the
+        // spike drop it would be read as a counter reset and the recovery to
+        // 1891 counted as fresh steps, giving 3355 instead of 1901.
+        assert_eq!(delta, 1901, "rollup writer must drop the stale 346 frame");
     }
 
     #[test]
@@ -2107,6 +2276,148 @@ mod tests {
             params![sid], |r| r.get(0),
         ).unwrap();
         assert_eq!(thin, 0, "{thin} bucket(s) were rolled while still incomplete");
+    }
+
+
+    #[test]
+    fn rollups_bank_the_first_reading_baseline() {
+        // Someone walks before the app connects: the day's first sample already
+        // reads 340. The raw path counts it; if the rollup path does not, the
+        // displayed total silently drops by the pre-connect walk as soon as the
+        // rollup loop runs — and becomes unrecoverable once raw is pruned.
+        let db = mem();
+        let steps: Vec<u32> = (340..=400).step_by(10).collect();
+        let (_sid, date) = seed_rollable_session(&db, 600, &steps);
+
+        let before = db.day_totals(&date).unwrap()["steps"].as_i64().unwrap();
+        assert_eq!(before, 400, "the raw day total includes the pre-connect walk");
+
+        db.rollup_samples().unwrap();
+        assert_eq!(
+            db.day_totals(&date).unwrap()["steps"].as_i64().unwrap(), before,
+            "the day total must not shrink when the rollup loop runs"
+        );
+
+        db.conn().execute("DELETE FROM samples", []).unwrap();
+        assert_eq!(
+            db.day_totals(&date).unwrap()["steps"].as_i64().unwrap(), before,
+            "and must survive raw pruning"
+        );
+    }
+
+    #[test]
+    fn rollups_keep_the_increment_across_a_long_sample_gap() {
+        // A 10-minute outage, far beyond the 180 s de-glitch lookback, while the
+        // belt keeps counting. Without a seed the walk restarts blind and the
+        // steps accrued during the gap are never banked.
+        let db = mem();
+        let base = (((now_ts() as i64 - 1500) / 60) * 60) as f64 + 1.0;
+        let sid = db.open_session(base, "km/h", Some(0), Some(0), None).unwrap();
+
+        let mut all: Vec<i64> = Vec::new();
+        for i in 0..50 {
+            let v = i as u32 * 2;
+            all.push(v as i64);
+            db.insert_sample(Some(sid), base + i as f64, Some(v), Some(i as u32),
+                Some(60), Some(0), Some(0), Some(3)).unwrap();
+        }
+        db.rollup_samples_at(base + 120.0).unwrap();
+
+        let b2 = base + 660.0;
+        for i in 0..50 {
+            let v = 400 + i as u32;
+            all.push(v as i64);
+            db.insert_sample(Some(sid), b2 + i as f64, Some(v), Some(600 + i as u32),
+                Some(60), Some(0), Some(0), Some(3)).unwrap();
+        }
+        db.rollup_samples_at(b2 + 120.0).unwrap();
+
+        let rolled: i64 = db.conn().query_row(
+            "SELECT COALESCE(SUM(steps_delta),0) FROM sample_rollups_1m WHERE session_id=?",
+            params![sid], |r| r.get(0)).unwrap();
+        // Single-source the truth: the same de-glitch over the same values.
+        let truth = deglitch_total(&all, 50, 10);
+        assert_eq!(rolled, truth,
+            "the increment accrued across a gap longer than the lookback must be banked");
+    }
+
+    #[test]
+    fn stale_start_steps_self_heals_on_the_first_fresh_sample() {
+        let db = mem();
+        // The belt just started; the opening telemetry still carries the
+        // previous session's counter. The reset arrives with the next sample.
+        let sid = db.open_session(now_ts(), "km/h", Some(765), Some(764), None).unwrap();
+        db.update_active_session(sid, Some(2), Some(1), Some(0), Some(0), Some(60)).unwrap();
+
+        let got: (Option<i64>, Option<i64>) = db.conn().query_row(
+            "SELECT start_steps, start_duration_s FROM sessions WHERE id=?",
+            params![sid], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(got.0, Some(2), "a stale baseline must be replaced by the post-reset reading");
+        assert_eq!(got.1, Some(1), "and the duration baseline with it");
+    }
+
+    #[test]
+    fn a_genuinely_adopted_walk_is_not_rebaselined() {
+        // The engine adopted a walk already in progress: the counter reads 500
+        // and keeps climbing. That baseline is correct and must be left alone.
+        let db = mem();
+        let sid = db.open_session(now_ts(), "km/h", Some(500), Some(300), None).unwrap();
+        db.update_active_session(sid, Some(501), Some(301), Some(0), Some(0), Some(60)).unwrap();
+        let start: Option<i64> = db.conn().query_row(
+            "SELECT start_steps FROM sessions WHERE id=?", params![sid], |r| r.get(0)).unwrap();
+        assert_eq!(start, Some(500));
+    }
+
+    #[test]
+    fn summary_only_day_totals_survive_a_stale_baseline() {
+        // No rollups and no raw — the legacy summary-only import path. Session B
+        // reset mid-session, so its recorded start is the previous total; the
+        // unclamped subtraction made it negative and ate session A's steps.
+        let db = mem();
+        let today = local_date(now_ts());
+        for (start, end) in [(0i64, 400i64), (432, 99)] {
+            db.conn().execute(
+                "INSERT INTO sessions(started_ts, ended_ts, local_date, display_unit,
+                                      start_steps, steps_end)
+                 VALUES (?,?,?,'km/h',?,?)",
+                params![now_ts(), now_ts() + 60.0, today, start, end]).unwrap();
+        }
+        assert_eq!(
+            db.day_totals(&today).unwrap()["steps"].as_i64().unwrap(), 499,
+            "a session that ends below its recorded start contributes its end value"
+        );
+    }
+
+    #[test]
+    fn migration_v2_repairs_truncated_rollups_and_stale_baselines() {
+        let db = mem();
+        let steps: Vec<u32> = (0..=600).step_by(10).collect();
+        let (sid, date) = seed_rollable_session(&db, 900, &steps);
+        // An existing 0.3.1 install: phase 0 already done.
+        db.conn().pragma_update(None, "user_version", 1).unwrap();
+        db.rollup_samples().unwrap();
+        let healthy = db.day_totals(&date).unwrap()["steps"].as_i64().unwrap();
+
+        // Damage a bucket exactly as the pre-0.3.1 truncation did, and stale the
+        // baseline the way ingest captured it.
+        db.conn().execute(
+            "UPDATE sample_rollups_1m SET steps_delta = steps_delta - 100
+             WHERE bucket_ts = (SELECT MIN(bucket_ts) FROM sample_rollups_1m WHERE session_id=?)",
+            params![sid]).unwrap();
+        db.conn().execute("UPDATE sessions SET start_steps = 9999 WHERE id=?", params![sid]).unwrap();
+        assert!(db.day_totals(&date).unwrap()["steps"].as_i64().unwrap() < healthy,
+            "the damage must actually register first");
+
+        let res = db.run_startup_migration(7.0 * 86400.0).unwrap();
+        assert_eq!(res["ran"], json!(true));
+        assert_eq!(db.day_totals(&date).unwrap()["steps"].as_i64().unwrap(), healthy,
+            "the migration must recompute the truncated bucket from raw");
+        let start: Option<i64> = db.conn().query_row(
+            "SELECT start_steps FROM sessions WHERE id=?", params![sid], |r| r.get(0)).unwrap();
+        assert_eq!(start, Some(0), "the stale baseline must be repaired from raw");
+
+        // Idempotent: a second boot is a no-op.
+        assert_eq!(db.run_startup_migration(7.0 * 86400.0).unwrap()["ran"], json!(false));
     }
 
     #[test]

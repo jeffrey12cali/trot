@@ -2,6 +2,38 @@
 
 All notable changes to `trot` are documented here.
 
+## 0.3.2
+
+Step-accuracy release. Everything here was found by recomputing a real captured
+day rather than by reading code, and each fix has a test that fails without it.
+
+### Fixed
+- **Steps walked before the app connected were dropped.** The rollup writer
+  never banked a day's first reading, so an opening counter value — steps
+  already on the belt — vanished the moment the rollup loop ran, and became
+  unrecoverable once raw was pruned. The rollups now carry the baseline.
+- **A sample gap longer than 180 s lost the steps accrued during it.** The
+  de-glitch walk restarted with no predecessor after an outage, so the counter
+  increment across the gap was never banked. The walk is now seeded from the
+  last recorded value at any age.
+- **Sessions could report 0 steps for a real walk.** A session records the
+  telemetry that opened it, but the treadmill zeroes its counter shortly AFTER
+  the belt starts — so the baseline was often the previous session's total,
+  making `steps_end - start_steps` negative. On one captured day that hid 286
+  steps across three sessions in `trot log`. The baseline now self-heals from
+  the first post-reset reading (within 5 s of session start, so a genuinely
+  adopted walk in progress is untouched), and the read paths treat an end value
+  below the start as a completed reset rather than clamping to zero.
+
+### Changed
+- A one-time startup migration (`user_version` 2) recomputes every rollup bucket
+  from retained raw, repairing days damaged by the pre-0.3.1 mid-bucket
+  truncation, and repairs stale session baselines.
+  **This only works while a damaged day's raw samples are inside the 7-day
+  retention window.** Days already pruned keep their under-counted totals; a
+  stale baseline that a session later outgrew is indistinguishable from genuine
+  adoption without raw and is left alone.
+
 ## 0.3.1
 
 ### Fixed

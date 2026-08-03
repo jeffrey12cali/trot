@@ -515,6 +515,22 @@ fn post(path: &str, body: serde_json::Value) -> Result<serde_json::Value> {
     Ok(resp.into_json()?)
 }
 
+/// Steps walked in a session, given its recorded start and end counter values.
+///
+/// A session opens on the telemetry that STARTED it, but the treadmill zeroes
+/// its counter shortly after the belt begins — so the recorded start is often
+/// the previous session's total. When the end is below the start, that reset
+/// happened and the end value IS the session's total. Clamping the subtraction
+/// to zero instead (as this used to) reports 0 steps for a real walk: on one
+/// observed day that hid 286 steps across three sessions.
+fn session_steps(steps_end: i64, start_steps: i64) -> i64 {
+    if steps_end < start_steps {
+        steps_end.max(0)
+    } else {
+        steps_end - start_steps
+    }
+}
+
 fn fmt_dur(s: i64) -> String {
     let (h, m, sec) = (s / 3600, (s % 3600) / 60, s % 60);
     if h > 0 {
@@ -589,7 +605,7 @@ fn cmd_log(week: bool, limit: i64) -> Result<()> {
         }
         let date = s["local_date"].as_str().unwrap_or("");
         let start_steps = s["start_steps"].as_i64().unwrap_or(0);
-        let steps = (s["steps_end"].as_i64().unwrap_or(0) - start_steps).max(0);
+        let steps = session_steps(s["steps_end"].as_i64().unwrap_or(0), start_steps);
         let dur = s["duration_s_end"].as_i64().unwrap_or(0);
         println!("{date}   {steps:>6} steps   {:>8}", fmt_dur(dur));
         shown += 1;
@@ -817,5 +833,29 @@ mod tests {
         assert_eq!(PALETTE[0], (0xB7, 0xFF, 0x5A));
         assert_eq!(PALETTE[1], (0x9B, 0xF4, 0x3E)); // phosphor, the brand accent
         assert_eq!(PALETTE[3], (0x31, 0x94, 0x23));
+    }
+}
+
+#[cfg(test)]
+mod session_steps_tests {
+    use super::session_steps;
+
+    #[test]
+    fn a_reset_during_the_session_reports_the_end_value() {
+        // Real rows from a captured day: the baseline is the PREVIOUS session's
+        // total because the counter had not zeroed yet when the session opened.
+        assert_eq!(session_steps(99, 432), 99);
+        assert_eq!(session_steps(87, 765), 87);
+    }
+
+    #[test]
+    fn a_normal_session_still_subtracts_its_baseline() {
+        assert_eq!(session_steps(764, 100), 664);
+        assert_eq!(session_steps(1306, 0), 1306);
+    }
+
+    #[test]
+    fn nonsense_never_yields_a_negative() {
+        assert_eq!(session_steps(-5, 100), 0);
     }
 }
