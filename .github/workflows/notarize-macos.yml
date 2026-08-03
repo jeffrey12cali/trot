@@ -22,12 +22,30 @@ name: Notarize macOS
 # github-actions[bot] — so a release trigger silently never fires. Learned the
 # hard way on v0.3.0.
 on:
+  # dist passes its plan JSON to every custom job, so workflow_call MUST declare
+  # a `plan` input even though nothing here reads it — an undeclared input makes
+  # GitHub reject the whole release workflow with a startup_failure, before any
+  # job runs. Declaring tag/submission_id in both trigger blocks keeps the
+  # `inputs.*` expressions below identical either way.
   workflow_call:
+    inputs:
+      plan:
+        description: "dist's plan JSON (passed automatically; unused here)"
+        required: false
+        type: string
+      tag:
+        description: "Release tag to notarize; defaults to the tag being released"
+        required: false
+        type: string
+      submission_id:
+        description: "Existing submission UUID to query instead of submitting again"
+        required: false
+        type: string
   # Re-run by hand against an existing tag if a submission needs a retry.
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to notarize (e.g. v0.3.0)"
+        description: "Release tag to notarize (e.g. v0.3.2)"
         required: false
       submission_id:
         description: "Existing submission UUID to query instead of submitting again"
@@ -43,7 +61,7 @@ jobs:
     steps:
       - name: Resolve the tag
         id: tag
-        run: echo "tag=${{ github.event.inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+        run: echo "tag=${{ inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
 
       - name: Check that the notarization secrets are present
         id: guard
