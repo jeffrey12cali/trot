@@ -2,6 +2,23 @@
 
 All notable changes to `trot` are documented here.
 
+## 0.3.1
+
+### Fixed
+- **Step counts were silently under-reported, and the gap grew all day.** The
+  rollup cutoff was `now - 60s`, which lands in the middle of a minute. That
+  minute was written from only the samples seen so far, then `last_rolled`
+  advanced past its end so the remainder was never rolled — and because the
+  upsert replaces `steps_delta` rather than adding to it, the truncated value
+  was permanent. One minute was gutted per rollup run, forever. Measured on real
+  data: 2688 steps of raw samples stored as 2251 (-16%), with affected buckets
+  retaining ~28% of their samples. The cutoff is now aligned to a bucket
+  boundary, so only complete minutes are rolled.
+- A sample landing exactly on a rollup boundary was counted by neither the run
+  that ended there (`ts < start`) nor the one that began there (`ts > start`).
+  With one sample per second that is a guaranteed loss of a sample per boundary,
+  which also under-reported running time. The lower bound is now inclusive.
+
 ## 0.3.0
 
 Shell completions and a signed macOS build.

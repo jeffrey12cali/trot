@@ -1153,8 +1153,24 @@ impl Db {
     /// Aggregate unprocessed raw samples into per-minute buckets. Idempotent via
     /// rollup_state.last_rolled_ts. Returns buckets_written.
     pub fn rollup_samples(&self) -> Result<Value> {
-        let now = now_ts();
-        let cutoff = now - ROLLUP_RESOLUTION_S as f64;
+        self.rollup_samples_at(now_ts())
+    }
+
+    /// `rollup_samples` with an injectable clock, so the bucket-boundary
+    /// behaviour can actually be tested.
+    pub fn rollup_samples_at(&self, now: f64) -> Result<Value> {
+        let res = ROLLUP_RESOLUTION_S as f64;
+        // Roll only buckets that are COMPLETE — i.e. stop at the start of the
+        // minute still being written to.
+        //
+        // This used to be `now - ROLLUP_RESOLUTION_S`, which lands in the MIDDLE
+        // of a bucket. That bucket was then written from just the samples seen
+        // so far, and `last_rolled` advanced past its END, so the rest of that
+        // minute was never rolled. Because the upsert REPLACES `steps_delta`
+        // rather than adding to it, the partial value became permanent — one
+        // truncated minute per rollup run, silently under-counting the day
+        // forever. Observed in the wild at ~28% of a minute's samples retained.
+        let cutoff = (now / res).floor() * res;
         let mut c = self.conn();
         let last_rolled: f64 = c
             .query_row(
@@ -1244,7 +1260,14 @@ impl Db {
         let dur_d = deglitch_bucketed(&dur_s, res_s, 600, 10);
 
         // Stateless speed/running/total aggregates per (bucket,session) over the
-        // strict (agg_start, agg_end) window — the authoritative bucket set.
+        // [agg_start, agg_end) window — the authoritative bucket set.
+        //
+        // The lower bound is INCLUSIVE. `agg_start` is the end of the last rolled
+        // bucket, and the previous run used `ts < agg_start`, so a sample landing
+        // exactly on that boundary belonged to no window at all — it was counted
+        // by neither run. With one sample per second that is exactly the case
+        // that happens, costing a sample from every bucket at a run boundary and
+        // under-reporting running time with it.
         let agg_sql = format!(
             "SELECT (CAST(s.ts AS INTEGER) / {res_s}) * {res_s} AS bucket_ts, s.session_id,
                     MIN(CASE WHEN s.speed_raw > 0 THEN s.speed_raw END) AS speed_raw_min,
@@ -1252,7 +1275,7 @@ impl Db {
                     MAX(CASE WHEN s.speed_raw > 0 THEN s.speed_raw END) AS speed_raw_max,
                     SUM(CASE WHEN s.status = 3 THEN 1 ELSE 0 END) AS running_samples,
                     COUNT(*) AS total_samples
-             FROM samples s WHERE s.ts > ? AND s.ts < ? AND s.session_id IS NOT NULL
+             FROM samples s WHERE s.ts >= ? AND s.ts < ? AND s.session_id IS NOT NULL
              GROUP BY bucket_ts, s.session_id"
         );
         let mut agg = c.prepare(&agg_sql)?;
@@ -2033,6 +2056,57 @@ mod tests {
         assert!(db
             .import_dump(&serde_json::json!({"format": "nope"}), "merge")
             .is_err());
+    }
+
+
+    #[test]
+    fn incremental_rollups_never_truncate_a_bucket() {
+        // The bug this pins: the rollup cutoff was `now - 60`, which lands in the
+        // MIDDLE of a minute. That minute was written from only the samples seen
+        // so far, then `last_rolled` advanced past its end so the remainder was
+        // never rolled — and since the upsert REPLACES steps_delta, the partial
+        // value was permanent. Every rollup run silently lost most of one minute.
+        //
+        // Reproduced by rolling repeatedly at mid-bucket instants, exactly as the
+        // engine's 5-minute loop does, then comparing the stored total against
+        // the de-glitched truth over the same raw samples.
+        let db = mem();
+        // 10 minutes of walking, one sample per second, one step per second.
+        let base = (((now_ts() as i64) / 60) * 60 - 1200) as f64;
+        let sid = db.open_session(base, "km/h", Some(0), Some(0), None).unwrap();
+        let total_secs = 600;
+        for i in 0..total_secs {
+            db.insert_sample(Some(sid), base + i as f64, Some(i as u32), Some(i as u32),
+                Some(60), Some(0), Some(0), Some(3)).unwrap();
+        }
+
+        // Roll every 90s at instants deliberately offset 23s into a minute.
+        let mut t = base + 120.0 + 23.0;
+        while t < base + (total_secs as f64) + 300.0 {
+            db.rollup_samples_at(t).unwrap();
+            t += 90.0;
+        }
+
+        let rolled: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COALESCE(SUM(steps_delta),0) FROM sample_rollups_1m WHERE session_id=?",
+                params![sid], |r| r.get(0),
+            ).unwrap();
+
+        // Truth: one step per second for 600s, starting at 0 => 599 increments.
+        assert_eq!(
+            rolled, 599,
+            "rollups lost steps: stored {rolled}, expected 599. A bucket was \
+             written before it finished and never revisited."
+        );
+
+        // And no bucket may hold fewer samples than the minute actually contains.
+        let thin: i64 = db.conn().query_row(
+            "SELECT COUNT(*) FROM sample_rollups_1m WHERE session_id=? AND total_samples < 60",
+            params![sid], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(thin, 0, "{thin} bucket(s) were rolled while still incomplete");
     }
 
     #[test]
