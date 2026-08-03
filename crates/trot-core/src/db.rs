@@ -2227,7 +2227,6 @@ mod tests {
             .is_err());
     }
 
-
     #[test]
     fn incremental_rollups_never_truncate_a_bucket() {
         // The bug this pins: the rollup cutoff was `now - 60`, which lands in the
@@ -2242,11 +2241,22 @@ mod tests {
         let db = mem();
         // 10 minutes of walking, one sample per second, one step per second.
         let base = (((now_ts() as i64) / 60) * 60 - 1200) as f64;
-        let sid = db.open_session(base, "km/h", Some(0), Some(0), None).unwrap();
+        let sid = db
+            .open_session(base, "km/h", Some(0), Some(0), None)
+            .unwrap();
         let total_secs = 600;
         for i in 0..total_secs {
-            db.insert_sample(Some(sid), base + i as f64, Some(i as u32), Some(i as u32),
-                Some(60), Some(0), Some(0), Some(3)).unwrap();
+            db.insert_sample(
+                Some(sid),
+                base + i as f64,
+                Some(i as u32),
+                Some(i as u32),
+                Some(60),
+                Some(0),
+                Some(0),
+                Some(3),
+            )
+            .unwrap();
         }
 
         // Roll every 90s at instants deliberately offset 23s into a minute.
@@ -2260,8 +2270,10 @@ mod tests {
             .conn()
             .query_row(
                 "SELECT COALESCE(SUM(steps_delta),0) FROM sample_rollups_1m WHERE session_id=?",
-                params![sid], |r| r.get(0),
-            ).unwrap();
+                params![sid],
+                |r| r.get(0),
+            )
+            .unwrap();
 
         // Truth: one step per second for 600s, starting at 0 => 599 increments.
         assert_eq!(
@@ -2271,13 +2283,19 @@ mod tests {
         );
 
         // And no bucket may hold fewer samples than the minute actually contains.
-        let thin: i64 = db.conn().query_row(
-            "SELECT COUNT(*) FROM sample_rollups_1m WHERE session_id=? AND total_samples < 60",
-            params![sid], |r| r.get(0),
-        ).unwrap();
-        assert_eq!(thin, 0, "{thin} bucket(s) were rolled while still incomplete");
+        let thin: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM sample_rollups_1m WHERE session_id=? AND total_samples < 60",
+                params![sid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            thin, 0,
+            "{thin} bucket(s) were rolled while still incomplete"
+        );
     }
-
 
     #[test]
     fn rollups_bank_the_first_reading_baseline() {
@@ -2290,17 +2308,22 @@ mod tests {
         let (_sid, date) = seed_rollable_session(&db, 600, &steps);
 
         let before = db.day_totals(&date).unwrap()["steps"].as_i64().unwrap();
-        assert_eq!(before, 400, "the raw day total includes the pre-connect walk");
+        assert_eq!(
+            before, 400,
+            "the raw day total includes the pre-connect walk"
+        );
 
         db.rollup_samples().unwrap();
         assert_eq!(
-            db.day_totals(&date).unwrap()["steps"].as_i64().unwrap(), before,
+            db.day_totals(&date).unwrap()["steps"].as_i64().unwrap(),
+            before,
             "the day total must not shrink when the rollup loop runs"
         );
 
         db.conn().execute("DELETE FROM samples", []).unwrap();
         assert_eq!(
-            db.day_totals(&date).unwrap()["steps"].as_i64().unwrap(), before,
+            db.day_totals(&date).unwrap()["steps"].as_i64().unwrap(),
+            before,
             "and must survive raw pruning"
         );
     }
@@ -2312,14 +2335,25 @@ mod tests {
         // steps accrued during the gap are never banked.
         let db = mem();
         let base = (((now_ts() as i64 - 1500) / 60) * 60) as f64 + 1.0;
-        let sid = db.open_session(base, "km/h", Some(0), Some(0), None).unwrap();
+        let sid = db
+            .open_session(base, "km/h", Some(0), Some(0), None)
+            .unwrap();
 
         let mut all: Vec<i64> = Vec::new();
         for i in 0..50 {
             let v = i as u32 * 2;
             all.push(v as i64);
-            db.insert_sample(Some(sid), base + i as f64, Some(v), Some(i as u32),
-                Some(60), Some(0), Some(0), Some(3)).unwrap();
+            db.insert_sample(
+                Some(sid),
+                base + i as f64,
+                Some(v),
+                Some(i as u32),
+                Some(60),
+                Some(0),
+                Some(0),
+                Some(3),
+            )
+            .unwrap();
         }
         db.rollup_samples_at(base + 120.0).unwrap();
 
@@ -2327,18 +2361,34 @@ mod tests {
         for i in 0..50 {
             let v = 400 + i as u32;
             all.push(v as i64);
-            db.insert_sample(Some(sid), b2 + i as f64, Some(v), Some(600 + i as u32),
-                Some(60), Some(0), Some(0), Some(3)).unwrap();
+            db.insert_sample(
+                Some(sid),
+                b2 + i as f64,
+                Some(v),
+                Some(600 + i as u32),
+                Some(60),
+                Some(0),
+                Some(0),
+                Some(3),
+            )
+            .unwrap();
         }
         db.rollup_samples_at(b2 + 120.0).unwrap();
 
-        let rolled: i64 = db.conn().query_row(
-            "SELECT COALESCE(SUM(steps_delta),0) FROM sample_rollups_1m WHERE session_id=?",
-            params![sid], |r| r.get(0)).unwrap();
+        let rolled: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COALESCE(SUM(steps_delta),0) FROM sample_rollups_1m WHERE session_id=?",
+                params![sid],
+                |r| r.get(0),
+            )
+            .unwrap();
         // Single-source the truth: the same de-glitch over the same values.
         let truth = deglitch_total(&all, 50, 10);
-        assert_eq!(rolled, truth,
-            "the increment accrued across a gap longer than the lookback must be banked");
+        assert_eq!(
+            rolled, truth,
+            "the increment accrued across a gap longer than the lookback must be banked"
+        );
     }
 
     #[test]
@@ -2346,13 +2396,25 @@ mod tests {
         let db = mem();
         // The belt just started; the opening telemetry still carries the
         // previous session's counter. The reset arrives with the next sample.
-        let sid = db.open_session(now_ts(), "km/h", Some(765), Some(764), None).unwrap();
-        db.update_active_session(sid, Some(2), Some(1), Some(0), Some(0), Some(60)).unwrap();
+        let sid = db
+            .open_session(now_ts(), "km/h", Some(765), Some(764), None)
+            .unwrap();
+        db.update_active_session(sid, Some(2), Some(1), Some(0), Some(0), Some(60))
+            .unwrap();
 
-        let got: (Option<i64>, Option<i64>) = db.conn().query_row(
-            "SELECT start_steps, start_duration_s FROM sessions WHERE id=?",
-            params![sid], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
-        assert_eq!(got.0, Some(2), "a stale baseline must be replaced by the post-reset reading");
+        let got: (Option<i64>, Option<i64>) = db
+            .conn()
+            .query_row(
+                "SELECT start_steps, start_duration_s FROM sessions WHERE id=?",
+                params![sid],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            got.0,
+            Some(2),
+            "a stale baseline must be replaced by the post-reset reading"
+        );
         assert_eq!(got.1, Some(1), "and the duration baseline with it");
     }
 
@@ -2361,10 +2423,19 @@ mod tests {
         // The engine adopted a walk already in progress: the counter reads 500
         // and keeps climbing. That baseline is correct and must be left alone.
         let db = mem();
-        let sid = db.open_session(now_ts(), "km/h", Some(500), Some(300), None).unwrap();
-        db.update_active_session(sid, Some(501), Some(301), Some(0), Some(0), Some(60)).unwrap();
-        let start: Option<i64> = db.conn().query_row(
-            "SELECT start_steps FROM sessions WHERE id=?", params![sid], |r| r.get(0)).unwrap();
+        let sid = db
+            .open_session(now_ts(), "km/h", Some(500), Some(300), None)
+            .unwrap();
+        db.update_active_session(sid, Some(501), Some(301), Some(0), Some(0), Some(60))
+            .unwrap();
+        let start: Option<i64> = db
+            .conn()
+            .query_row(
+                "SELECT start_steps FROM sessions WHERE id=?",
+                params![sid],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(start, Some(500));
     }
 
@@ -2376,14 +2447,18 @@ mod tests {
         let db = mem();
         let today = local_date(now_ts());
         for (start, end) in [(0i64, 400i64), (432, 99)] {
-            db.conn().execute(
-                "INSERT INTO sessions(started_ts, ended_ts, local_date, display_unit,
+            db.conn()
+                .execute(
+                    "INSERT INTO sessions(started_ts, ended_ts, local_date, display_unit,
                                       start_steps, steps_end)
                  VALUES (?,?,?,'km/h',?,?)",
-                params![now_ts(), now_ts() + 60.0, today, start, end]).unwrap();
+                    params![now_ts(), now_ts() + 60.0, today, start, end],
+                )
+                .unwrap();
         }
         assert_eq!(
-            db.day_totals(&today).unwrap()["steps"].as_i64().unwrap(), 499,
+            db.day_totals(&today).unwrap()["steps"].as_i64().unwrap(),
+            499,
             "a session that ends below its recorded start contributes its end value"
         );
     }
@@ -2400,24 +2475,50 @@ mod tests {
 
         // Damage a bucket exactly as the pre-0.3.1 truncation did, and stale the
         // baseline the way ingest captured it.
-        db.conn().execute(
-            "UPDATE sample_rollups_1m SET steps_delta = steps_delta - 100
+        db.conn()
+            .execute(
+                "UPDATE sample_rollups_1m SET steps_delta = steps_delta - 100
              WHERE bucket_ts = (SELECT MIN(bucket_ts) FROM sample_rollups_1m WHERE session_id=?)",
-            params![sid]).unwrap();
-        db.conn().execute("UPDATE sessions SET start_steps = 9999 WHERE id=?", params![sid]).unwrap();
-        assert!(db.day_totals(&date).unwrap()["steps"].as_i64().unwrap() < healthy,
-            "the damage must actually register first");
+                params![sid],
+            )
+            .unwrap();
+        db.conn()
+            .execute(
+                "UPDATE sessions SET start_steps = 9999 WHERE id=?",
+                params![sid],
+            )
+            .unwrap();
+        assert!(
+            db.day_totals(&date).unwrap()["steps"].as_i64().unwrap() < healthy,
+            "the damage must actually register first"
+        );
 
         let res = db.run_startup_migration(7.0 * 86400.0).unwrap();
         assert_eq!(res["ran"], json!(true));
-        assert_eq!(db.day_totals(&date).unwrap()["steps"].as_i64().unwrap(), healthy,
-            "the migration must recompute the truncated bucket from raw");
-        let start: Option<i64> = db.conn().query_row(
-            "SELECT start_steps FROM sessions WHERE id=?", params![sid], |r| r.get(0)).unwrap();
-        assert_eq!(start, Some(0), "the stale baseline must be repaired from raw");
+        assert_eq!(
+            db.day_totals(&date).unwrap()["steps"].as_i64().unwrap(),
+            healthy,
+            "the migration must recompute the truncated bucket from raw"
+        );
+        let start: Option<i64> = db
+            .conn()
+            .query_row(
+                "SELECT start_steps FROM sessions WHERE id=?",
+                params![sid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            start,
+            Some(0),
+            "the stale baseline must be repaired from raw"
+        );
 
         // Idempotent: a second boot is a no-op.
-        assert_eq!(db.run_startup_migration(7.0 * 86400.0).unwrap()["ran"], json!(false));
+        assert_eq!(
+            db.run_startup_migration(7.0 * 86400.0).unwrap()["ran"],
+            json!(false)
+        );
     }
 
     #[test]
