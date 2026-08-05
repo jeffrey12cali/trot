@@ -16,7 +16,7 @@
 
 **Bluetooth in. Local API out. Nothing leaves your machine.**
 
-- **Website:** [trot.fmp.dev](https://trot.fmp.dev)
+- **Website:** [trot.puchalla.dev](https://trot.puchalla.dev)
 - **License:** GPLv3.
 - **Status:** early days — `v0.3` is a working CLI + daemon for LifeSpan
   (native) and generic FTMS treadmills, with signed macOS builds and shell

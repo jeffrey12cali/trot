@@ -19,7 +19,7 @@ Downstream checklist:
 1. **`README.md`** (this repo) — the canonical docs: command list, pairing flow,
    Supported treadmills, Trademarks. Keep it accurate.
 2. **The Trot landing page** — repo `github.com/marcuspuchalla/trot-web`
-   (deployed to trot.fmp.dev). It has a **hand-authored terminal ANIMATION that
+   (deployed to trot.puchalla.dev). It has a **hand-authored terminal ANIMATION that
    simulates real `trot` output** (`trot daemon` boot + `trot today`), plus Install
    command blocks, an API endpoint table, and a Supported-treadmills section — all
    must mirror this tool. See that repo's `CLAUDE.md`.

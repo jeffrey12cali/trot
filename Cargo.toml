@@ -8,7 +8,7 @@ license = "GPL-3.0-or-later"
 authors = ["Marcus Puchalla"]
 rust-version = "1.85"
 repository = "https://github.com/marcuspuchalla/trot"
-homepage = "https://trot.fmp.dev"
+homepage = "https://trot.puchalla.dev"
 
 [profile.release]
 codegen-units = 1
