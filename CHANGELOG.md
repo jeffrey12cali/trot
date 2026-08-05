@@ -2,6 +2,20 @@
 
 All notable changes to `trot` are documented here.
 
+## 0.3.3
+
+### Changed
+- **The macOS bundle identifier is now `dev.puchalla.trot`** (was
+  `com.marcuspuchalla.trot`). Trot's home also moved to
+  <https://trot.puchalla.dev>; the old address redirects permanently.
+
+  The identifier is embedded in the binary alongside Trot's Bluetooth usage
+  descriptions, so it is part of how macOS identifies Trot for privacy
+  purposes. **macOS will therefore ask for Bluetooth permission once more
+  after you upgrade**, and a stale "trot" entry may remain in System Settings
+  › Privacy & Security › Bluetooth, which is safe to remove. This was done now,
+  while Trot is young, precisely so it never has to happen again.
+
 ## 0.3.2
 
 Step-accuracy release. Everything here was found by recomputing a real captured
