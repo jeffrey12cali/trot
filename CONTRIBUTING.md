@@ -61,6 +61,17 @@ cargo run --bin trot -- completions elvish     > completions/trot.elv
 
 ## Things worth knowing about the codebase
 
+- **Trot observes treadmills; it never controls them.** No code in this tree
+  starts, stops, or changes the speed of a belt, and none ever will — that's
+  a design commitment, not a missing feature. It's what lets someone run a
+  daemon with Bluetooth access to the machine under their feet and know it
+  cannot move that machine, whatever else goes wrong. A PR that adds belt
+  control (speed, start/stop, incline, mode) will be declined, however well
+  built. Writes that merely *ask* the device for data — poll frames, init
+  handshakes — are fine and often required; the driver guide
+  ([docs/drivers/README.md](docs/drivers/README.md)) spells out the
+  distinction, which matters because most reference implementations you'd
+  port from do both.
 - **`/api` + `/ws` is a public contract.** Other things are built on it. Adding a
   route is easy; changing or removing one is a breaking change and needs to be
   treated as such.

@@ -22,15 +22,13 @@
 //!   analysis plus four real `btsnoop_hci` captures of a KingSmith KS-MC21:
 //!   the mandatory staggered CCCD enables (§2.2: firmware silently drops
 //!   notification-enable writes ~30 ms apart; the vendor app spaces them
-//!   100/200/300 ms), the ODM unlock pre-amble (§4), the bit-13 step
-//!   extension (§6.2), the Control Point indication behaviour (§3.2), and
-//!   the no-keepalive finding (§2.7).
+//!   100/200/300 ms), the bit-13 step extension (§6.2), the 0x2ADA Fitness
+//!   Machine Status behaviour (§3.2), and the no-keepalive finding (§2.7).
 //!   <https://github.com/mcdax/walkingpad-controller>
 //! * **cagnulein/qdomyos-zwift** (GPL-3.0) — the advertised-name list for
 //!   real-world FTMS walking pads ([`ADV_NAME_PREFIXES`], from
 //!   `src/devices/bluetooth.cpp`, including the SPERAX_RM-01/SPERAX_RM01
-//!   carve-out) and the Merach unlock write
-//!   (`src/devices/horizontreadmill/horizontreadmill.cpp`).
+//!   carve-out).
 //!   <https://github.com/cagnulein/qdomyos-zwift>
 //! * **dudanov/python-pyftms** (Apache-2.0) — used as a cross-check of the
 //!   Fitness Machine Status (0x2ADA) opcode map against the FTMS v1.0 spec.
@@ -38,18 +36,20 @@
 //!
 //! The hardening lessons, verified on real captures:
 //!
-//! * **Never block awaiting a Control Point indication.** On the KS-MC21,
-//!   `REQUEST_CONTROL (0x00)` fails with `OPERATION_FAILED (0x04)` on the
-//!   first attempt and is never indicated again — yet subsequent commands
-//!   work; and opcodes 0x02/0x07/0x08 are GATT-ACKed but produce **no
-//!   indication at all** even on success. Success is signalled via 0x2ADA
-//!   Fitness Machine Status instead. Trot has no Control Point write path
-//!   today; this constraint is recorded here for the phase that adds one.
-//! * **Some devices gate Control Point writes behind a vendor unlock write**
-//!   ([`control_preamble`]). The unlock gates *commands only* — telemetry
-//!   notifications flow without it (the vendor app enables CCCDs before its
-//!   first unlock write), which is why the read-only driver below never sends
-//!   it.
+//! * **State changes arrive on 0x2ADA Fitness Machine Status, not anywhere
+//!   else.** The KS-MC21 captures show start/stop/pause transitions signalled
+//!   only there — which is why this driver subscribes to it: a paused belt
+//!   and a stopped belt both read 0 km/h, and 0x2ADA is what tells them
+//!   apart.
+//! * **Trot never writes to the FTMS Control Point.** Trot observes
+//!   treadmills; it does not control them — a permanent product commitment,
+//!   not a current limitation (see `docs/drivers/README.md`). The upstream
+//!   references implement speed/start/stop commands, including the vendor
+//!   "unlock" writes that gate the Control Point on shared ODM modules
+//!   (KingSmith MC-21, Merach); none of that is ported, deliberately. The
+//!   captures confirm the unlock gates *commands only* — telemetry
+//!   notifications flow without it — so an observe-only driver never needs
+//!   one.
 //! * **No application-level keepalive is needed** — none was observed in any
 //!   of the four captures; the link lives on link-layer keepalives plus the
 //!   notification stream. This driver deliberately writes nothing.
@@ -103,7 +103,7 @@
 //! so the extension is parsed **only** for devices whose advertised name is a
 //! known KingSmith family ([`is_kingsmith_name`]) — never blanket.
 
-use super::util::{subscribe_staggered, CommandPreamble};
+use super::util::subscribe_staggered;
 use super::{Advertisement, BeltState, Driver, DriverHost, Emit, Sample};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -113,7 +113,6 @@ use futures::StreamExt;
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::time::Duration;
-use uuid::Uuid;
 
 // ---- UUIDs ------------------------------------------------------------------
 
@@ -129,29 +128,16 @@ pub const FITNESS_MACHINE_SERVICE_UUID: &str = "00001826-0000-1000-8000-00805f9b
 /// Treadmill Data characteristic (notify).
 pub const TREADMILL_DATA_UUID: &str = "00002acd-0000-1000-8000-00805f9b34fb";
 /// Fitness Machine Status characteristic (notify). On some devices (KS-MC21)
-/// this is the only reliable signal for start/stop/pause transitions — the
-/// Control Point never indicates them.
+/// this is the only reliable signal for start/stop/pause transitions.
 pub const FITNESS_MACHINE_STATUS_UUID: &str = "00002ada-0000-1000-8000-00805f9b34fb";
-// The following are part of the FTMS UUID set, reserved for the next phase
-// (reading machine features and driving the control point to start/pause the
-// belt). Kept here so the set lives in one place.
+// The remaining *read-only* members of the FTMS UUID set, kept so the set
+// lives in one place. The Fitness Machine Control Point (the characteristic
+// a client writes speed/start/stop commands to) is deliberately not here:
+// Trot observes treadmills, it never controls them, so nothing in this tree
+// may address that characteristic.
 /// Fitness Machine Feature characteristic (read).
 #[allow(dead_code)]
 pub const FITNESS_MACHINE_FEATURE_UUID: &str = "00002acc-0000-1000-8000-00805f9b34fb";
-/// Fitness Machine Control Point characteristic (write/indicate).
-///
-/// For the phase that starts writing here, two verified constraints
-/// (mcdax/walkingpad-controller, KS-MC21 captures):
-///
-/// * `REQUEST_CONTROL (0x00)` can fail with `OPERATION_FAILED (0x04)` on the
-///   first attempt and never be indicated again — while every later command
-///   works. Do not treat it as fatal.
-/// * Commands may be GATT-ACKed and *succeed* without ever producing a
-///   Control Point indication; success arrives as a 0x2ADA Fitness Machine
-///   Status notification instead. Never block indefinitely on an indication —
-///   bound the wait and treat a timeout as "watch 0x2ADA".
-#[allow(dead_code)]
-pub const FITNESS_MACHINE_CONTROL_POINT_UUID: &str = "00002ad9-0000-1000-8000-00805f9b34fb";
 /// Training Status characteristic (read/notify).
 #[allow(dead_code)]
 pub const TRAINING_STATUS_UUID: &str = "00002ad3-0000-1000-8000-00805f9b34fb";
@@ -212,72 +198,6 @@ pub(crate) fn is_kingsmith_name(name: &str) -> bool {
     KINGSMITH_FTMS_NAME_PREFIXES
         .iter()
         .any(|p| n.starts_with(p))
-}
-
-// ---- Control-path unlock pre-ambles (reserved) --------------------------------
-//
-// Not used by this read-only driver — see `control_preamble` for why — but
-// modeled now because the knowledge is verified and hard-won.
-
-/// KingSmith "ODM" vendor characteristic: write-only, embedded inside the
-/// FTMS service tree on the MC-21 family (mcdax/walkingpad-controller,
-/// confirmed in all four KS-MC21 captures; also present on Sperax hardware).
-pub const KINGSMITH_ODM_UNLOCK_CHAR_UUID: Uuid =
-    Uuid::from_u128(0xd18d2c10_c44c_11e8_a355_529269fb1459);
-/// The unlock frame the vendor app writes to the ODM characteristic. Without
-/// it, FTMS Control Point writes answer `CONTROL_NOT_PERMITTED (0x05)`.
-pub const KINGSMITH_ODM_UNLOCK_MAGIC: [u8; 8] = [0x01, 0x00, 0x0d, 0x00, 0x06, 0x0b, 0x0f, 0x0d];
-
-/// Merach unlock characteristic — the UUID spells `YULU…MERACH` in ASCII.
-/// Ported from qdomyos-zwift's horizontreadmill.cpp (`merachUnlockCharId`).
-pub const MERACH_UNLOCK_CHAR_UUID: Uuid = Uuid::from_u128(0x59554c55_0000_6666_8888_4d4552414348);
-/// The Merach unlock frame (qdomyos-zwift's `merachUnlock` write).
-pub const MERACH_UNLOCK_MAGIC: [u8; 5] = [0xAA, 0x01, 0x00, 0x01, 0x55];
-
-/// KS Fit's `isMC21` family — the models verified to carry the ODM unlock
-/// characteristic (mcdax/walkingpad-controller §8).
-const ODM_UNLOCK_NAME_PREFIXES: &[&str] = &["KS-MC21", "KS-SMC21C", "ZP-ZEALR1"];
-/// Merach FTMS treadmills (qdomyos-zwift's `MERACH_TREADMILL` workaround).
-const MERACH_UNLOCK_NAME_PREFIXES: &[&str] = &["MRK-T"];
-
-/// The unlock pre-amble a future *control* path must send before Fitness
-/// Machine Control Point writes on this device, if any.
-///
-/// A shared Chinese ODM BLE module gates the Control Point behind a magic
-/// write to a separate vendor characteristic; the same module (same UUID,
-/// same bytes) appears across brands, so this is a configured capability
-/// ([`util::CommandPreamble`](super::util::CommandPreamble)), not per-brand
-/// special-casing.
-///
-/// **Deliberately not wired into `run()`.** Trot only reads telemetry today —
-/// it never writes to the Control Point — and the unlock gates *commands
-/// only*: telemetry notifications flow without it (the vendor app enables its
-/// CCCDs and receives data before its first unlock write, and the captures
-/// confirm `CONTROL_NOT_PERMITTED` is a Control Point response, not a
-/// subscription failure). Sending it from a read-only driver would be an
-/// unnecessary write to hardware we don't own.
-///
-/// When a control path lands: the vendor app re-sends the unlock before
-/// *every* Control Point write (40× in one captured session). Whether the
-/// repetition is required is unverified — mirror the app and `apply()` it
-/// before each gated write anyway; it is one small write and the only
-/// field-proven pattern (walkingpad-controller v0.4.1 does the same,
-/// "empirically reliable").
-pub fn control_preamble(device_name: &str) -> Option<CommandPreamble> {
-    let n = normalized(device_name);
-    if ODM_UNLOCK_NAME_PREFIXES.iter().any(|p| n.starts_with(p)) {
-        return Some(CommandPreamble::new(
-            KINGSMITH_ODM_UNLOCK_CHAR_UUID,
-            KINGSMITH_ODM_UNLOCK_MAGIC,
-        ));
-    }
-    if MERACH_UNLOCK_NAME_PREFIXES.iter().any(|p| n.starts_with(p)) {
-        return Some(CommandPreamble::new(
-            MERACH_UNLOCK_CHAR_UUID,
-            MERACH_UNLOCK_MAGIC,
-        ));
-    }
-    None
 }
 
 // ---- Flag bits --------------------------------------------------------------
@@ -1194,53 +1114,6 @@ mod tests {
             name: String::new(),
             services: vec![crate::drivers::sig_uuid(0x1826)],
         }));
-    }
-
-    // ---- Control-path pre-amble ----------------------------------------------
-
-    /// The MC-21 family gets the ODM unlock, Merach treadmills the YULU
-    /// unlock, and everyone else — including other FTMS walking pads and the
-    /// non-ODM KingSmith families — gets none.
-    #[test]
-    fn control_preamble_is_configured_per_module_family() {
-        for name in ["KS-MC21-D06BFD", "ks-smc21c-1", "ZP-ZEALR1-XY"] {
-            let p = control_preamble(name).unwrap_or_else(|| panic!("{name}"));
-            assert_eq!(p.char_uuid, KINGSMITH_ODM_UNLOCK_CHAR_UUID);
-            assert_eq!(p.payload, KINGSMITH_ODM_UNLOCK_MAGIC.to_vec());
-        }
-        let p = control_preamble("MRK-TW50").unwrap();
-        assert_eq!(p.char_uuid, MERACH_UNLOCK_CHAR_UUID);
-        assert_eq!(p.payload, MERACH_UNLOCK_MAGIC.to_vec());
-        for name in ["", "URTM024", "KS-HD-Z1D", "KS-AP-X10", "SPERAX_RM-01"] {
-            assert!(control_preamble(name).is_none(), "{name}");
-        }
-    }
-
-    /// The unlock UUIDs and magics must match the primary sources verbatim:
-    /// the ODM bytes from the MC-21 captures, the Merach UUID that spells
-    /// YULU/MERACH in ASCII and its unlock frame from qdomyos-zwift.
-    #[test]
-    fn unlock_constants_match_the_captured_wire_bytes() {
-        assert_eq!(
-            KINGSMITH_ODM_UNLOCK_CHAR_UUID.to_string(),
-            "d18d2c10-c44c-11e8-a355-529269fb1459"
-        );
-        assert_eq!(
-            KINGSMITH_ODM_UNLOCK_MAGIC,
-            [0x01, 0x00, 0x0d, 0x00, 0x06, 0x0b, 0x0f, 0x0d]
-        );
-        assert_eq!(
-            MERACH_UNLOCK_CHAR_UUID.to_string(),
-            "59554c55-0000-6666-8888-4d4552414348"
-        );
-        let ascii: Vec<u8> = MERACH_UNLOCK_CHAR_UUID
-            .as_bytes()
-            .iter()
-            .copied()
-            .filter(|b| b.is_ascii_alphanumeric() && *b >= 0x41)
-            .collect();
-        assert_eq!(&ascii, b"YULUffMERACH", "the vendor signed their UUID");
-        assert_eq!(MERACH_UNLOCK_MAGIC, [0xAA, 0x01, 0x00, 0x01, 0x55]);
     }
 
     // ---- Golden pins: decoded record → Sample → Telemetry ------------------

@@ -11,8 +11,6 @@
 //! * Cheap firmware silently ignores notification-enable writes that land
 //!   within a few tens of milliseconds of each other; the vendor apps space
 //!   them 100–300 ms apart ([`subscribe_staggered`]).
-//! * Shared ODM BLE modules need an **unlock write** before each real command
-//!   is accepted ([`CommandPreamble`]).
 //! * Message-oriented protocols arrive as arbitrary GATT chunks and must be
 //!   reassembled on a terminator byte ([`FrameAssembler`]).
 //! * A few protocols obfuscate the transport (base64 + substitution cipher);
@@ -24,6 +22,15 @@
 //! protocol needs and ignore the rest; a driver that doesn't opt in pays
 //! nothing (LifeSpan, notably, has **no** known write-spacing requirement, so
 //! no spacing is ever imposed by default).
+//!
+//! One category of plumbing is deliberately absent: anything that would help
+//! a driver *command* the machine. Trot observes treadmills — it never
+//! actuates them — so every write these helpers perform exists to ask for
+//! data or to wake the stream, never to move the belt. Several shared ODM BLE
+//! modules gate their command characteristic behind a per-command "unlock"
+//! write; Trot sends no commands, so it needs no unlock, and no helper for
+//! one lives here. See `docs/drivers/README.md` for the policy and the
+//! query-vs-actuation distinction.
 
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
@@ -192,44 +199,6 @@ pub async fn subscribe_staggered<L: GattIo + ?Sized>(
         }
     }
     Ok(())
-}
-
-// ---- Per-command vendor pre-amble --------------------------------------------
-
-/// An unlock write that must precede each real command.
-///
-/// Several shared Chinese ODM BLE modules gate their control characteristic
-/// behind a magic write to a *separate* vendor characteristic — without it,
-/// KingSmith MC-21 answers FTMS Control Point writes with
-/// `CONTROL_NOT_PERMITTED (0x05)`, and Merach ignores commands entirely. The
-/// same module (same UUID, same magic bytes) turns up across brands, so the
-/// pre-amble is a capability a driver *configures*, not code it copies.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CommandPreamble {
-    pub char_uuid: Uuid,
-    pub payload: Vec<u8>,
-    pub with_response: bool,
-}
-
-impl CommandPreamble {
-    pub fn new(char_uuid: Uuid, payload: impl Into<Vec<u8>>) -> Self {
-        CommandPreamble {
-            char_uuid,
-            payload: payload.into(),
-            with_response: true,
-        }
-    }
-
-    pub fn without_response(mut self) -> Self {
-        self.with_response = false;
-        self
-    }
-
-    /// Perform the unlock write. Call immediately before each gated command.
-    pub async fn apply<L: GattIo + ?Sized>(&self, link: &L) -> Result<()> {
-        link.write_uuid(self.char_uuid, &self.payload, self.with_response)
-            .await
-    }
 }
 
 // ---- Frame reassembly --------------------------------------------------------
@@ -596,33 +565,6 @@ mod tests {
         assert_eq!(ops[2].1 - start, Duration::from_millis(300));
         // The trailing delay also runs — settle time before the first write.
         assert_eq!(Instant::now() - start, Duration::from_millis(600));
-    }
-
-    // ---- Command pre-amble --------------------------------------------------
-
-    /// The KingSmith MC-21 unlock: the magic bytes go to the vendor
-    /// characteristic before each gated command.
-    #[tokio::test(start_paused = true)]
-    async fn preamble_writes_the_unlock_frame() {
-        let link = MockLink::default();
-        let odm_char = Uuid::parse_str("d18d2c10-c44c-11e8-a355-529269fb1459").unwrap();
-        let unlock =
-            CommandPreamble::new(odm_char, [0x01, 0x00, 0x0d, 0x00, 0x06, 0x0b, 0x0f, 0x0d]);
-        unlock.apply(&link).await.unwrap();
-        unlock.apply(&link).await.unwrap();
-
-        let ops = link.ops();
-        assert_eq!(ops.len(), 2, "one unlock per gated command, every time");
-        for (op, _) in &ops {
-            assert_eq!(
-                *op,
-                Op::Write {
-                    char_uuid: odm_char,
-                    payload: vec![0x01, 0x00, 0x0d, 0x00, 0x06, 0x0b, 0x0f, 0x0d],
-                    with_response: true,
-                }
-            );
-        }
     }
 
     // ---- Frame reassembly ---------------------------------------------------

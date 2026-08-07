@@ -31,6 +31,16 @@ Downstream checklist:
 
 ## Conventions
 
+- **Trot observes treadmills. It never controls them.** No speed changes, no
+  start/stop, no incline, no mode switching — nothing that actuates the
+  machine. This is a permanent product commitment, applying to every driver
+  and every future one; where an upstream reference offers control code, we
+  do not port it. The distinction to preserve: writes that *ask* for data
+  (poll frames like LifeSpan's `A1 <opcode>`, init handshakes that wake a
+  telemetry stream) are fine and necessary; writes that actuate the belt —
+  or exist only to enable actuation (Control Point helpers, vendor unlock
+  writes) — must never be (re)introduced. See docs/drivers/README.md ("Trot
+  observes — it never controls") and SECURITY.md.
 - **Output is data, not chatter.** CLI subcommands print only their result — no
   taglines or verbose banners. The "it's really only treadmilling" line lives ONLY
   as the `--help` `about` string (the deliberate easter egg); do not reintroduce
