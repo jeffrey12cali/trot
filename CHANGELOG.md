@@ -4,6 +4,16 @@ All notable changes to `trot` are documented here.
 
 ## 0.3.3
 
+### Fixed
+- **macOS binaries are notarized.** Apple's Notary Service had accepted every
+  submission since 2026-08-01 and left all of them `In Progress` — the hold new
+  Developer ID accounts get while the service learns to recognise them. It
+  cleared on 2026-08-07, retroactively, for all fourteen submissions at once.
+  Nothing needed rebuilding or re-releasing: a notarization ticket binds to the
+  binary's code hash and is served by Apple, so the bytes already published
+  became notarized where they stood. `xattr -dr com.apple.quarantine` is no
+  longer needed for any release.
+
 ### Changed
 - **The macOS bundle identifier is now `dev.puchalla.trot`** (was
   `com.marcuspuchalla.trot`). Trot's home also moved to
@@ -88,6 +98,8 @@ Shell completions and a signed macOS build.
   Notary Service has accepted every submission and then left it `In Progress`
   indefinitely, so a browser-downloaded archive still needs
   `xattr -dr com.apple.quarantine` for now.
+  *(Resolved on 2026-08-07 — see 0.3.3. The workaround is no longer needed for
+  any release, including this one.)*
 - Prebuilt binaries for **Linux arm64** (Raspberry Pi, ARM servers), alongside
   macOS (Intel + Apple Silicon), Linux x86_64 and Windows x64.
 

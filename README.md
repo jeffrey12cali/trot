@@ -68,14 +68,9 @@ Every archive carries the binary plus `LICENSE`, `README.md`, `CHANGELOG.md`,
 `THIRD-PARTY-NOTICES.md` and a `completions/` directory, and each has a `.sha256`
 alongside it.
 
-> **macOS:** the binaries are signed with a Developer ID certificate and the
-> hardened runtime, but they are **not yet notarized** — Apple's Notary Service
-> is currently accepting submissions and never completing them. The `curl … | sh`
-> installer is unaffected, but if you download an archive **in a browser** macOS
-> quarantines it. Clear that with:
-> ```sh
-> xattr -dr com.apple.quarantine ./trot
-> ```
+> **macOS:** the binaries are signed with a Developer ID certificate, built with
+> the hardened runtime, and **notarized by Apple** — so they run without a
+> Gatekeeper warning however you download them.
 
 **Linux** needs BlueZ at runtime (`libdbus`/`bluez` — present on any desktop
 distro). **Windows** needs Bluetooth LE support, which is standard on Windows 10+.
