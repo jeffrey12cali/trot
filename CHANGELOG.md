@@ -2,6 +2,20 @@
 
 All notable changes to `trot` are documented here.
 
+## 0.3.4
+
+Documentation-only release: the engine is byte-for-byte the behaviour of 0.3.3.
+
+### Fixed
+- **The docs bundled inside the release archives were stale.** Each archive
+  carries `README.md` and `CHANGELOG.md`, and 0.3.3's copies were built before
+  notarization started working — so they still told macOS users to run
+  `xattr -dr com.apple.quarantine`, which has been unnecessary since
+  2026-08-07. This release ships the corrected text.
+
+  The 0.3.3 *binaries* are unaffected and remain fully notarized; only the
+  paperwork travelling with them was out of date.
+
 ## 0.3.3
 
 ### Fixed
