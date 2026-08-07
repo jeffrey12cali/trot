@@ -5,7 +5,7 @@
 use crate::app::AppState;
 use crate::ble;
 use crate::db::{RETENTION_DAYS, ROLLUP_INTERVAL_S};
-use crate::protocol::{speed_kmh, speed_mph};
+use crate::telemetry::{speed_kmh, speed_mph};
 use axum::extract::{DefaultBodyLimit, Request};
 use axum::http::{HeaderName, HeaderValue};
 use axum::middleware::{self, Next};

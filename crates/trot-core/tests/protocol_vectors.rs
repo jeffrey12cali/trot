@@ -8,7 +8,7 @@
 use serde_json::Value;
 use std::fs;
 use std::path::PathBuf;
-use trot_core::protocol::Reader;
+use trot_core::drivers::lifespan::Reader;
 
 fn hex_to_bytes(s: &str) -> Vec<u8> {
     let s: String = s.chars().filter(|c| !c.is_whitespace()).collect();
@@ -18,7 +18,7 @@ fn hex_to_bytes(s: &str) -> Vec<u8> {
         .collect()
 }
 
-fn field(t: &trot_core::protocol::Telemetry, name: &str) -> i64 {
+fn field(t: &trot_core::drivers::lifespan::Readout, name: &str) -> i64 {
     match name {
         "steps" => t.steps.map(|v| v as i64).expect("steps unset"),
         "duration_s" => t.duration_s.map(|v| v as i64).expect("duration_s unset"),
@@ -56,7 +56,7 @@ fn protocol_decode_vectors() {
         };
         let frame = hex_to_bytes(case["frame"].as_str().expect("frame"));
 
-        let mut reader = Reader::new("km/h");
+        let mut reader = Reader::new();
         let result = reader.feed(opcode, &frame);
 
         if case.get("error").and_then(|e| e.as_bool()).unwrap_or(false) {

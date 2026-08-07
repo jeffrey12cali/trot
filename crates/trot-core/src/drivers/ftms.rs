@@ -1,6 +1,10 @@
-//! Bluetooth SIG Fitness Machine Service (FTMS) — Treadmill Data parser.
+//! Bluetooth SIG Fitness Machine Service (FTMS) driver — Treadmill Data.
 //!
-//! Clean-room implementation of the Treadmill Data characteristic (0x2ACD)
+//! Interaction model: **subscribe-and-push.** The treadmill notifies a
+//! Treadmill Data record (~1 Hz while the belt moves); we subscribe once and
+//! decode each push. FTMS has no step counter, so `steps` stays `None`.
+//!
+//! The parser half is a clean-room implementation of the Treadmill Data characteristic (0x2ACD)
 //! byte layout, written from the official FTMS v1.0.1 service specification and
 //! the Bluetooth SIG Assigned Numbers / GATT Specification Supplement field
 //! definitions. No third-party source was consulted; the byte unpacking below
@@ -46,7 +50,15 @@
 //!   Force on Belt         sint16  1 N
 //!   Power Output          sint16  1 W
 
+use super::{Advertisement, BeltState, Driver, DriverHost, Emit, Sample};
+use anyhow::{anyhow, Result};
+use async_trait::async_trait;
+use btleplug::api::{Characteristic, Peripheral as _};
+use btleplug::platform::Peripheral;
+use futures::StreamExt;
 use serde::Serialize;
+use std::collections::BTreeSet;
+use std::time::Duration;
 
 // ---- UUIDs ------------------------------------------------------------------
 
@@ -262,6 +274,88 @@ pub fn parse_treadmill_data(buf: &[u8]) -> Result<FtmsTreadmillData, FtmsError> 
     Ok(out)
 }
 
+// ---- The driver -------------------------------------------------------------
+
+/// FTMS treadmills push Treadmill Data ~1 Hz; tolerate a quiet belt before
+/// treating the link as dead.
+const FTMS_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// A belt reporting less than this is stopped: FTMS has no explicit status in
+/// Treadmill Data, so the running flag is derived from the speed itself.
+const RUNNING_THRESHOLD_KMH: f64 = 0.05;
+
+/// A decoded record as a neutral SI sample. FTMS already speaks SI, so this is
+/// mostly a field mapping; only the belt state is synthesised (from speed).
+fn to_sample(d: &FtmsTreadmillData) -> Sample {
+    Sample {
+        speed_kmh: d.instantaneous_speed,
+        distance_m: d.total_distance_m.map(|m| m as f64),
+        steps: None, // FTMS has no step counter — absent, not zero
+        duration_s: d.elapsed_time_s,
+        calories: d.total_energy_kcal,
+        state: d.instantaneous_speed.map(|kmh| {
+            if kmh > RUNNING_THRESHOLD_KMH {
+                BeltState::Running
+            } else {
+                BeltState::Standby
+            }
+        }),
+    }
+}
+
+pub struct Ftms;
+
+#[async_trait]
+impl Driver for Ftms {
+    fn id(&self) -> &'static str {
+        "ftms"
+    }
+
+    fn matches(&self, adv: &Advertisement) -> bool {
+        adv.services.contains(&super::sig_uuid(0x1826))
+    }
+
+    fn supports(&self, _adv: &Advertisement, gatt: &BTreeSet<Characteristic>) -> bool {
+        gatt.iter().any(|c| c.uuid == super::sig_uuid(0x2acd))
+    }
+
+    async fn run(&self, link: &Peripheral, _host: &DriverHost<'_>, emit: Emit<'_>) -> Result<()> {
+        let chars = link.characteristics();
+        let data_char = chars
+            .iter()
+            .find(|c| c.uuid == super::sig_uuid(0x2acd))
+            .cloned()
+            .ok_or_else(|| anyhow!("Treadmill Data characteristic (2ACD) missing"))?;
+        link.subscribe(&data_char).await?;
+        let mut notifications = link.notifications().await?;
+
+        loop {
+            let frame = match tokio::time::timeout(FTMS_IDLE_TIMEOUT, notifications.next()).await {
+                Ok(Some(n)) => n.value,
+                Ok(None) => return Err(anyhow!("notification stream ended")),
+                Err(_) => {
+                    // A quiet belt is normal for FTMS (no push when stopped). Only
+                    // treat the link as dead if the OS no longer considers us
+                    // connected — recovers a stale handle without churning on
+                    // legitimate pauses.
+                    if !link.is_connected().await.unwrap_or(false) {
+                        return Err(anyhow!("FTMS link dropped; reconnecting"));
+                    }
+                    continue;
+                }
+            };
+            let data = match parse_treadmill_data(&frame) {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::warn!("FTMS decode error: {e}");
+                    continue;
+                }
+            };
+            emit(to_sample(&data));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -391,6 +485,103 @@ mod tests {
                 expected: 2,
                 got: 0
             }
+        );
+    }
+
+    // ---- Golden pins: decoded record → Sample → Telemetry ------------------
+    //
+    // These values were captured against the PRE-refactor `ftms_to_telemetry`
+    // (the old direct FTMS→Telemetry mapping in ble.rs), so they pin that the
+    // Sample detour puts byte-identical raw fields on the wire. The raw ints
+    // are asserted exactly; the floats are derived from them by the shared
+    // unit helpers and follow automatically.
+
+    use crate::telemetry::Telemetry;
+
+    fn telem(d: &FtmsTreadmillData, unit: &str) -> Telemetry {
+        Telemetry::from_sample(&to_sample(d), unit)
+    }
+
+    fn approx12(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-12
+    }
+
+    #[test]
+    fn golden_full_frame_kmh() {
+        let d = FtmsTreadmillData {
+            instantaneous_speed: Some(6.0),
+            total_distance_m: Some(12345),
+            elapsed_time_s: Some(3661),
+            total_energy_kcal: Some(250),
+            ..Default::default()
+        };
+        let t = telem(&d, "km/h");
+        assert_eq!(t.speed_raw, Some(600));
+        assert_eq!(t.status, Some(3));
+        assert_eq!(t.status_name.as_deref(), Some("RUNNING"));
+        assert!(t.is_running);
+        assert_eq!(t.distance_raw, Some(1235));
+        assert_eq!(t.distance_m, Some(12350));
+        assert_eq!(t.duration_s, Some(3661));
+        assert_eq!(t.calories, Some(250));
+        assert_eq!(t.steps, None);
+        assert!(approx12(t.speed_kmh.unwrap(), 6.0));
+        assert!(approx12(t.speed_mph.unwrap(), 6.0 / 1.609344));
+        assert!(approx12(t.distance_km.unwrap(), 12.35));
+        assert!(approx12(t.distance_mi.unwrap(), 12.35 / 1.609344));
+    }
+
+    #[test]
+    fn golden_speed_mph_console() {
+        let d = FtmsTreadmillData {
+            instantaneous_speed: Some(3.0),
+            ..Default::default()
+        };
+        let t = telem(&d, "mph");
+        assert_eq!(t.speed_raw, Some(186));
+        assert_eq!(t.status, Some(3));
+        assert!(approx12(t.speed_kmh.unwrap(), 2.99337984));
+        assert!(approx12(t.speed_mph.unwrap(), 1.86));
+    }
+
+    #[test]
+    fn golden_stopped_belt() {
+        let d = FtmsTreadmillData {
+            instantaneous_speed: Some(0.0),
+            ..Default::default()
+        };
+        let t = telem(&d, "km/h");
+        assert_eq!(t.speed_raw, Some(0));
+        assert_eq!(t.status, Some(1));
+        assert_eq!(t.status_name.as_deref(), Some("STANDBY"));
+        assert!(!t.is_running);
+    }
+
+    #[test]
+    fn golden_distance_only_frame() {
+        let d = FtmsTreadmillData {
+            total_distance_m: Some(100),
+            ..Default::default()
+        };
+        let t = telem(&d, "km/h");
+        assert_eq!(t.speed_raw, None);
+        assert_eq!(t.status, None);
+        assert_eq!(t.status_name, None);
+        assert!(!t.is_running);
+        assert_eq!(t.distance_raw, Some(10));
+        assert_eq!(t.distance_m, Some(100));
+    }
+
+    /// The driver UUIDs and the documented string set must agree.
+    #[test]
+    fn driver_uuids_match_the_documented_set() {
+        assert_eq!(
+            crate::drivers::sig_uuid(0x1826).to_string(),
+            FITNESS_MACHINE_SERVICE_UUID
+        );
+        assert_eq!(
+            crate::drivers::sig_uuid(0x2acd).to_string(),
+            TREADMILL_DATA_UUID
         );
     }
 }

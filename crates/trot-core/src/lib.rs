@@ -9,9 +9,9 @@ pub mod app;
 pub mod ble;
 pub mod config;
 pub mod db;
+pub mod drivers;
 pub mod engine;
-pub mod ftms;
-pub mod protocol;
+pub mod telemetry;
 
 pub use app::AppState;
 pub use engine::{start_engine, Engine};
