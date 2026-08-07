@@ -86,7 +86,10 @@ use, so your driver states intent and the timing lore stays in one place.
    before each gated write. These modules are shared Chinese ODM parts that
    turn up across brands (the same unlock characteristic appears on KingSmith
    and Sperax hardware), which is exactly why the pre-amble is a capability
-   you configure, not code you copy.
+   you configure, not code you copy. `ftms::control_preamble` holds the
+   verified per-family configurations (KingSmith ODM, Merach) — note the
+   unlock gates *commands only*: telemetry notifications flow without it,
+   which is why the read-only FTMS driver never sends one.
 5. **Obfuscated transport.** The nastiest real-world case: a text protocol,
    base64'd, run through a substitution cipher, split into 16-byte GATT chunks,
    terminated by a marker byte (some KingSmith generations). Your `run()` loop
@@ -97,7 +100,7 @@ use, so your driver states intent and the timing lore stays in one place.
    tables themselves belong in your driver file — the seam exists so the
    reassembly and parsing layers never have to know about them.
 
-Three hard-won warnings:
+Five hard-won warnings:
 
 - **A service UUID proves nothing.** `0xFFF0` with `FFF1`/`FFF2` is a generic
   vendor-module layout used by at least five mutually incompatible treadmill
@@ -118,6 +121,22 @@ Three hard-won warnings:
 - **The device lies.** Counters emit stale frames, reset mid-session, and wrap.
   Report what the device says; the storage layer de-glitches. Never smooth,
   clamp, or invent values in the driver.
+- **Never block indefinitely awaiting a command acknowledgement.** Real
+  captures of an FTMS walking pad (KingSmith MC-21) show `REQUEST_CONTROL`
+  failing with `OPERATION_FAILED` on the first attempt and never being
+  indicated again — while every later command works — and other Control Point
+  opcodes being GATT-ACKed yet *never* producing an indication even on
+  success; the machine signals the outcome on its status characteristic
+  (FTMS `0x2ADA`) instead. Bound every wait, treat a missing indication as
+  "watch the status stream", and never treat a failed control handshake as
+  fatal. Relatedly: no application-level keepalive is needed — the captures
+  show none, and the link lives on link-layer keepalives plus the
+  notification stream. Don't add one.
+- **A standard-looking frame can smuggle vendor extensions.** KingSmith sets
+  the *reserved* FTMS flags bit 13 to append a step count to Treadmill Data.
+  Another vendor could set the same reserved bit meaning something else, so
+  gate any non-standard interpretation behind a device-family check (see
+  `ftms.rs`'s `is_kingsmith_name` gate) — never parse it blanket.
 
 ### Where to look things up
 

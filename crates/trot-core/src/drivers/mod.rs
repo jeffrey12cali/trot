@@ -247,7 +247,8 @@ mod tests {
 
     /// The union of driver `matches()` must cover every supported device
     /// family — LifeSpan/ESP32 names and service 0xFFF0, the KingSmith WiLink
-    /// names and service 0xFE00, FTMS 0x1826 — and nothing else.
+    /// names and service 0xFE00, FTMS 0x1826 plus the verified FTMS
+    /// walking-pad name prefixes — and nothing else.
     #[test]
     fn scan_matching_covers_the_known_devices() {
         assert!(any_match(&adv("LifeSpan-TM", &[])));
@@ -256,7 +257,14 @@ mod tests {
         assert!(any_match(&adv("", &[0x1826])));
         assert!(any_match(&adv("WalkingPad A1", &[])));
         assert!(any_match(&adv("", &[0xfe00])));
+        // FTMS walking pads that advertise a known name without 0x1826.
+        assert!(any_match(&adv("URTM024", &[])));
+        assert!(any_match(&adv("KS-MC21-D06BFD", &[])));
+        assert!(any_match(&adv("SPERAX_RM-01", &[])));
         assert!(!any_match(&adv("Some Headphones", &[0x180f])));
+        // The hyphen-less Sperax speaks a different, proprietary protocol —
+        // it must stay unclaimed rather than be mis-driven as FTMS.
+        assert!(!any_match(&adv("SPERAX_RM01", &[])));
         assert!(!any_match(&adv("", &[])));
     }
 
