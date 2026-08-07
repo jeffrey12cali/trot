@@ -171,7 +171,12 @@ full-size treadmills alike. Three ways in:
   **Fitness Machine Service** (FTMS, `0x1826`). Models *documented* to broadcast
   FTMS include Horizon\* AT-series, Technogym MyRun\*, BowFlex\* T9, 3G Cardio\*,
   Matrix\* (XER-02+) and newer WalkingPad\* / KingSmith pads — it's per-model, so
-  verify yours. (Only LifeSpan is tested by us on real hardware.)
+  verify yours. `trot scan` also recognises the verified FTMS walking pads by
+  their advertised names — Urevo\*, Merach\*, Sunny Health & Fitness\*,
+  CitySports\*, WellFit\*, Mobvoi\*, Sportstech\* (sWalk), YPOO\*, TheRun\*,
+  Sperax\* (RM-01) and newer KingSmith models among them. On KingSmith FTMS
+  pads Trot also reads the vendor's step-count extension, so steps accrue
+  there too. (Only LifeSpan is tested by us on real hardware.)
 
 FTMS is per-model: if your treadmill has an "FTMS" or "broadcast to Zwift/Kinomap"
 mode, `trot scan` will find it. Closed ecosystems — **iFit** (NordicTrack\* /
@@ -276,8 +281,9 @@ with, endorsed by, or sponsored by** any treadmill manufacturer, and it only rea
 data your treadmill already broadcasts over Bluetooth.
 
 LifeSpan, Horizon, BowFlex, Technogym, Matrix, 3G Cardio, WalkingPad / KingSmith,
-NordicTrack, ProForm, Peloton and Echelon are trademarks or registered trademarks
-of their respective owners. The **Bluetooth®** word mark and logos are registered
+Urevo, Merach, Sunny Health & Fitness, CitySports, WellFit, Mobvoi, Sportstech,
+YPOO, TheRun, Sperax, NordicTrack, ProForm, Peloton and Echelon are trademarks or
+registered trademarks of their respective owners. The **Bluetooth®** word mark and logos are registered
 trademarks owned by Bluetooth SIG, Inc. All other product and company names are the
 property of their respective holders; their use here is for identification and
 compatibility purposes only.

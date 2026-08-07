@@ -2,14 +2,59 @@
 //!
 //! Interaction model: **subscribe-and-push.** The treadmill notifies a
 //! Treadmill Data record (~1 Hz while the belt moves); we subscribe once and
-//! decode each push. FTMS has no step counter, so `steps` stays `None`.
+//! decode each push. We also subscribe to Fitness Machine Status (0x2ADA)
+//! where the device exposes it — on some hardware it is the only reliable
+//! signal for state transitions (see "Hardening" below).
 //!
-//! The parser half is a clean-room implementation of the Treadmill Data characteristic (0x2ACD)
-//! byte layout, written from the official FTMS v1.0.1 service specification and
-//! the Bluetooth SIG Assigned Numbers / GATT Specification Supplement field
-//! definitions. No third-party source was consulted; the byte unpacking below
-//! is implemented directly from the published field order, sizes, signedness,
-//! and resolutions.
+//! The standard-frame parser is a clean-room implementation of the Treadmill
+//! Data characteristic (0x2ACD) byte layout, written from the official FTMS
+//! v1.0.1 service specification and the Bluetooth SIG Assigned Numbers / GATT
+//! Specification Supplement field definitions. No third-party source was
+//! consulted for the standard byte unpacking; it is implemented directly from
+//! the published field order, sizes, signedness, and resolutions.
+//!
+//! **Hardening beyond the spec** — real walking-pad firmware deviates from
+//! the paper in verified, recurring ways. This knowledge is ported from and
+//! cross-checked against (see THIRD-PARTY-NOTICES.md):
+//!
+//! * **mcdax/walkingpad-controller** (MIT, © 2026 mcdax) —
+//!   `docs/ftms-protocol-reference.md`, derived from KS Fit vendor-app
+//!   analysis plus four real `btsnoop_hci` captures of a KingSmith KS-MC21:
+//!   the mandatory staggered CCCD enables (§2.2: firmware silently drops
+//!   notification-enable writes ~30 ms apart; the vendor app spaces them
+//!   100/200/300 ms), the ODM unlock pre-amble (§4), the bit-13 step
+//!   extension (§6.2), the Control Point indication behaviour (§3.2), and
+//!   the no-keepalive finding (§2.7).
+//!   <https://github.com/mcdax/walkingpad-controller>
+//! * **cagnulein/qdomyos-zwift** (GPL-3.0) — the advertised-name list for
+//!   real-world FTMS walking pads ([`ADV_NAME_PREFIXES`], from
+//!   `src/devices/bluetooth.cpp`, including the SPERAX_RM-01/SPERAX_RM01
+//!   carve-out) and the Merach unlock write
+//!   (`src/devices/horizontreadmill/horizontreadmill.cpp`).
+//!   <https://github.com/cagnulein/qdomyos-zwift>
+//! * **dudanov/python-pyftms** (Apache-2.0) — used as a cross-check of the
+//!   Fitness Machine Status (0x2ADA) opcode map against the FTMS v1.0 spec.
+//!   <https://github.com/dudanov/python-pyftms>
+//!
+//! The hardening lessons, verified on real captures:
+//!
+//! * **Never block awaiting a Control Point indication.** On the KS-MC21,
+//!   `REQUEST_CONTROL (0x00)` fails with `OPERATION_FAILED (0x04)` on the
+//!   first attempt and is never indicated again — yet subsequent commands
+//!   work; and opcodes 0x02/0x07/0x08 are GATT-ACKed but produce **no
+//!   indication at all** even on success. Success is signalled via 0x2ADA
+//!   Fitness Machine Status instead. Trot has no Control Point write path
+//!   today; this constraint is recorded here for the phase that adds one.
+//! * **Some devices gate Control Point writes behind a vendor unlock write**
+//!   ([`control_preamble`]). The unlock gates *commands only* — telemetry
+//!   notifications flow without it (the vendor app enables CCCDs before its
+//!   first unlock write), which is why the read-only driver below never sends
+//!   it.
+//! * **No application-level keepalive is needed** — none was observed in any
+//!   of the four captures; the link lives on link-layer keepalives plus the
+//!   notification stream. This driver deliberately writes nothing.
+//! * A widely-circulated third-party parser reads Total Distance as u16;
+//!   the spec field is **u24** and this parser reads u24 (pinned by test).
 //!
 //! Frame format (little-endian throughout):
 //!   bytes 0..2: Flags (uint16). Each bit signals presence of an optional field.
@@ -29,6 +74,7 @@
 //!   bit 10 Elapsed Time
 //!   bit 11 Remaining Time
 //!   bit 12 Force on Belt + Power Output (pair)
+//!   bit 13 (non-SIG) KingSmith step-count extension — see below
 //!
 //! Field sizes / resolutions (GATT Specification Supplement, Treadmill Data):
 //!   Instantaneous Speed   uint16  0.01 km/h
@@ -49,16 +95,25 @@
 //!   Remaining Time        uint16  1 s
 //!   Force on Belt         sint16  1 N
 //!   Power Output          sint16  1 W
+//!
+//! KingSmith extension (bit 13, `0x2000` — NOT SIG-defined): three extra
+//! bytes after the standard fields — a uint16-LE step count plus one zero
+//! pad byte. The counter is pressure-sensor based. Because bit 13 is reserved
+//! in the spec, another vendor could set it meaning something else entirely,
+//! so the extension is parsed **only** for devices whose advertised name is a
+//! known KingSmith family ([`is_kingsmith_name`]) — never blanket.
 
+use super::util::{subscribe_staggered, CommandPreamble};
 use super::{Advertisement, BeltState, Driver, DriverHost, Emit, Sample};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
-use btleplug::api::{Characteristic, Peripheral as _};
+use btleplug::api::{CharPropFlags, Characteristic, Peripheral as _};
 use btleplug::platform::Peripheral;
 use futures::StreamExt;
 use serde::Serialize;
 use std::collections::BTreeSet;
 use std::time::Duration;
+use uuid::Uuid;
 
 // ---- UUIDs ------------------------------------------------------------------
 
@@ -73,6 +128,10 @@ pub fn uuid16(short: u16) -> String {
 pub const FITNESS_MACHINE_SERVICE_UUID: &str = "00001826-0000-1000-8000-00805f9b34fb";
 /// Treadmill Data characteristic (notify).
 pub const TREADMILL_DATA_UUID: &str = "00002acd-0000-1000-8000-00805f9b34fb";
+/// Fitness Machine Status characteristic (notify). On some devices (KS-MC21)
+/// this is the only reliable signal for start/stop/pause transitions — the
+/// Control Point never indicates them.
+pub const FITNESS_MACHINE_STATUS_UUID: &str = "00002ada-0000-1000-8000-00805f9b34fb";
 // The following are part of the FTMS UUID set, reserved for the next phase
 // (reading machine features and driving the control point to start/pause the
 // belt). Kept here so the set lives in one place.
@@ -80,11 +139,146 @@ pub const TREADMILL_DATA_UUID: &str = "00002acd-0000-1000-8000-00805f9b34fb";
 #[allow(dead_code)]
 pub const FITNESS_MACHINE_FEATURE_UUID: &str = "00002acc-0000-1000-8000-00805f9b34fb";
 /// Fitness Machine Control Point characteristic (write/indicate).
+///
+/// For the phase that starts writing here, two verified constraints
+/// (mcdax/walkingpad-controller, KS-MC21 captures):
+///
+/// * `REQUEST_CONTROL (0x00)` can fail with `OPERATION_FAILED (0x04)` on the
+///   first attempt and never be indicated again — while every later command
+///   works. Do not treat it as fatal.
+/// * Commands may be GATT-ACKed and *succeed* without ever producing a
+///   Control Point indication; success arrives as a 0x2ADA Fitness Machine
+///   Status notification instead. Never block indefinitely on an indication —
+///   bound the wait and treat a timeout as "watch 0x2ADA".
 #[allow(dead_code)]
 pub const FITNESS_MACHINE_CONTROL_POINT_UUID: &str = "00002ad9-0000-1000-8000-00805f9b34fb";
 /// Training Status characteristic (read/notify).
 #[allow(dead_code)]
 pub const TRAINING_STATUS_UUID: &str = "00002ad3-0000-1000-8000-00805f9b34fb";
+
+// ---- Advertised names -------------------------------------------------------
+//
+// FTMS walking pads frequently advertise their name without the 0x1826
+// service UUID in the advertisement (the service only shows up after
+// connect + discovery), so `matches()` also recognises the real-world name
+// prefixes. The list is ported from qdomyos-zwift's device matcher
+// (src/devices/bluetooth.cpp), the widest-deployed collection of verified
+// FTMS treadmill names; comparison is case-insensitive.
+
+/// Name prefixes of walking pads verified to speak standard FTMS.
+pub const ADV_NAME_PREFIXES: &[&str] = &[
+    "URTM",              // Urevo (Spacewalk 3S "URTM024", E1L family)
+    "MRK-T",             // Merach treadmills (W50) — MRK-S/MRK-R are rowers/bikes
+    "SF-T",              // Sunny Health & Fitness treadmills
+    "CITYSPORTS-LINKER", // CitySports
+    "WELLFIT TM",        // WellFit
+    "MOBVOI TM",         // Mobvoi Home Treadmill
+    "MOBVOI WMTP",       // Mobvoi walking pad
+    "SWALK LITE-",       // Sportstech sWalk Lite
+    "ANPLUS-",           // Anplus
+    "ANPIUS-",           // Anplus (misspelled firmware variant, real)
+    "YPOO-MINI PRO-",    // YPOO Mini Pro
+    "THERUN  T15",       // TheRun T15 — the double space is what it advertises
+    "FOCUS M3",          // Focus Fitness M3
+    "KS-MC",             // KingSmith MC21 family (WalkingPad MC21)
+    "KS-HD-Z1D",         // KingSmith WalkingPad Z1 (FTMS despite the KS- name)
+    "KS-AP-",            // KingSmith WalkingPad R3 Hybrid+
+    "KS-NG-",            // KingSmith X218 / Walking Pad
+    // Hyphenated ONLY: "SPERAX_RM01" (no hyphen) and "SPERAX_RM-02" are a
+    // different, proprietary Sperax protocol — qdomyos routes those to a
+    // dedicated non-FTMS driver. Matching them here would mis-drive them.
+    "SPERAX_RM-01",
+];
+
+/// KingSmith FTMS families, for gating the non-standard bit-13 step
+/// extension. `ZP-ZEALR1` is the OEM Zeal-branded MC-21 variant.
+pub const KINGSMITH_FTMS_NAME_PREFIXES: &[&str] = &["KS-", "ZP-ZEALR1"];
+
+fn normalized(name: &str) -> String {
+    name.trim().to_ascii_uppercase()
+}
+
+fn matches_name(name: &str) -> bool {
+    let n = normalized(name);
+    ADV_NAME_PREFIXES.iter().any(|p| n.starts_with(p))
+}
+
+/// Is this a KingSmith-family FTMS device? Gates the bit-13 step extension:
+/// bit 13 is reserved in the SIG spec, so its KingSmith meaning must never be
+/// assumed on other vendors' frames. An empty/unknown name safely disables
+/// the extension (the frame still parses; steps just stay absent).
+pub(crate) fn is_kingsmith_name(name: &str) -> bool {
+    let n = normalized(name);
+    KINGSMITH_FTMS_NAME_PREFIXES
+        .iter()
+        .any(|p| n.starts_with(p))
+}
+
+// ---- Control-path unlock pre-ambles (reserved) --------------------------------
+//
+// Not used by this read-only driver — see `control_preamble` for why — but
+// modeled now because the knowledge is verified and hard-won.
+
+/// KingSmith "ODM" vendor characteristic: write-only, embedded inside the
+/// FTMS service tree on the MC-21 family (mcdax/walkingpad-controller,
+/// confirmed in all four KS-MC21 captures; also present on Sperax hardware).
+pub const KINGSMITH_ODM_UNLOCK_CHAR_UUID: Uuid =
+    Uuid::from_u128(0xd18d2c10_c44c_11e8_a355_529269fb1459);
+/// The unlock frame the vendor app writes to the ODM characteristic. Without
+/// it, FTMS Control Point writes answer `CONTROL_NOT_PERMITTED (0x05)`.
+pub const KINGSMITH_ODM_UNLOCK_MAGIC: [u8; 8] = [0x01, 0x00, 0x0d, 0x00, 0x06, 0x0b, 0x0f, 0x0d];
+
+/// Merach unlock characteristic — the UUID spells `YULU…MERACH` in ASCII.
+/// Ported from qdomyos-zwift's horizontreadmill.cpp (`merachUnlockCharId`).
+pub const MERACH_UNLOCK_CHAR_UUID: Uuid = Uuid::from_u128(0x59554c55_0000_6666_8888_4d4552414348);
+/// The Merach unlock frame (qdomyos-zwift's `merachUnlock` write).
+pub const MERACH_UNLOCK_MAGIC: [u8; 5] = [0xAA, 0x01, 0x00, 0x01, 0x55];
+
+/// KS Fit's `isMC21` family — the models verified to carry the ODM unlock
+/// characteristic (mcdax/walkingpad-controller §8).
+const ODM_UNLOCK_NAME_PREFIXES: &[&str] = &["KS-MC21", "KS-SMC21C", "ZP-ZEALR1"];
+/// Merach FTMS treadmills (qdomyos-zwift's `MERACH_TREADMILL` workaround).
+const MERACH_UNLOCK_NAME_PREFIXES: &[&str] = &["MRK-T"];
+
+/// The unlock pre-amble a future *control* path must send before Fitness
+/// Machine Control Point writes on this device, if any.
+///
+/// A shared Chinese ODM BLE module gates the Control Point behind a magic
+/// write to a separate vendor characteristic; the same module (same UUID,
+/// same bytes) appears across brands, so this is a configured capability
+/// ([`util::CommandPreamble`](super::util::CommandPreamble)), not per-brand
+/// special-casing.
+///
+/// **Deliberately not wired into `run()`.** Trot only reads telemetry today —
+/// it never writes to the Control Point — and the unlock gates *commands
+/// only*: telemetry notifications flow without it (the vendor app enables its
+/// CCCDs and receives data before its first unlock write, and the captures
+/// confirm `CONTROL_NOT_PERMITTED` is a Control Point response, not a
+/// subscription failure). Sending it from a read-only driver would be an
+/// unnecessary write to hardware we don't own.
+///
+/// When a control path lands: the vendor app re-sends the unlock before
+/// *every* Control Point write (40× in one captured session). Whether the
+/// repetition is required is unverified — mirror the app and `apply()` it
+/// before each gated write anyway; it is one small write and the only
+/// field-proven pattern (walkingpad-controller v0.4.1 does the same,
+/// "empirically reliable").
+pub fn control_preamble(device_name: &str) -> Option<CommandPreamble> {
+    let n = normalized(device_name);
+    if ODM_UNLOCK_NAME_PREFIXES.iter().any(|p| n.starts_with(p)) {
+        return Some(CommandPreamble::new(
+            KINGSMITH_ODM_UNLOCK_CHAR_UUID,
+            KINGSMITH_ODM_UNLOCK_MAGIC,
+        ));
+    }
+    if MERACH_UNLOCK_NAME_PREFIXES.iter().any(|p| n.starts_with(p)) {
+        return Some(CommandPreamble::new(
+            MERACH_UNLOCK_CHAR_UUID,
+            MERACH_UNLOCK_MAGIC,
+        ));
+    }
+    None
+}
 
 // ---- Flag bits --------------------------------------------------------------
 
@@ -101,6 +295,8 @@ const FLAG_METABOLIC_EQUIV: u16 = 1 << 9;
 const FLAG_ELAPSED_TIME: u16 = 1 << 10;
 const FLAG_REMAINING_TIME: u16 = 1 << 11;
 const FLAG_FORCE_POWER: u16 = 1 << 12;
+/// NOT SIG-defined: KingSmith's step-count extension (see module docs).
+const FLAG_KINGSMITH_STEPS: u16 = 1 << 13;
 
 // ---- Error ------------------------------------------------------------------
 
@@ -156,6 +352,9 @@ pub struct FtmsTreadmillData {
     pub force_on_belt_n: Option<i32>,
     /// Power output, Watts (may be negative).
     pub power_output_w: Option<i32>,
+    /// Step count from the non-standard KingSmith bit-13 extension. Only ever
+    /// set when the caller opted into the extension (known KingSmith device).
+    pub kingsmith_steps: Option<u32>,
 }
 
 // ---- Little-endian cursor ---------------------------------------------------
@@ -218,8 +417,25 @@ impl<'a> Cursor<'a> {
 ///
 /// Reads the u16 LE flags first, then conditionally reads each optional field in
 /// the exact order defined by the spec. Returns `FtmsError::TooShort` rather than
-/// panicking when the buffer is truncated.
+/// panicking when the buffer is truncated. Bit 13 is treated as reserved
+/// (ignored) — see [`parse_treadmill_data_ext`] for the KingSmith variant.
 pub fn parse_treadmill_data(buf: &[u8]) -> Result<FtmsTreadmillData, FtmsError> {
+    parse_treadmill_data_ext(buf, false)
+}
+
+/// [`parse_treadmill_data`], optionally interpreting the non-standard
+/// KingSmith bit-13 extension (u16-LE step count + one pad byte trailing the
+/// standard fields).
+///
+/// `kingsmith_steps` must only be `true` for devices positively identified as
+/// KingSmith family ([`is_kingsmith_name`]): bit 13 is *reserved* in the SIG
+/// spec, and interpreting it blanket would misread another vendor's frames.
+/// With `false`, a set bit 13 is ignored and any trailing bytes are left
+/// untouched (the standard fields still decode correctly).
+pub fn parse_treadmill_data_ext(
+    buf: &[u8],
+    kingsmith_steps: bool,
+) -> Result<FtmsTreadmillData, FtmsError> {
     let mut cur = Cursor::new(buf);
     let flags = cur.u16()?;
     let mut out = FtmsTreadmillData::default();
@@ -270,8 +486,95 @@ pub fn parse_treadmill_data(buf: &[u8]) -> Result<FtmsTreadmillData, FtmsError> 
         out.force_on_belt_n = Some(cur.i16()? as i32);
         out.power_output_w = Some(cur.i16()? as i32);
     }
+    if kingsmith_steps && flags & FLAG_KINGSMITH_STEPS != 0 {
+        // KingSmith extension: u16-LE step count + one zero pad byte, trailing
+        // the standard fields (mcdax/walkingpad-controller §6.2, confirmed on
+        // KS-MC21 captures). The pad byte's value is not validated — only its
+        // presence, so a truncated frame still errors instead of misreading.
+        out.kingsmith_steps = Some(cur.u16()? as u32);
+        let _pad = cur.u8()?;
+    }
 
     Ok(out)
+}
+
+// ---- Fitness Machine Status (0x2ADA) ----------------------------------------
+
+/// One Fitness Machine Status event, decoded. Opcode map per FTMS v1.0 §4.17
+/// (cross-checked against dudanov/python-pyftms and the on-wire events in
+/// mcdax/walkingpad-controller's KS-MC21 captures). Only the treadmill-relevant
+/// events are named; everything else passes through as [`Other`].
+///
+/// [`Other`]: MachineStatus::Other
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MachineStatus {
+    /// 0x01 — machine reset.
+    Reset,
+    /// 0x02 with parameter 0x01 — stopped by the user.
+    StoppedByUser,
+    /// 0x02 with parameter 0x02 — paused by the user.
+    PausedByUser,
+    /// 0x03 — stopped by the safety key.
+    StoppedBySafetyKey,
+    /// 0x04 — started or resumed by the user.
+    StartedOrResumedByUser,
+    /// 0x05 — target speed changed; the new target, km/h.
+    TargetSpeedChanged(f64),
+    /// 0xFF — control permission lost.
+    ControlPermissionLost,
+    /// Any other opcode, passed through raw.
+    Other(u8),
+}
+
+/// Parse a Fitness Machine Status (0x2ADA) notification.
+///
+/// Returns `TooShort` for an empty buffer or an event cut off before its
+/// required parameter — never panics on malformed input.
+pub fn parse_machine_status(buf: &[u8]) -> Result<MachineStatus, FtmsError> {
+    let mut cur = Cursor::new(buf);
+    Ok(match cur.u8()? {
+        0x01 => MachineStatus::Reset,
+        0x02 => match cur.u8()? {
+            // Spec: 0x01 = stopped, 0x02 = paused. An unknown parameter is
+            // still definitely not-running; report it as stopped.
+            0x02 => MachineStatus::PausedByUser,
+            _ => MachineStatus::StoppedByUser,
+        },
+        0x03 => MachineStatus::StoppedBySafetyKey,
+        0x04 => MachineStatus::StartedOrResumedByUser,
+        0x05 => MachineStatus::TargetSpeedChanged(cur.u16()? as f64 * 0.01),
+        0xFF => MachineStatus::ControlPermissionLost,
+        other => MachineStatus::Other(other),
+    })
+}
+
+/// What a status event does to the pause overlay: `Some(true)` = the belt is
+/// paused, `Some(false)` = any pause is over, `None` = no state claim.
+///
+/// Only *pause* needs an overlay at all: running and stopped are already
+/// visible in the speed itself, but a paused belt and a stopped belt both
+/// read 0 km/h — 0x2ADA is what tells them apart.
+fn pause_effect(ev: &MachineStatus) -> Option<bool> {
+    match ev {
+        MachineStatus::PausedByUser => Some(true),
+        MachineStatus::Reset
+        | MachineStatus::StoppedByUser
+        | MachineStatus::StoppedBySafetyKey
+        | MachineStatus::StartedOrResumedByUser => Some(false),
+        MachineStatus::TargetSpeedChanged(_)
+        | MachineStatus::ControlPermissionLost
+        | MachineStatus::Other(_) => None,
+    }
+}
+
+/// The state to report: the speed-derived state, except that a stationary
+/// belt under an active pause event presents as `Paused` rather than
+/// `Standby`. A moving belt is always authoritative.
+fn effective_state(speed_derived: Option<BeltState>, paused: bool) -> Option<BeltState> {
+    match speed_derived {
+        Some(BeltState::Standby) if paused => Some(BeltState::Paused),
+        other => other,
+    }
 }
 
 // ---- The driver -------------------------------------------------------------
@@ -286,11 +589,13 @@ const RUNNING_THRESHOLD_KMH: f64 = 0.05;
 
 /// A decoded record as a neutral SI sample. FTMS already speaks SI, so this is
 /// mostly a field mapping; only the belt state is synthesised (from speed).
+/// Standard FTMS has no step counter, so `steps` is only ever set from the
+/// name-gated KingSmith extension — absent everywhere else, never zero.
 fn to_sample(d: &FtmsTreadmillData) -> Sample {
     Sample {
         speed_kmh: d.instantaneous_speed,
         distance_m: d.total_distance_m.map(|m| m as f64),
-        steps: None, // FTMS has no step counter — absent, not zero
+        steps: d.kingsmith_steps,
         duration_s: d.elapsed_time_s,
         calories: d.total_energy_kcal,
         state: d.instantaneous_speed.map(|kmh| {
@@ -312,26 +617,67 @@ impl Driver for Ftms {
     }
 
     fn matches(&self, adv: &Advertisement) -> bool {
-        adv.services.contains(&super::sig_uuid(0x1826))
+        adv.services.contains(&super::sig_uuid(0x1826)) || matches_name(&adv.name)
     }
 
     fn supports(&self, _adv: &Advertisement, gatt: &BTreeSet<Characteristic>) -> bool {
         gatt.iter().any(|c| c.uuid == super::sig_uuid(0x2acd))
     }
 
-    async fn run(&self, link: &Peripheral, _host: &DriverHost<'_>, emit: Emit<'_>) -> Result<()> {
+    async fn run(&self, link: &Peripheral, host: &DriverHost<'_>, emit: Emit<'_>) -> Result<()> {
+        let treadmill_data_uuid = super::sig_uuid(0x2acd);
+        let machine_status_uuid = super::sig_uuid(0x2ada);
+
         let chars = link.characteristics();
-        let data_char = chars
+        if !chars.iter().any(|c| c.uuid == treadmill_data_uuid) {
+            return Err(anyhow!("Treadmill Data characteristic (2ACD) missing"));
+        }
+        // Fitness Machine Status is spec-mandatory but verify the notify role
+        // anyway — subscribe only to what actually exists.
+        let has_status = chars
             .iter()
-            .find(|c| c.uuid == super::sig_uuid(0x2acd))
-            .cloned()
-            .ok_or_else(|| anyhow!("Treadmill Data characteristic (2ACD) missing"))?;
-        link.subscribe(&data_char).await?;
+            .any(|c| c.uuid == machine_status_uuid && c.properties.contains(CharPropFlags::NOTIFY));
+
+        // Staggered CCCD enables, status first, data last — the vendor app's
+        // order. Treadmill firmware silently drops notification-enable writes
+        // arriving within ~30 ms of each other; KS Fit spaces them 100/200/300
+        // ms (literal constants in its subscription loop). A single-CCCD device
+        // has nothing to collide with and pays no delay.
+        if has_status {
+            subscribe_staggered(
+                link,
+                &[
+                    (machine_status_uuid, Duration::from_millis(100)),
+                    (treadmill_data_uuid, Duration::from_millis(200)),
+                ],
+            )
+            .await?;
+        } else {
+            subscribe_staggered(link, &[(treadmill_data_uuid, Duration::ZERO)]).await?;
+        }
         let mut notifications = link.notifications().await?;
 
+        // The bit-13 step extension is gated on the advertised name; when the
+        // platform surfaces none, the safe default is off (steps stay absent —
+        // never a misread of another vendor's reserved bit).
+        let name = link
+            .properties()
+            .await
+            .ok()
+            .flatten()
+            .and_then(|p| p.local_name)
+            .unwrap_or_default();
+        let kingsmith = is_kingsmith_name(&name);
+
+        // Newest data-frame sample, before the pause overlay is applied.
+        let mut latest = Sample::default();
+        // The 0x2ADA pause overlay: a paused belt and a stopped belt both read
+        // 0 km/h; this is what tells them apart on devices that report it.
+        let mut paused = false;
+
         loop {
-            let frame = match tokio::time::timeout(FTMS_IDLE_TIMEOUT, notifications.next()).await {
-                Ok(Some(n)) => n.value,
+            let n = match tokio::time::timeout(FTMS_IDLE_TIMEOUT, notifications.next()).await {
+                Ok(Some(n)) => n,
                 Ok(None) => return Err(anyhow!("notification stream ended")),
                 Err(_) => {
                     // A quiet belt is normal for FTMS (no push when stopped). Only
@@ -344,14 +690,52 @@ impl Driver for Ftms {
                     continue;
                 }
             };
-            let data = match parse_treadmill_data(&frame) {
+
+            if n.uuid == machine_status_uuid {
+                host.record_frame(0xDA, &n.value);
+                let ev = match parse_machine_status(&n.value) {
+                    Ok(ev) => ev,
+                    Err(e) => {
+                        tracing::warn!("FTMS machine-status decode error: {e}");
+                        continue;
+                    }
+                };
+                let Some(pause) = pause_effect(&ev) else {
+                    continue; // no state claim (target changes etc.)
+                };
+                paused = pause;
+                // Re-state the latest known reading under the new overlay —
+                // but only once there IS a reading; an all-None sample says
+                // nothing.
+                if latest.state.is_some() {
+                    emit(Sample {
+                        state: effective_state(latest.state, paused),
+                        ..latest.clone()
+                    });
+                }
+                continue;
+            }
+            if n.uuid != treadmill_data_uuid {
+                continue; // not ours (defensive: only subscribed chars notify)
+            }
+
+            host.record_frame(0xCD, &n.value);
+            let data = match parse_treadmill_data_ext(&n.value, kingsmith) {
                 Ok(d) => d,
                 Err(e) => {
                     tracing::warn!("FTMS decode error: {e}");
                     continue;
                 }
             };
-            emit(to_sample(&data));
+            let base = to_sample(&data);
+            if base.state == Some(BeltState::Running) {
+                paused = false; // the belt is factually moving; any pause ended
+            }
+            latest = base;
+            emit(Sample {
+                state: effective_state(latest.state, paused),
+                ..latest.clone()
+            });
         }
     }
 }
@@ -370,6 +754,7 @@ mod tests {
         assert_eq!(uuid16(0x1826), FITNESS_MACHINE_SERVICE_UUID);
         assert_eq!(uuid16(0x2acd), TREADMILL_DATA_UUID);
         assert_eq!(uuid16(0x2acc), FITNESS_MACHINE_FEATURE_UUID);
+        assert_eq!(uuid16(0x2ada), FITNESS_MACHINE_STATUS_UUID);
     }
 
     /// Flags = 0x0000: More Data bit clear, no optional bits.
@@ -386,7 +771,8 @@ mod tests {
 
     /// Flags bits: 0 (More Data clear -> speed present), 2 (Total Distance),
     /// 7 (Expended Energy), 10 (Elapsed Time).
-    /// flags = 0b0100_1000_0100 = 0x0484.
+    /// flags = 0b0100_1000_0100 = 0x0484 — the exact flag shape a real Urevo
+    /// E1L notifies.
     #[test]
     fn speed_distance_energy_time_frame() {
         let flags: u16 = FLAG_TOTAL_DISTANCE | FLAG_EXPENDED_ENERGY | FLAG_ELAPSED_TIME;
@@ -416,6 +802,46 @@ mod tests {
         // Untouched fields stay None.
         assert_eq!(d.average_speed, None);
         assert_eq!(d.heart_rate_bpm, None);
+    }
+
+    /// flags 0x0584 = 0x0484 + Heart Rate — the flag shape a real Sportstech
+    /// S-Walk / FITHOME pad notifies. Pins the field order around the HR byte.
+    #[test]
+    fn speed_distance_energy_hr_time_frame() {
+        let flags: u16 =
+            FLAG_TOTAL_DISTANCE | FLAG_EXPENDED_ENERGY | FLAG_HEART_RATE | FLAG_ELAPSED_TIME;
+        assert_eq!(flags, 0x0584);
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&flags.to_le_bytes());
+        buf.extend_from_slice(&320u16.to_le_bytes()); // 3.20 km/h
+        buf.extend_from_slice(&[0xE8, 0x03, 0x00]); // 1000 m
+        buf.extend_from_slice(&42u16.to_le_bytes()); // 42 kcal
+        buf.extend_from_slice(&180u16.to_le_bytes()); // 180 kcal/h
+        buf.push(3u8); // 3 kcal/min
+        buf.push(96u8); // 96 bpm — between energy and elapsed time
+        buf.extend_from_slice(&1200u16.to_le_bytes()); // 1200 s
+
+        let d = parse_treadmill_data(&buf).unwrap();
+        assert!(approx(d.instantaneous_speed.unwrap(), 3.2));
+        assert_eq!(d.total_distance_m, Some(1000));
+        assert_eq!(d.total_energy_kcal, Some(42));
+        assert_eq!(d.heart_rate_bpm, Some(96));
+        assert_eq!(d.elapsed_time_s, Some(1200));
+    }
+
+    /// Total Distance is u24, not u16 — a widely-circulated third-party parser
+    /// gets this wrong. A distance above 65535 m must decode through the third
+    /// byte (a u16 misread of this frame would report 34464 m).
+    #[test]
+    fn total_distance_uses_the_full_u24_width() {
+        let flags: u16 = FLAG_TOTAL_DISTANCE;
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&flags.to_le_bytes());
+        buf.extend_from_slice(&500u16.to_le_bytes()); // speed 5.00 km/h
+        buf.extend_from_slice(&[0xA0, 0x86, 0x01]); // 100000 m LE u24
+        let d = parse_treadmill_data(&buf).unwrap();
+        assert_eq!(d.total_distance_m, Some(100_000));
+        assert_ne!(d.total_distance_m, Some(0x86A0), "u16 misread");
     }
 
     /// Flags bits: 0 (More Data clear -> speed present), 1 (Average Speed),
@@ -486,6 +912,335 @@ mod tests {
                 got: 0
             }
         );
+    }
+
+    // ---- KingSmith bit-13 step extension ------------------------------------
+
+    /// Builds the MC-21 frame shape: 0x0484 fields + bit 13, with the three
+    /// extension bytes (u16-LE steps + zero pad) trailing the standard fields.
+    fn kingsmith_frame(steps: u16) -> Vec<u8> {
+        let flags: u16 =
+            FLAG_TOTAL_DISTANCE | FLAG_EXPENDED_ENERGY | FLAG_ELAPSED_TIME | FLAG_KINGSMITH_STEPS;
+        assert_eq!(flags, 0x2484);
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&flags.to_le_bytes());
+        buf.extend_from_slice(&400u16.to_le_bytes()); // 4.00 km/h
+        buf.extend_from_slice(&[0x10, 0x27, 0x00]); // 10000 m
+        buf.extend_from_slice(&100u16.to_le_bytes()); // 100 kcal
+        buf.extend_from_slice(&200u16.to_le_bytes()); // 200 kcal/h
+        buf.push(4u8); // 4 kcal/min
+        buf.extend_from_slice(&2400u16.to_le_bytes()); // 2400 s
+        buf.extend_from_slice(&steps.to_le_bytes()); // extension: steps
+        buf.push(0x00); // extension: zero pad
+        buf
+    }
+
+    /// On a known KingSmith device the extension decodes; the standard fields
+    /// are unaffected either way.
+    #[test]
+    fn kingsmith_extension_decodes_when_enabled() {
+        let buf = kingsmith_frame(4321);
+        let d = parse_treadmill_data_ext(&buf, true).unwrap();
+        assert_eq!(d.kingsmith_steps, Some(4321));
+        assert!(approx(d.instantaneous_speed.unwrap(), 4.0));
+        assert_eq!(d.total_distance_m, Some(10000));
+        assert_eq!(d.elapsed_time_s, Some(2400));
+    }
+
+    /// Without the device-family opt-in, bit 13 is reserved: the trailing
+    /// bytes are ignored, steps stay absent, and the standard fields still
+    /// decode — another vendor setting bit 13 must never be misread.
+    #[test]
+    fn kingsmith_extension_is_ignored_without_the_family_gate() {
+        let buf = kingsmith_frame(4321);
+        let d = parse_treadmill_data_ext(&buf, false).unwrap();
+        assert_eq!(d.kingsmith_steps, None);
+        assert_eq!(d.total_distance_m, Some(10000));
+        // The plain entry point behaves identically.
+        assert_eq!(parse_treadmill_data(&buf).unwrap(), d);
+    }
+
+    /// A KingSmith frame with bit 13 set but the extension bytes cut off must
+    /// error, not misread.
+    #[test]
+    fn truncated_kingsmith_extension_returns_err() {
+        let full = kingsmith_frame(4321);
+        for cut in 1..=3 {
+            let err = parse_treadmill_data_ext(&full[..full.len() - cut], true).unwrap_err();
+            assert!(matches!(err, FtmsError::TooShort { .. }), "cut {cut}");
+        }
+    }
+
+    /// Bit 13 clear + extension enabled: no extension bytes are expected and
+    /// steps stay absent.
+    #[test]
+    fn extension_flag_clear_reads_no_extension() {
+        let buf = [0x00, 0x00, 0xDC, 0x05]; // plain speed-only frame
+        let d = parse_treadmill_data_ext(&buf, true).unwrap();
+        assert_eq!(d.kingsmith_steps, None);
+    }
+
+    /// The family gate: KingSmith FTMS names (and the Zeal OEM variant) opt
+    /// in; everything else — including nameless devices — stays out.
+    #[test]
+    fn kingsmith_family_gate_matches_only_kingsmith_names() {
+        for name in [
+            "KS-MC21-D06BFD",
+            "ks-hd-z1d",
+            "KS-AP-X10",
+            " KS-NG-1 ",
+            "ZP-ZEALR1-AB",
+        ] {
+            assert!(is_kingsmith_name(name), "{name}");
+        }
+        for name in ["", "URTM024", "MRK-TW50", "SPERAX_RM-01", "LifeSpan-TM"] {
+            assert!(!is_kingsmith_name(name), "{name}");
+        }
+    }
+
+    // ---- Fitness Machine Status (0x2ADA) -------------------------------------
+
+    /// The event shapes seen on real KS-MC21 captures, plus the spec map.
+    #[test]
+    fn machine_status_events_decode() {
+        assert_eq!(parse_machine_status(&[0x01]), Ok(MachineStatus::Reset));
+        assert_eq!(
+            parse_machine_status(&[0x02, 0x01]),
+            Ok(MachineStatus::StoppedByUser)
+        );
+        assert_eq!(
+            parse_machine_status(&[0x02, 0x02]),
+            Ok(MachineStatus::PausedByUser)
+        );
+        assert_eq!(
+            parse_machine_status(&[0x03]),
+            Ok(MachineStatus::StoppedBySafetyKey)
+        );
+        assert_eq!(
+            parse_machine_status(&[0x04]),
+            Ok(MachineStatus::StartedOrResumedByUser)
+        );
+        // 0x05 + 0x0190 LE = target speed 4.00 km/h (the value in the real
+        // MC-21 capture's speed-change command).
+        assert_eq!(
+            parse_machine_status(&[0x05, 0x90, 0x01]),
+            Ok(MachineStatus::TargetSpeedChanged(4.0))
+        );
+        assert_eq!(
+            parse_machine_status(&[0xFF]),
+            Ok(MachineStatus::ControlPermissionLost)
+        );
+        // Unknown opcodes pass through raw; an unknown stop/pause parameter is
+        // still definitely not-running.
+        assert_eq!(
+            parse_machine_status(&[0x47]),
+            Ok(MachineStatus::Other(0x47))
+        );
+        assert_eq!(
+            parse_machine_status(&[0x02, 0x7F]),
+            Ok(MachineStatus::StoppedByUser)
+        );
+    }
+
+    /// Malformed status notifications error instead of panicking: empty, and
+    /// events cut off before their required parameter.
+    #[test]
+    fn malformed_machine_status_returns_err() {
+        assert!(matches!(
+            parse_machine_status(&[]),
+            Err(FtmsError::TooShort { .. })
+        ));
+        assert!(matches!(
+            parse_machine_status(&[0x02]),
+            Err(FtmsError::TooShort { .. })
+        ));
+        assert!(matches!(
+            parse_machine_status(&[0x05, 0x90]),
+            Err(FtmsError::TooShort { .. })
+        ));
+    }
+
+    /// Only pause needs an overlay: a paused belt and a stopped belt both read
+    /// 0 km/h. Start/stop/safety/reset clear it; target changes claim nothing.
+    #[test]
+    fn pause_effect_maps_the_events() {
+        assert_eq!(pause_effect(&MachineStatus::PausedByUser), Some(true));
+        for ev in [
+            MachineStatus::Reset,
+            MachineStatus::StoppedByUser,
+            MachineStatus::StoppedBySafetyKey,
+            MachineStatus::StartedOrResumedByUser,
+        ] {
+            assert_eq!(pause_effect(&ev), Some(false), "{ev:?}");
+        }
+        for ev in [
+            MachineStatus::TargetSpeedChanged(4.0),
+            MachineStatus::ControlPermissionLost,
+            MachineStatus::Other(0x47),
+        ] {
+            assert_eq!(pause_effect(&ev), None, "{ev:?}");
+        }
+    }
+
+    /// The overlay only upgrades a stationary belt to Paused — a moving belt
+    /// (or an absent state) is never overridden.
+    #[test]
+    fn effective_state_only_upgrades_standby_to_paused() {
+        use BeltState::*;
+        assert_eq!(effective_state(Some(Standby), true), Some(Paused));
+        assert_eq!(effective_state(Some(Standby), false), Some(Standby));
+        assert_eq!(effective_state(Some(Running), true), Some(Running));
+        assert_eq!(effective_state(Some(Running), false), Some(Running));
+        assert_eq!(effective_state(None, true), None);
+        assert_eq!(effective_state(None, false), None);
+    }
+
+    /// The paused presentation reaches the contract's PAUSED code — the state
+    /// a 2ADA pause event produces for a stationary belt.
+    #[test]
+    fn paused_overlay_presents_as_the_contract_paused_code() {
+        let d = FtmsTreadmillData {
+            instantaneous_speed: Some(0.0),
+            ..Default::default()
+        };
+        let sample = Sample {
+            state: effective_state(to_sample(&d).state, true),
+            ..to_sample(&d)
+        };
+        let t = Telemetry::from_sample(&sample, "km/h");
+        assert_eq!(t.status, Some(0x05));
+        assert_eq!(t.status_name.as_deref(), Some("PAUSED"));
+        assert!(!t.is_running);
+    }
+
+    /// KingSmith extension steps flow into the neutral sample; everything
+    /// non-KingSmith keeps steps absent (never zero).
+    #[test]
+    fn kingsmith_steps_flow_into_the_sample() {
+        let d = FtmsTreadmillData {
+            instantaneous_speed: Some(4.0),
+            kingsmith_steps: Some(1234),
+            ..Default::default()
+        };
+        assert_eq!(to_sample(&d).steps, Some(1234));
+        assert_eq!(to_sample(&FtmsTreadmillData::default()).steps, None);
+    }
+
+    // ---- Advertised-name matching --------------------------------------------
+
+    fn adv(name: &str) -> Advertisement {
+        Advertisement {
+            name: name.into(),
+            services: vec![],
+        }
+    }
+
+    /// Every verified walking-pad prefix must make the device discoverable by
+    /// name alone (many pads omit 0x1826 from the advertisement), and matching
+    /// is case-insensitive.
+    #[test]
+    fn known_ftms_walking_pads_match_by_name() {
+        for name in [
+            "URTM024",
+            "MRK-TW50",
+            "SF-T7515",
+            "CITYSPORTS-LINKER",
+            "WELLFIT TM-101",
+            "MOBVOI TM",
+            "MOBVOI WMTP01",
+            "SWALK LITE-1234",
+            "ANPLUS-T1",
+            "ANPIUS-T1",
+            "YPOO-MINI PRO-8",
+            "THERUN  T15", // double space — what the device really advertises
+            "FOCUS M3",
+            "KS-MC21-D06BFD",
+            "KS-HD-Z1D",
+            "KS-AP-X10",
+            "KS-NG-AB12",
+            "SPERAX_RM-01",
+            "urtm024", // case-insensitive
+            "ks-mc21-d06bfd",
+        ] {
+            assert!(Ftms.matches(&adv(name)), "{name}");
+        }
+    }
+
+    /// Near-misses must NOT match: the hyphen-less SPERAX_RM01 and the
+    /// SPERAX_RM-02 speak a different, proprietary protocol (qdomyos routes
+    /// them to a dedicated driver), Merach rowers share the MRK- namespace,
+    /// and unrelated devices stay out entirely.
+    #[test]
+    fn non_ftms_names_do_not_match() {
+        for name in [
+            "SPERAX_RM01",   // proprietary Sperax — no hyphen
+            "SPERAX_RM-02",  // proprietary Sperax
+            "MRK-S26S-1",    // Merach rower
+            "MRK-R06-2",     // Merach bike
+            "WalkingPad A1", // WiLink generation, not FTMS
+            "LifeSpan-TM",
+            "Some Headphones",
+            "",
+        ] {
+            assert!(!Ftms.matches(&adv(name)), "{name}");
+        }
+    }
+
+    /// Matching on the advertised 0x1826 service still works — that path is
+    /// what covers every FTMS treadmill whose name we don't know.
+    #[test]
+    fn service_uuid_still_matches_without_a_name() {
+        assert!(Ftms.matches(&Advertisement {
+            name: String::new(),
+            services: vec![crate::drivers::sig_uuid(0x1826)],
+        }));
+    }
+
+    // ---- Control-path pre-amble ----------------------------------------------
+
+    /// The MC-21 family gets the ODM unlock, Merach treadmills the YULU
+    /// unlock, and everyone else — including other FTMS walking pads and the
+    /// non-ODM KingSmith families — gets none.
+    #[test]
+    fn control_preamble_is_configured_per_module_family() {
+        for name in ["KS-MC21-D06BFD", "ks-smc21c-1", "ZP-ZEALR1-XY"] {
+            let p = control_preamble(name).unwrap_or_else(|| panic!("{name}"));
+            assert_eq!(p.char_uuid, KINGSMITH_ODM_UNLOCK_CHAR_UUID);
+            assert_eq!(p.payload, KINGSMITH_ODM_UNLOCK_MAGIC.to_vec());
+        }
+        let p = control_preamble("MRK-TW50").unwrap();
+        assert_eq!(p.char_uuid, MERACH_UNLOCK_CHAR_UUID);
+        assert_eq!(p.payload, MERACH_UNLOCK_MAGIC.to_vec());
+        for name in ["", "URTM024", "KS-HD-Z1D", "KS-AP-X10", "SPERAX_RM-01"] {
+            assert!(control_preamble(name).is_none(), "{name}");
+        }
+    }
+
+    /// The unlock UUIDs and magics must match the primary sources verbatim:
+    /// the ODM bytes from the MC-21 captures, the Merach UUID that spells
+    /// YULU/MERACH in ASCII and its unlock frame from qdomyos-zwift.
+    #[test]
+    fn unlock_constants_match_the_captured_wire_bytes() {
+        assert_eq!(
+            KINGSMITH_ODM_UNLOCK_CHAR_UUID.to_string(),
+            "d18d2c10-c44c-11e8-a355-529269fb1459"
+        );
+        assert_eq!(
+            KINGSMITH_ODM_UNLOCK_MAGIC,
+            [0x01, 0x00, 0x0d, 0x00, 0x06, 0x0b, 0x0f, 0x0d]
+        );
+        assert_eq!(
+            MERACH_UNLOCK_CHAR_UUID.to_string(),
+            "59554c55-0000-6666-8888-4d4552414348"
+        );
+        let ascii: Vec<u8> = MERACH_UNLOCK_CHAR_UUID
+            .as_bytes()
+            .iter()
+            .copied()
+            .filter(|b| b.is_ascii_alphanumeric() && *b >= 0x41)
+            .collect();
+        assert_eq!(&ascii, b"YULUffMERACH", "the vendor signed their UUID");
+        assert_eq!(MERACH_UNLOCK_MAGIC, [0xAA, 0x01, 0x00, 0x01, 0x55]);
     }
 
     // ---- Golden pins: decoded record → Sample → Telemetry ------------------
@@ -582,6 +1337,10 @@ mod tests {
         assert_eq!(
             crate::drivers::sig_uuid(0x2acd).to_string(),
             TREADMILL_DATA_UUID
+        );
+        assert_eq!(
+            crate::drivers::sig_uuid(0x2ada).to_string(),
+            FITNESS_MACHINE_STATUS_UUID
         );
     }
 }
