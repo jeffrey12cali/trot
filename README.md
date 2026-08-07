@@ -157,10 +157,16 @@ token would be theatre. Trot assumes your user account is your trust boundary.
 
 ## Supported treadmills
 Trot reads treadmills over **Bluetooth Low Energy** — under-desk walking pads and
-full-size treadmills alike. Two ways in:
+full-size treadmills alike. Three ways in:
 
 - **LifeSpan\*** — LifeSpan consoles use a proprietary protocol, so Trot ships a
   **native adapter** for them (developed and tested against a LifeSpan walking pad).
+- **WalkingPad\* / KingSmith (WiLink)** — the legacy WalkingPad protocol spoken
+  by the A1, A1 Pro, C2, R1 Pro and P1 generation gets a **native adapter**
+  too, ported from the open-source reverse engineering (see
+  [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)) and tested against
+  published frame captures — not yet against real hardware, so reports welcome.
+  Newer WalkingPads that broadcast FTMS (e.g. the Z1) use the FTMS path below.
 - **Standard FTMS\*** — any treadmill that broadcasts the standard Bluetooth
   **Fitness Machine Service** (FTMS, `0x1826`). Models *documented* to broadcast
   FTMS include Horizon\* AT-series, Technogym MyRun\*, BowFlex\* T9, 3G Cardio\*,
@@ -201,8 +207,8 @@ on stop** (Ctrl-C or SIGTERM), so the belt's Bluetooth link isn't left open.
 ```
 Cargo.toml               # workspace
 crates/
-  trot-core/             # engine library: ble · drivers (lifespan · ftms) · telemetry
-                         # · db · state · api · config
+  trot-core/             # engine library: ble · drivers (lifespan · kingsmith_wilink
+                         # · ftms) · telemetry · db · state · api · config
   trot-daemon/           # the `trot` binary: `daemon` serves /api + /ws; the other
                          # subcommands (scan/pair/today/…) drive it over that API
 ```

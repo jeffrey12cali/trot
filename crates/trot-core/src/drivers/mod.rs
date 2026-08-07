@@ -17,6 +17,7 @@
 //! contributors lives in `docs/drivers/README.md`.
 
 pub mod ftms;
+pub mod kingsmith_wilink;
 pub mod lifespan;
 pub mod util;
 
@@ -35,6 +36,10 @@ use uuid::Uuid;
 ///   notify/write characteristic roles) and outranks FTMS because LifeSpan
 ///   consoles expose their native service alongside whatever else they
 ///   advertise, and the native protocol reports steps where FTMS cannot.
+/// * `KingSmithWiLink` matches strictly too (recognised or absent name AND
+///   the FE01-notify/FE02-write roles, with the known FTMS/app-cipher
+///   KingSmith models carved out by name) and outranks FTMS for the same
+///   reason: the native protocol reports steps.
 /// * `Ftms` requires the standard Treadmill Data characteristic.
 /// * `LifeSpanFallback` is the deliberate last resort: a device nobody else
 ///   claimed, whose `FFF1`/`FFF2` roles are exactly LifeSpan-shaped, is
@@ -46,6 +51,7 @@ use uuid::Uuid;
 /// your driver file.
 pub static DRIVERS: &[&dyn Driver] = &[
     &lifespan::LifeSpan,
+    &kingsmith_wilink::KingSmithWiLink,
     &ftms::Ftms,
     &lifespan::LifeSpanFallback,
 ];
@@ -239,15 +245,17 @@ mod tests {
         );
     }
 
-    /// The union of driver `matches()` must cover exactly what the old
-    /// hardcoded scan filter covered: LifeSpan/ESP32 names, service 0xFFF0,
-    /// FTMS 0x1826 — and nothing else.
+    /// The union of driver `matches()` must cover every supported device
+    /// family — LifeSpan/ESP32 names and service 0xFFF0, the KingSmith WiLink
+    /// names and service 0xFE00, FTMS 0x1826 — and nothing else.
     #[test]
     fn scan_matching_covers_the_known_devices() {
         assert!(any_match(&adv("LifeSpan-TM", &[])));
         assert!(any_match(&adv("ESP32-treadmill", &[])));
         assert!(any_match(&adv("", &[0xfff0])));
         assert!(any_match(&adv("", &[0x1826])));
+        assert!(any_match(&adv("WalkingPad A1", &[])));
+        assert!(any_match(&adv("", &[0xfe00])));
         assert!(!any_match(&adv("Some Headphones", &[0x180f])));
         assert!(!any_match(&adv("", &[])));
     }
@@ -319,6 +327,28 @@ mod tests {
         assert!(for_device(&anon, &gatt(&[(0x2a37, N)])).is_none());
     }
 
+    /// A named WalkingPad with the WiLink notify/write roles takes the native
+    /// driver — including over FTMS (some newer pads expose both, and only
+    /// the native protocol reports steps). The carved-out FTMS model with the
+    /// KingSmith name falls through to FTMS.
+    #[test]
+    fn a_named_walkingpad_takes_the_wilink_driver() {
+        let named = adv("WalkingPad A1", &[]);
+        assert_eq!(
+            for_device(&named, &gatt(&[(0xfe01, N), (0xfe02, W)])).map(|d| d.id()),
+            Some("kingsmith-wilink")
+        );
+        assert_eq!(
+            for_device(&named, &gatt(&[(0xfe01, N), (0xfe02, W), (0x2acd, N)])).map(|d| d.id()),
+            Some("kingsmith-wilink")
+        );
+        assert_eq!(
+            for_device(&adv("KS-HD-Z1D", &[]), &gatt(&[(0x2acd, N)])).map(|d| d.id()),
+            Some("ftms"),
+            "the FTMS WalkingPad Z1 must reach the FTMS driver, not WiLink"
+        );
+    }
+
     /// Registry order is load-bearing: strict drivers first, the permissive
     /// LifeSpan fallback dead last. If this test fails because you added a
     /// driver, add it BEFORE "lifespan-fallback" — anything after the
@@ -326,7 +356,10 @@ mod tests {
     #[test]
     fn registry_ids_are_unique_and_the_fallback_stays_last() {
         let ids = ids();
-        assert_eq!(ids, vec!["lifespan", "ftms", "lifespan-fallback"]);
+        assert_eq!(
+            ids,
+            vec!["lifespan", "kingsmith-wilink", "ftms", "lifespan-fallback"]
+        );
         assert_eq!(
             ids.last(),
             Some(&"lifespan-fallback"),
