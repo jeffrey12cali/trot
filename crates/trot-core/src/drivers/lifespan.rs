@@ -223,6 +223,21 @@ fn to_sample(r: &Readout, display_unit: &str) -> Sample {
 
 // ---- The driver -------------------------------------------------------------
 
+/// Does the advertised name look like a LifeSpan console?
+fn matches_name(adv: &Advertisement) -> bool {
+    ADV_NAME_PREFIXES
+        .iter()
+        .any(|pfx| adv.name.starts_with(pfx))
+}
+
+/// Does the GATT table have exactly the characteristic roles this driver
+/// uses — notify on FFF1, write on FFF2? Roles, not just UUIDs: Deerrun
+/// exposes the same two UUIDs with the roles swapped, and subscribing/writing
+/// at it with this protocol would at best fail and at worst mis-drive it.
+fn gatt_shape_is_lifespan(gatt: &BTreeSet<Characteristic>) -> bool {
+    super::util::has_notify(gatt, NOTIFY_CHAR_UUID) && super::util::has_write(gatt, WRITE_CHAR_UUID)
+}
+
 pub struct LifeSpan;
 
 #[async_trait]
@@ -232,22 +247,24 @@ impl Driver for LifeSpan {
     }
 
     fn matches(&self, adv: &Advertisement) -> bool {
-        ADV_NAME_PREFIXES
-            .iter()
-            .any(|pfx| adv.name.starts_with(pfx))
-            || adv.services.contains(&SERVICE_UUID)
+        // Scan-time stays permissive (properties aren't known yet): a likely
+        // name OR the service UUID is enough to list the device. supports()
+        // is where the strictness lives.
+        matches_name(adv) || adv.services.contains(&SERVICE_UUID)
     }
 
-    fn supports(&self, _adv: &Advertisement, gatt: &BTreeSet<Characteristic>) -> bool {
-        // NOTE: 0xFFF0/FFF1/FFF2 is a generic vendor-module layout that other
-        // treadmill protocols (Urevo, Deerrun, Zipro, …) also squat on — some
-        // with the notify/write roles swapped. Trot's pre-driver-system
-        // behaviour was to claim any FFF1+FFF2 device, so this keeps doing
-        // that; a driver for one of those protocols must outrank us in the
-        // registry and disambiguate on the advertised name and characteristic
-        // properties.
-        gatt.iter().any(|c| c.uuid == NOTIFY_CHAR_UUID)
-            && gatt.iter().any(|c| c.uuid == WRITE_CHAR_UUID)
+    fn supports(&self, adv: &Advertisement, gatt: &BTreeSet<Characteristic>) -> bool {
+        // Strict on purpose. 0xFFF0/FFF1/FFF2 is a generic vendor-module
+        // layout that at least five mutually incompatible treadmill protocols
+        // (LifeSpan, Urevo, Sperax, Deerrun, Zipro, Focus) squat on — and
+        // Deerrun swaps the notify/write roles relative to us. Claiming a
+        // device on UUIDs alone would write LifeSpan opcodes at hardware
+        // speaking a different protocol, so we require BOTH a recognised
+        // advertised name AND the exact characteristic roles we use. A device
+        // with the right roles but an unrecognised name is caught by
+        // [`LifeSpanFallback`] at the END of the registry, after every
+        // stricter driver has had its chance.
+        matches_name(adv) && gatt_shape_is_lifespan(gatt)
     }
 
     async fn run(&self, link: &Peripheral, host: &DriverHost<'_>, emit: Emit<'_>) -> Result<()> {
@@ -327,6 +344,51 @@ impl Driver for LifeSpan {
             }
             tokio::time::sleep(POLL_INTERVAL).await;
         }
+    }
+}
+
+// ---- The last-resort fallback -----------------------------------------------
+
+/// LifeSpan matching without the name requirement — registered LAST, and it
+/// must stay last.
+///
+/// Why it exists: [`LifeSpan::supports`] requires a recognised advertised
+/// name, but some consoles reach connect time with a name we've never seen
+/// (models outside the known prefixes, or a platform that simply doesn't
+/// surface the name after reconnect). Before matching became strict, Trot
+/// claimed any `FFF1`+`FFF2` device as LifeSpan — so a paired console that
+/// suddenly stopped matching after an upgrade would strand its user with no
+/// driver at all. This entry preserves those users: if **no other driver**
+/// wants the device and its characteristic roles are exactly LifeSpan-shaped
+/// (notify on FFF1, write on FFF2 — which already excludes role-swapped
+/// protocols like Deerrun), drive it as LifeSpan.
+///
+/// The residual risk is a same-shaped foreign protocol (e.g. Urevo) with an
+/// unrecognised name reaching the fallback and being polled with LifeSpan
+/// opcodes. That is exactly what happened before strict matching too — and
+/// the failure is benign: unanswered polls, dead-link detection, reconnect,
+/// eventually give-up. The fix for those devices is their own driver
+/// registered ABOVE this entry, at which point they never get here.
+pub struct LifeSpanFallback;
+
+#[async_trait]
+impl Driver for LifeSpanFallback {
+    fn id(&self) -> &'static str {
+        "lifespan-fallback"
+    }
+
+    fn matches(&self, _adv: &Advertisement) -> bool {
+        // Scan matching is already covered by LifeSpan's permissive matches();
+        // the fallback is a connect-time safety net, not a scan category.
+        false
+    }
+
+    fn supports(&self, _adv: &Advertisement, gatt: &BTreeSet<Characteristic>) -> bool {
+        gatt_shape_is_lifespan(gatt)
+    }
+
+    async fn run(&self, link: &Peripheral, host: &DriverHost<'_>, emit: Emit<'_>) -> Result<()> {
+        LifeSpan.run(link, host, emit).await
     }
 }
 
@@ -481,5 +543,106 @@ mod tests {
         assert!(approx(t.distance_mi.unwrap(), 2.87 / 1.609344));
         // And the same status byte produces the same name for unknown values.
         assert_eq!(status_name(0x7f), "UNKNOWN_0x7f");
+    }
+
+    // ---- supports(): strict vs fallback -------------------------------------
+
+    use btleplug::api::CharPropFlags;
+
+    fn adv(name: &str) -> Advertisement {
+        Advertisement {
+            name: name.into(),
+            services: vec![],
+        }
+    }
+
+    fn gatt(chars: &[(Uuid, CharPropFlags)]) -> BTreeSet<Characteristic> {
+        chars
+            .iter()
+            .map(|(uuid, properties)| Characteristic {
+                uuid: *uuid,
+                service_uuid: SERVICE_UUID,
+                properties: *properties,
+                descriptors: BTreeSet::new(),
+            })
+            .collect()
+    }
+
+    fn lifespan_shaped() -> BTreeSet<Characteristic> {
+        gatt(&[
+            (NOTIFY_CHAR_UUID, CharPropFlags::NOTIFY),
+            (WRITE_CHAR_UUID, CharPropFlags::WRITE),
+        ])
+    }
+
+    /// The Deerrun shape: same UUIDs as LifeSpan, notify/write roles swapped.
+    fn deerrun_shaped() -> BTreeSet<Characteristic> {
+        gatt(&[
+            (NOTIFY_CHAR_UUID, CharPropFlags::WRITE_WITHOUT_RESPONSE),
+            (WRITE_CHAR_UUID, CharPropFlags::NOTIFY),
+        ])
+    }
+
+    /// Strict supports(): a recognised name AND the exact roles, both
+    /// required. UUIDs without the right properties prove nothing — five
+    /// incompatible protocols share this UUID block.
+    #[test]
+    fn strict_supports_needs_name_and_roles() {
+        for name in ["LifeSpan-TM", "LifeSpan TR1200", "ESP32-treadmill"] {
+            assert!(LifeSpan.supports(&adv(name), &lifespan_shaped()), "{name}");
+        }
+        // Right roles, unrecognised name → not the strict driver's call.
+        assert!(!LifeSpan.supports(&adv(""), &lifespan_shaped()));
+        assert!(!LifeSpan.supports(&adv("Urevo E1L"), &lifespan_shaped()));
+        // Recognised name, wrong roles → refuse; the table isn't ours.
+        assert!(!LifeSpan.supports(&adv("LifeSpan-TM"), &deerrun_shaped()));
+        // Recognised name, UUIDs present but no properties at all → refuse.
+        assert!(!LifeSpan.supports(
+            &adv("LifeSpan-TM"),
+            &gatt(&[
+                (NOTIFY_CHAR_UUID, CharPropFlags::default()),
+                (WRITE_CHAR_UUID, CharPropFlags::default()),
+            ])
+        ));
+    }
+
+    /// The fallback ignores the name but still verifies roles — it exists to
+    /// keep unrecognised-name LifeSpan consoles connectable, not to claim
+    /// role-swapped foreign protocols.
+    #[test]
+    fn fallback_supports_roles_only() {
+        assert!(LifeSpanFallback.supports(&adv(""), &lifespan_shaped()));
+        assert!(LifeSpanFallback.supports(&adv("Mystery Pad 3000"), &lifespan_shaped()));
+        assert!(!LifeSpanFallback.supports(&adv(""), &deerrun_shaped()));
+        assert!(!LifeSpanFallback.supports(
+            &adv(""),
+            &gatt(&[(NOTIFY_CHAR_UUID, CharPropFlags::NOTIFY)])
+        ));
+    }
+
+    /// Write-without-response also counts as writable — some vendor modules
+    /// only expose that flavour on FFF2.
+    #[test]
+    fn write_without_response_satisfies_the_write_role() {
+        let table = gatt(&[
+            (NOTIFY_CHAR_UUID, CharPropFlags::NOTIFY),
+            (WRITE_CHAR_UUID, CharPropFlags::WRITE_WITHOUT_RESPONSE),
+        ]);
+        assert!(LifeSpan.supports(&adv("LifeSpan-TM"), &table));
+        assert!(LifeSpanFallback.supports(&adv(""), &table));
+    }
+
+    /// Scan-time matching stays permissive (no properties exist yet): name
+    /// prefix or service UUID lists the device; the fallback adds no scan
+    /// category of its own.
+    #[test]
+    fn scan_matching_is_permissive_and_the_fallback_adds_none() {
+        assert!(LifeSpan.matches(&adv("LifeSpan-TM")));
+        assert!(LifeSpan.matches(&Advertisement {
+            name: String::new(),
+            services: vec![SERVICE_UUID],
+        }));
+        assert!(!LifeSpan.matches(&adv("Some Headphones")));
+        assert!(!LifeSpanFallback.matches(&adv("LifeSpan-TM")));
     }
 }
