@@ -106,11 +106,13 @@ use, so your driver states intent and the timing lore stays in one place.
    between commands — WiLink drops writes closer than 690 ms
    (`util::CommandSpacer`).
 3. **Init handshake, then push.** The device is silent until you write one or
-   more magic frames (Urevo needs a single wake write; Sperax, PitPat/Deerrun
-   and Zipro need 3–11 ordered init writes, some with mandatory delays between
-   them). Declare the sequence as `util::InitStep`s and run it once at the top
-   of `run()` with `util::run_init_sequence`, then fall into a
-   subscribe-and-push loop.
+   more magic frames (Urevo needs a single wake write — see
+   `drivers/urevo.rs`, the in-tree example of this shape; Sperax
+   (`drivers/sperax.rs`) adds a repeated hello frame and a recurring poll;
+   PitPat/Deerrun and Zipro need 3–11 ordered init writes, some with
+   mandatory delays between them). Declare the sequence as `util::InitStep`s
+   and run it once at the top of `run()` with `util::run_init_sequence`, then
+   fall into a subscribe-and-push loop.
 4. **Obfuscated transport.** The nastiest real-world case: a text protocol,
    base64'd, run through a substitution cipher, split into 16-byte GATT chunks,
    terminated by a marker byte (some KingSmith generations). Your `run()` loop
@@ -133,7 +135,16 @@ Five hard-won warnings:
   LifeSpan driver requires both, and why a role-verified-but-unnamed
   `FFF1`/`FFF2` device is only claimed by the deliberate `lifespan-fallback`
   entry at the very end of the registry, after every stricter driver has
-  passed on it.
+  passed on it. Three in-tree drivers now share that exact block — LifeSpan,
+  Urevo (`drivers/urevo.rs`) and Sperax (`drivers/sperax.rs`) — kept apart
+  purely by their advertised-name gates; `drivers/mod.rs` has a test
+  adjudicating every combination, and your driver joins it. Names can be
+  treacherous on their own, too: Sperax ships two revisions distinguished
+  only by a hyphen (`SPERAX_RM01` speaks the proprietary protocol,
+  `SPERAX_RM-01` speaks FTMS), and only one Urevo model (`URTM041`) is
+  verified to speak Urevo's proprietary protocol while its siblings
+  (`URTM024`) are plain FTMS — pin both directions of any such split with
+  tests.
 - **Firmware is fragile.** Cheap treadmill firmware silently drops notification
   subscriptions that arrive within a few tens of milliseconds of each other. If
   you subscribe to more than one characteristic and one mysteriously never
@@ -173,8 +184,11 @@ already. Check licenses before you take more than knowledge:
 - **DorianRudolph/QWalkingPad** (GPL-3.0) — a further independent KingSmith
   WiLink implementation, useful as a cross-check.
 - **ph4-walkingpad** and **blak3r/treadspan** (both MIT) — clean references
-  with raw captures for KingSmith and LifeSpan respectively. Published captures
-  make excellent test fixtures even for hardware you don't own.
+  with raw captures for KingSmith, and for LifeSpan, Urevo and Sperax,
+  respectively. Published captures make excellent test fixtures even for
+  hardware you don't own — and are worth re-verifying: the Urevo driver's
+  checksum rule and distance unit both came from re-analysing treadspan's
+  raw capture log, which contradicted its own code comments.
 - Anything **without a license file is not usable** — don't copy from it, even
   a little. (This is why Trot's FTMS parser is a clean-room implementation from
   the Bluetooth SIG spec.)
