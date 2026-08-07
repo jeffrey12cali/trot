@@ -12,9 +12,7 @@
 //!   test fixtures. <https://github.com/ph4r05/ph4-walkingpad>
 //! * **cagnulein/qdomyos-zwift** (GPL-3.0) —
 //!   `src/devices/kingsmithr1protreadmill/kingsmithr1protreadmill.cpp`: the
-//!   init handshake including the two `F7 A5 61 …` magic variants, the
-//!   model-name routing (name `RE`/`KS-S1` selects the newer magic), the
-//!   20-byte status-frame length requirement, and the advertised-name list
+//!   20-byte status-frame length requirement and the advertised-name list
 //!   with its `KS-HD-Z1D` FTMS carve-out (`src/devices/bluetooth.cpp`).
 //!   <https://github.com/cagnulein/qdomyos-zwift>
 //! * **DorianRudolph/QWalkingPad** (GPL-3.0, © 2021 Dorian Rudolph) —
@@ -31,11 +29,10 @@
 //!   apart (ph4-walkingpad's measured `minimal_cmd_space = 0.69 s`), so every
 //!   write — init frames included — is paced by [`util::CommandSpacer`]-style
 //!   gaps.
-//! * qdomyos-zwift always runs a 5-frame init handshake before polling.
-//!   ph4-walkingpad and QWalkingPad work without it on the models their
-//!   authors own, so it is probably only *required* on some models — but it is
-//!   field-proven harmless across the family (qdomyos drives A1 Pro, C2 and
-//!   R1 Pro users through it), so we always send it.
+//! * qdomyos-zwift runs a 5-frame init handshake before polling, three frames
+//!   of which are writes nobody has documented. Trot sends only the two that
+//!   are provably queries — see the note by `BODY_PARAMS_QUERY`. ph4-walkingpad
+//!   and QWalkingPad both read status without any of the three.
 //!
 //! Status frame format (20 bytes, confirmed on real captures in
 //! ph4-walkingpad's README — all multi-byte integers **big-endian**):
@@ -143,19 +140,26 @@ const MAX_DEAD_POLLS: u32 = 15;
 /// Body of the status query: `F7 A2 00 00 A2 FD` — ph4's `ask_stats`,
 /// QWalkingPad's `query()`, qdomyos' `noOpData`, byte-identical in all three.
 pub const BODY_STATUS_QUERY: &[u8] = &[MSG_STATUS, 0x00, 0x00];
-/// Init magic for the classic WiLink generation (qdomyos `initData1`).
-/// The payload is opaque — reproduced verbatim — but it checksums like every
-/// other frame, so [`build_frame`] regenerates it from the body.
-pub const BODY_MAGIC_CLASSIC: &[u8] = &[0xA5, 0x61, 0x01, 0x6A, 0x23, 0x1D, 0xBE];
-/// Init magic for the newer "RE" generation (qdomyos `initData1b`, selected
-/// for devices advertising exactly `RE` or `KS-S1`).
-pub const BODY_MAGIC_RE: &[u8] = &[0xA5, 0x61, 0x2B, 0xE9, 0x19, 0xC7, 0xD2];
-/// Params query (qdomyos `initData3`, QWalkingPad `queryParams()`).
+/// Params query: `F7 A6 00 …` — QWalkingPad's `queryParams()`, whose `0xA6`
+/// reply it parses as the pad's stored preferences.
+///
+/// Key `0` with an empty payload is a *read*. Keys ≥ 1 in the same `A6` family
+/// **set** preferences (max speed, child lock, units), so only key 0 belongs in
+/// an observe-only driver — the same subtype-is-the-verb pattern as `A2`.
 pub const BODY_PARAMS_QUERY: &[u8] = &[0xA6, 0x00, 0x00, 0x00, 0x00, 0x00];
-/// Opaque init frame (qdomyos `initData4`); meaning unknown, sent verbatim.
-pub const BODY_INIT_B1: &[u8] = &[0xB1, 0x05, 0x07, 0x15, 0x16, 0x08, 0x18];
-/// Opaque init frame (qdomyos `initData5`); meaning unknown, sent verbatim.
-pub const BODY_INIT_B3: &[u8] = &[0xB3, 0x02, 0x1D, 0x00];
+
+// DELIBERATELY ABSENT: qdomyos-zwift's `initData1`/`1b` (`F7 A5 61 …`),
+// `initData4` (`F7 B1 …`) and `initData5` (`F7 B3 …`).
+//
+// Trot only writes frames it can prove are reads. Those three are writes of
+// unknown effect: `B1`/`B3` appear in no public source but qdomyos, which sends
+// them verbatim and uncommented, and `A5` subtype `61` is undocumented anywhere
+// (ph4's `A5` frames use subtype `60`). ph4-walkingpad and QWalkingPad both
+// read status perfectly well without any of them, which is the evidence that
+// they are not required to observe a pad.
+//
+// If a model someday won't answer without one, reopen this with a capture
+// showing what the frame actually does — not with "qdomyos sends it".
 
 /// `F7 <body…> <sum(body) % 256> FD`.
 pub fn build_frame(body: &[u8]) -> Vec<u8> {
@@ -167,42 +171,18 @@ pub fn build_frame(body: &[u8]) -> Vec<u8> {
     frame
 }
 
-/// Which `F7 A5 61 …` init magic a device wants. qdomyos-zwift keys this off
-/// the advertised name: exactly `RE` or `KS-S1` gets the newer variant,
-/// everything else the classic one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InitVariant {
-    Classic,
-    Re,
-}
-
-pub fn init_variant(name: &str) -> InitVariant {
-    let name = name.trim();
-    if name.eq_ignore_ascii_case("RE") || name.eq_ignore_ascii_case("KS-S1") {
-        InitVariant::Re
-    } else {
-        InitVariant::Classic
-    }
-}
-
-/// The 5-frame init handshake qdomyos-zwift runs before polling, spaced by
-/// the same ≥690 ms gap as every other write (the delay after the last step
-/// doubles as the gap before the first poll).
-pub fn init_steps(variant: InitVariant) -> Vec<InitStep> {
-    let magic = match variant {
-        InitVariant::Classic => BODY_MAGIC_CLASSIC,
-        InitVariant::Re => BODY_MAGIC_RE,
-    };
-    [
-        magic,
-        BODY_STATUS_QUERY,
-        BODY_PARAMS_QUERY,
-        BODY_INIT_B1,
-        BODY_INIT_B3,
-    ]
-    .iter()
-    .map(|body| InitStep::write(WRITE_CHAR_UUID, build_frame(body)).then_wait_ms(WRITE_MIN_GAP_MS))
-    .collect()
+/// The opening queries, spaced by the same ≥690 ms gap as every other write
+/// (the delay after the last step doubles as the gap before the first poll).
+///
+/// Both frames are reads. qdomyos-zwift sends three further frames here whose
+/// effect nobody has documented; see the note above for why we don't.
+pub fn init_steps() -> Vec<InitStep> {
+    [BODY_STATUS_QUERY, BODY_PARAMS_QUERY]
+        .iter()
+        .map(|body| {
+            InitStep::write(WRITE_CHAR_UUID, build_frame(body)).then_wait_ms(WRITE_MIN_GAP_MS)
+        })
+        .collect()
 }
 
 // ---- Status-frame parsing ---------------------------------------------------
@@ -398,17 +378,7 @@ impl Driver for KingSmithWiLink {
         link.subscribe(&notify_char).await?;
         let mut notifications = link.notifications().await?;
 
-        // Pick the init magic the way qdomyos-zwift does: from the device
-        // name. If the platform won't give us one, Classic is the variant for
-        // everything except two known models.
-        let name = link
-            .properties()
-            .await
-            .ok()
-            .flatten()
-            .and_then(|p| p.local_name)
-            .unwrap_or_default();
-        run_init_sequence(link, &init_steps(init_variant(&name))).await?;
+        run_init_sequence(link, &init_steps()).await?;
 
         let poll = build_frame(BODY_STATUS_QUERY);
         let mut spacer = CommandSpacer::new(WRITE_MIN_GAP);
@@ -508,35 +478,35 @@ mod tests {
         );
     }
 
-    /// The two init magics are opaque payloads, but they still checksum like
-    /// every other frame — the builder must regenerate them byte-identically
-    /// from qdomyos' `initData1`/`initData1b`.
+    /// Every byte this driver writes must be a read. Pinning the whole init
+    /// sequence — not just its individual frames — is what makes an added
+    /// write show up as a failing test rather than as silent new traffic.
     #[test]
-    fn init_magic_frames_match_qdomyos_verbatim() {
+    fn the_driver_only_ever_writes_queries() {
+        let frames: Vec<Vec<u8>> = init_steps().iter().map(|s| s.payload.clone()).collect();
         assert_eq!(
-            build_frame(BODY_MAGIC_CLASSIC),
-            hx("f7 a5 61 01 6a 23 1d be 6f fd")
+            frames,
+            vec![hx("f7 a2 00 00 a2 fd"), hx("f7 a6 00 00 00 00 00 a6 fd")],
+            "init must be the status query and the params query, nothing else"
         );
-        assert_eq!(
-            build_frame(BODY_MAGIC_RE),
-            hx("f7 a5 61 2b e9 19 c7 d2 cc fd")
-        );
-        assert_eq!(
-            build_frame(BODY_INIT_B1),
-            hx("f7 b1 05 07 15 16 08 18 08 fd")
-        );
-        assert_eq!(build_frame(BODY_INIT_B3), hx("f7 b3 02 1d 00 d2 fd"));
-    }
 
-    #[test]
-    fn init_variant_is_selected_by_exact_name_like_qdomyos() {
-        assert_eq!(init_variant("RE"), InitVariant::Re);
-        assert_eq!(init_variant("re"), InitVariant::Re);
-        assert_eq!(init_variant(" KS-S1 "), InitVariant::Re);
-        // Prefix is NOT enough — qdomyos compares equality.
-        assert_eq!(init_variant("REDMI Band"), InitVariant::Classic);
-        assert_eq!(init_variant("WalkingPad A1"), InitVariant::Classic);
-        assert_eq!(init_variant(""), InitVariant::Classic);
+        // The poll loop's only frame, and the subtype that makes it a read.
+        assert_eq!(build_frame(BODY_STATUS_QUERY), hx("f7 a2 00 00 a2 fd"));
+
+        // `A2` carries both reads and commands; the subtype is the verb.
+        // Subtype 00 queries, 01 sets speed, 02 sets mode, 04 starts the belt.
+        // Nothing we send may use a non-zero subtype.
+        for frame in frames
+            .iter()
+            .chain(std::iter::once(&build_frame(BODY_STATUS_QUERY)))
+        {
+            if frame[1] == MSG_STATUS {
+                assert_eq!(
+                    frame[2], 0x00,
+                    "A2 subtype must be 00 (query), got {frame:02x?}"
+                );
+            }
+        }
     }
 
     // ---- Status parsing: real captured fixtures ------------------------------
@@ -879,28 +849,26 @@ mod tests {
         }
     }
 
-    /// The full classic handshake, on the virtual clock: five writes to FE02,
-    /// byte-identical to qdomyos' frames, each ≥690 ms after the previous —
-    /// the pad drops faster writes on the floor.
+    /// The handshake on the virtual clock: exactly two writes to FE02, both
+    /// queries, each ≥690 ms after the previous — the pad drops faster writes
+    /// on the floor. The count is part of the assertion: qdomyos-zwift sends
+    /// five here, and the three we leave out are undocumented writes that an
+    /// observe-only driver has no business making.
     #[tokio::test(start_paused = true)]
-    async fn init_sequence_writes_the_qdomyos_frames_with_wilink_spacing() {
+    async fn init_sequence_writes_only_the_two_queries_with_wilink_spacing() {
         let link = MockLink::default();
         let start = Instant::now();
-        run_init_sequence(&link, &init_steps(InitVariant::Classic))
-            .await
-            .unwrap();
+        run_init_sequence(&link, &init_steps()).await.unwrap();
         // The trailing delay also runs — it is the gap before the first poll.
-        assert_eq!(Instant::now() - start, Duration::from_millis(5 * 690));
+        assert_eq!(Instant::now() - start, Duration::from_millis(2 * 690));
 
         let writes = link.writes.lock().unwrap().clone();
-        let expected = [
-            hx("f7 a5 61 01 6a 23 1d be 6f fd"),
-            hx("f7 a2 00 00 a2 fd"),
-            hx("f7 a6 00 00 00 00 00 a6 fd"),
-            hx("f7 b1 05 07 15 16 08 18 08 fd"),
-            hx("f7 b3 02 1d 00 d2 fd"),
-        ];
-        assert_eq!(writes.len(), expected.len());
+        let expected = [hx("f7 a2 00 00 a2 fd"), hx("f7 a6 00 00 00 00 00 a6 fd")];
+        assert_eq!(
+            writes.len(),
+            expected.len(),
+            "init must write exactly the two query frames"
+        );
         for (i, ((uuid, payload, at), want)) in writes.iter().zip(&expected).enumerate() {
             assert_eq!(*uuid, WRITE_CHAR_UUID, "frame {i}");
             assert_eq!(payload, want, "frame {i}");
@@ -910,18 +878,6 @@ mod tests {
                 "frame {i} must wait out the 690 ms gap"
             );
         }
-    }
-
-    /// The RE variant swaps only the magic frame.
-    #[tokio::test(start_paused = true)]
-    async fn re_variant_swaps_only_the_magic_frame() {
-        let link = MockLink::default();
-        run_init_sequence(&link, &init_steps(InitVariant::Re))
-            .await
-            .unwrap();
-        let writes = link.writes.lock().unwrap().clone();
-        assert_eq!(writes[0].1, hx("f7 a5 61 2b e9 19 c7 d2 cc fd"));
-        assert_eq!(writes[1].1, hx("f7 a2 00 00 a2 fd"));
     }
 
     /// The poll-loop spacing contract on the virtual clock: consecutive
