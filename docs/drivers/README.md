@@ -126,13 +126,24 @@ already. Check licenses before you take more than knowledge:
 
 - **qdomyos-zwift** is GPL-3.0 — license-compatible with Trot, so its dozens of
   treadmill implementations are directly reusable (port the logic, keep the
-  attribution, note it in `THIRD-PARTY-NOTICES.md`).
+  attribution, note it in `THIRD-PARTY-NOTICES.md`). Its device matcher
+  (`src/devices/bluetooth.cpp`) is also the best available list of real-world
+  advertised names *and of the carve-outs* — devices whose name looks like one
+  protocol but that actually speak another (`KS-HD-Z1D` advertises a KingSmith
+  name but is FTMS hardware). Port the carve-outs along with the prefixes.
 - **peteh/pacekeeper** (GPL-3.0) — PitPat/Deerrun, including the step decode.
+- **DorianRudolph/QWalkingPad** (GPL-3.0) — a further independent KingSmith
+  WiLink implementation, useful as a cross-check.
 - **ph4-walkingpad** and **blak3r/treadspan** (both MIT) — clean references
-  with raw captures for KingSmith and LifeSpan respectively.
+  with raw captures for KingSmith and LifeSpan respectively. Published captures
+  make excellent test fixtures even for hardware you don't own.
 - Anything **without a license file is not usable** — don't copy from it, even
   a little. (This is why Trot's FTMS parser is a clean-room implementation from
   the Bluetooth SIG spec.)
+
+When implementations disagree on a field (one reads a u16 where another reads
+a u24), prefer the one whose raw captures you can re-verify, and say in your
+driver's comments which source established which field.
 
 When you reuse decoded protocol knowledge, say so in your driver's module
 comment the way `lifespan.rs` credits treadspan.
@@ -182,7 +193,11 @@ pub trait Driver: Send + Sync {
   delta) on every update. Return `Err` only when the link is dead or useless;
   the engine then reconnects with backoff. Don't watch for shutdown, don't
   disconnect, don't sleep-retry a dead link yourself — cancellation and
-  reconnection are the engine's job.
+  reconnection are the engine's job. `run()` doesn't receive the
+  advertisement; if your protocol varies by model (KingSmith WiLink picks
+  between two init magics by device name), read it back with
+  `link.properties().await` and fall back to the common variant when the
+  platform doesn't surface a name.
 
 ### The `Sample`
 
@@ -287,7 +302,14 @@ link.write(&control_point, &command, WriteType::WithResponse).await?;
 **Frame reassembly + codec seam** (shape 5) — notifications are transport
 chunks, not messages. Feed every chunk to the assembler; it yields each
 complete frame exactly once (terminator stripped), no matter how the radio
-split or coalesced them. Put your transport decode behind `TransportCodec` —
+split or coalesced them. One caveat: reassembling on a terminator byte only
+works when that byte **cannot occur inside the payload** — true for text and
+base64-encoded transports, false for raw binary protocols (WiLink frames end
+in `0xFD`, but `0xFD` is also a perfectly possible counter or checksum byte).
+For binary protocols where every known implementation treats one notification
+as one message, do the same: validate each notification whole (length, prefix,
+checksum) instead of splitting the byte stream. Put your transport decode
+behind `TransportCodec` —
 `IdentityCodec` for plain protocols, your cipher for the obfuscated ones —
 and the layers stay separable and testable:
 
