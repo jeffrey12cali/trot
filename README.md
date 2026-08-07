@@ -201,7 +201,8 @@ on stop** (Ctrl-C or SIGTERM), so the belt's Bluetooth link isn't left open.
 ```
 Cargo.toml               # workspace
 crates/
-  trot-core/             # engine library: ble · protocol · ftms · db · state · api · config
+  trot-core/             # engine library: ble · drivers (lifespan · ftms) · telemetry
+                         # · db · state · api · config
   trot-daemon/           # the `trot` binary: `daemon` serves /api + /ws; the other
                          # subcommands (scan/pair/today/…) drive it over that API
 ```
@@ -230,27 +231,32 @@ trusting, and they're the well-covered ones:
 
 | Area | Lines |
 |---|---|
-| `protocol.rs` — LifeSpan frame decoding | ~99% |
-| `ftms.rs` — Bluetooth FTMS parsing | ~96% |
+| `drivers/lifespan.rs` — LifeSpan frame decoding + driver | ~99% (decoding) |
+| `drivers/ftms.rs` — Bluetooth FTMS parsing + driver | ~96% (parsing) |
+| `telemetry.rs` — presentation shape, unit conversions | ~95% |
 | `db.rs` — storage, de-glitching, rollups | ~82% |
 | `app.rs` — shared state, today-cache | ~70% |
 | `api.rs` — routes + security guard | ~33% |
-| `ble.rs` — the device worker | ~21% |
+| `ble.rs` — the BLE engine/harness | ~21% |
 | `main.rs` — CLI | 0% |
 | **total** | **~58%** |
 
-`ble.rs` and the CLI are low because they want a real treadmill and a real
-terminal; the security-critical half of `api.rs` (the request guard, the bounds
-checks) is covered by [`tests/api_guard.rs`](crates/trot-core/tests/api_guard.rs),
+The drivers' `run()` loops and the CLI are low because they want a real
+treadmill and a real terminal; the security-critical half of `api.rs` (the
+request guard, the bounds checks) is covered by
+[`tests/api_guard.rs`](crates/trot-core/tests/api_guard.rs),
 which drives the actual router over HTTP.
 
 ## Contributing
 
 The most useful contribution is a **treadmill report**: if Trot can't read yours,
 a `trot scan --all` listing tells us more than anything else — only LifeSpan is
-tested here on real hardware. See [CONTRIBUTING.md](CONTRIBUTING.md) for how to
-build and what CI expects, and [SECURITY.md](SECURITY.md) before reporting
-anything security-related (please don't open a public issue for that).
+tested here on real hardware. Device support is a modular driver system: adding
+a treadmill is one self-contained file plus one registration line, and
+[docs/drivers/README.md](docs/drivers/README.md) teaches the whole process.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how to build and what CI expects,
+and [SECURITY.md](SECURITY.md) before reporting anything security-related
+(please don't open a public issue for that).
 
 ## Design rules
 - Presentation-agnostic. Local-first. Privacy-respecting (no cloud required).

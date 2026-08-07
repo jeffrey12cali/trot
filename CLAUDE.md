@@ -2,7 +2,8 @@
 
 **TROT** — the open-source (GPLv3) Rust engine + CLI for under-desk treadmills.
 This repo is the **source of truth** for how the tool behaves. Crates:
-`trot-core` (engine library: ble · protocol · ftms · db · state · api · config)
+`trot-core` (engine library: ble · drivers [one file per treadmill protocol,
+see docs/drivers/README.md] · telemetry · db · state · api · config)
 and `trot-daemon` (the `trot` binary: `daemon`, `scan`, `pair`, `devices`,
 `unpair`, `status`, `today`, `log`).
 
