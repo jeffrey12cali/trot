@@ -109,10 +109,17 @@ use, so your driver states intent and the timing lore stays in one place.
    more magic frames (Urevo needs a single wake write — see
    `drivers/urevo.rs`, the in-tree example of this shape; Sperax
    (`drivers/sperax.rs`) adds a repeated hello frame and a recurring poll;
-   PitPat/Deerrun and Zipro need 3–11 ordered init writes, some with
-   mandatory delays between them). Declare the sequence as `util::InitStep`s
-   and run it once at the top of `run()` with `util::run_init_sequence`, then
-   fall into a subscribe-and-push loop.
+   Zipro needs 3–11 ordered init writes, some with mandatory delays between
+   them). Declare the sequence as `util::InitStep`s and run it once at the
+   top of `run()` with `util::run_init_sequence`, then fall into a
+   subscribe-and-push loop. Beware upstream init sequences that are longer
+   than the protocol needs: qdomyos-zwift "initialises" PitPat pads with
+   four frames of which one is a query, one an unlock, one nobody has
+   characterised and one *starts the belt* — while the hardware
+   demonstrably streams after a bare subscribe (`drivers/pitpat.rs` sends
+   only the query, and only pacekeeper's zero-write capture proved that
+   safe). Characterise each init frame before you port it; drop what you
+   can't.
 4. **Obfuscated transport.** The nastiest real-world case: a text protocol,
    base64'd, run through a substitution cipher, split into 16-byte GATT chunks,
    terminated by a marker byte (some KingSmith generations). Your `run()` loop
@@ -135,10 +142,16 @@ Five hard-won warnings:
   LifeSpan driver requires both, and why a role-verified-but-unnamed
   `FFF1`/`FFF2` device is only claimed by the deliberate `lifespan-fallback`
   entry at the very end of the registry, after every stricter driver has
-  passed on it. Three in-tree drivers now share that exact block — LifeSpan,
-  Urevo (`drivers/urevo.rs`) and Sperax (`drivers/sperax.rs`) — kept apart
-  purely by their advertised-name gates; `drivers/mod.rs` has a test
-  adjudicating every combination, and your driver joins it. Names can be
+  passed on it. Four in-tree drivers now share that exact block — LifeSpan,
+  Urevo (`drivers/urevo.rs`) and Sperax (`drivers/sperax.rs`) on the
+  notify-FFF1/write-FFF2 arrangement, kept apart purely by their
+  advertised-name gates, plus PitPat (`drivers/pitpat.rs`), whose Deerrun
+  transport variant is the *swapped* arrangement the role checks exist for;
+  `drivers/mod.rs` has a test adjudicating every combination, and your
+  driver joins it. A protocol can also ship behind **several** service
+  layouts at once — the PitPat family uses at least four — in which case
+  `supports()` probes them in order of how well each is verified rather
+  than assuming one (see `pitpat.rs`'s `select_transport`). Names can be
   treacherous on their own, too: Sperax ships two revisions distinguished
   only by a hyphen (`SPERAX_RM01` speaks the proprietary protocol,
   `SPERAX_RM-01` speaks FTMS), and only one Urevo model (`URTM041`) is
@@ -180,7 +193,9 @@ already. Check licenses before you take more than knowledge:
   advertised names *and of the carve-outs* — devices whose name looks like one
   protocol but that actually speak another (`KS-HD-Z1D` advertises a KingSmith
   name but is FTMS hardware). Port the carve-outs along with the prefixes.
-- **peteh/pacekeeper** (GPL-3.0) — PitPat/Deerrun, including the step decode.
+- **peteh/pacekeeper** (GPL-3.0) — PitPat/Deerrun, including the step decode
+  (now ported — `drivers/pitpat.rs` — together with the checksum rule and
+  transport envelope from **azmke/pitpat-treadmill-control**, MIT).
 - **DorianRudolph/QWalkingPad** (GPL-3.0) — a further independent KingSmith
   WiLink implementation, useful as a cross-check.
 - **ph4-walkingpad** and **blak3r/treadspan** (both MIT) — clean references

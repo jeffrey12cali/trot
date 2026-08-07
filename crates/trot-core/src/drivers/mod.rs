@@ -19,6 +19,7 @@
 pub mod ftms;
 pub mod kingsmith_wilink;
 pub mod lifespan;
+pub mod pitpat;
 pub mod sperax;
 pub mod urevo;
 pub mod util;
@@ -49,6 +50,11 @@ use uuid::Uuid;
 ///   native one reports steps (Sperax's hyphen-less models don't speak FTMS
 ///   at all) — and they must come before the LifeSpan fallback or it would
 ///   claim their FFF1/FFF2 shape first.
+/// * `PitPat` (the PitPat/Deerrun/SupeRun OEM family) requires a recognised
+///   `PITPAT-T*` name (or, nameless, its distinctive FBA0 layout) plus one
+///   of its four verified transport layouts — including the Deerrun variant
+///   on 0xFFF0 with the notify/write roles SWAPPED relative to LifeSpan,
+///   which the role checks keep out of every LifeSpan entry.
 /// * `Ftms` requires the standard Treadmill Data characteristic.
 /// * `LifeSpanFallback` is the deliberate last resort: a device nobody else
 ///   claimed, whose `FFF1`/`FFF2` roles are exactly LifeSpan-shaped, is
@@ -63,6 +69,7 @@ pub static DRIVERS: &[&dyn Driver] = &[
     &kingsmith_wilink::KingSmithWiLink,
     &urevo::Urevo,
     &sperax::Sperax,
+    &pitpat::PitPat,
     &ftms::Ftms,
     &lifespan::LifeSpanFallback,
 ];
@@ -278,6 +285,13 @@ mod tests {
         assert!(any_match(&adv("URTM041", &[])));
         assert!(any_match(&adv("SPERAX_RM01", &[])));
         assert!(any_match(&adv("SPERAX_RM-02", &[])));
+        // The PitPat/Deerrun/SupeRun family: by name or its FBA0 service.
+        assert!(any_match(&adv("PitPat-T01", &[])));
+        assert!(any_match(&adv("", &[0xfba0])));
+        assert!(
+            !any_match(&adv("PITPAT-S1", &[])),
+            "PITPAT-S is the PitPat bike — Trot reads treadmills only"
+        );
         assert!(!any_match(&adv("Some Headphones", &[0x180f])));
         assert!(!any_match(&adv("", &[])));
     }
@@ -403,6 +417,66 @@ mod tests {
         );
     }
 
+    /// The PitPat/Deerrun/SupeRun family, adjudicated across its four
+    /// transport layouts. The Deerrun variant is the case the 0xFFF0 role
+    /// checks were built for: LifeSpan's UUIDs with notify/write SWAPPED.
+    /// A named PitPat on that shape must land on the PitPat driver — and on
+    /// no LifeSpan entry — while the reverse arrangement (real LifeSpan
+    /// roles) must never land on PitPat, whatever the name says.
+    #[test]
+    fn the_pitpat_family_lands_on_pitpat_across_all_transports() {
+        const WWR: CharPropFlags = CharPropFlags::WRITE_WITHOUT_RESPONSE;
+        let named = adv("PitPat-T01", &[]);
+
+        // Every transport layout, by name.
+        for (label, shape) in [
+            ("FBA0", gatt(&[(0xfba1, W), (0xfba2, N)])),
+            ("FFFF", gatt(&[(0xff01, W), (0xff02, N)])),
+            ("FFF0 swapped", gatt(&[(0xfff1, WWR), (0xfff2, N)])),
+            ("1910", gatt(&[(0x2b11, W), (0x2b10, N)])),
+        ] {
+            assert_eq!(
+                for_device(&named, &shape).map(|d| d.id()),
+                Some("pitpat"),
+                "{label}"
+            );
+        }
+
+        // Nameless: only the distinctive FBA0 layout is claimed. A nameless
+        // Deerrun-shaped device stays unclaimed (pinned again in
+        // `wrong_roles_or_partial_tables_get_no_driver`) — 0xFFF0 is the
+        // contested block and nobody claims it without evidence.
+        let anon = adv("", &[]);
+        assert_eq!(
+            for_device(&anon, &gatt(&[(0xfba1, W), (0xfba2, N)])).map(|d| d.id()),
+            Some("pitpat")
+        );
+        assert!(for_device(&anon, &gatt(&[(0xfff1, WWR), (0xfff2, N)])).is_none());
+        assert!(for_device(&anon, &gatt(&[(0xff01, W), (0xff02, N)])).is_none());
+        assert!(for_device(&anon, &gatt(&[(0x2b11, W), (0x2b10, N)])).is_none());
+
+        // Writing PitPat frames at a LifeSpan is the other half of the
+        // failure: real LifeSpan roles (notify FFF1 / write FFF2) never
+        // reach the PitPat driver — a LifeSpan console stays with LifeSpan,
+        // and a PitPat-named device on that shape falls through to the
+        // deliberate fallback (an unknown table, treated exactly like any
+        // other unrecognised-name FFF1/FFF2 device — the benign
+        // unanswered-polls failure, not a mis-decode).
+        let lifespan_shape = gatt(&[(0xfff1, N), (0xfff2, W)]);
+        assert_eq!(
+            for_device(&adv("LifeSpan-TM", &[]), &lifespan_shape).map(|d| d.id()),
+            Some("lifespan")
+        );
+        assert_eq!(
+            for_device(&named, &lifespan_shape).map(|d| d.id()),
+            Some("lifespan-fallback")
+        );
+
+        // The PitPat BIKE (PITPAT-S) must reach no driver even on a
+        // treadmill-shaped table — Trot reads treadmills only.
+        assert!(for_device(&adv("PITPAT-S1", &[]), &gatt(&[(0xfba1, W), (0xfba2, N)])).is_none());
+    }
+
     /// A named WalkingPad with the WiLink notify/write roles takes the native
     /// driver — including over FTMS (some newer pads expose both, and only
     /// the native protocol reports steps). The carved-out FTMS model with the
@@ -489,6 +563,7 @@ mod tests {
                 "kingsmith-wilink",
                 "urevo",
                 "sperax",
+                "pitpat",
                 "ftms",
                 "lifespan-fallback"
             ]
