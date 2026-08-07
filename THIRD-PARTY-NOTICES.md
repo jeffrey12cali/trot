@@ -87,9 +87,7 @@ Trot's FTMS driver additionally ports from qdomyos-zwift: the verified
 advertised-name list of real-world FTMS walking pads (Urevo, Merach, Sunny
 Health & Fitness, CitySports, WellFit, Mobvoi, Sportstech, YPOO, TheRun,
 Anplus, Focus, KingSmith, Sperax — `src/devices/bluetooth.cpp`, including the
-`SPERAX_RM-01`-is-FTMS / `SPERAX_RM01`-is-proprietary carve-out) and the
-Merach unlock characteristic and payload
-(`src/devices/horizontreadmill/horizontreadmill.cpp`).
+`SPERAX_RM-01`-is-FTMS / `SPERAX_RM01`-is-proprietary carve-out).
 
 qdomyos-zwift is distributed under the **GNU General Public License,
 version 3** — the same license as Trot; see [LICENSE](LICENSE) for the full
@@ -103,10 +101,9 @@ mcdax — specifically its derived documentation
 (`docs/ftms-protocol-reference.md`), produced from vendor-app analysis plus
 four real `btsnoop_hci` captures of a KingSmith KS-MC21: the mandatory
 staggered CCCD-enable timing (100/200/300 ms), the KingSmith bit-13
-step-count extension to Treadmill Data, the `d18d2c10-…` ODM unlock
-characteristic and its magic payload, the Control Point
-indication-may-never-arrive behaviour with success signalled via Fitness
-Machine Status (0x2ADA), and the no-application-keepalive finding.
+step-count extension to Treadmill Data, the finding that start/stop/pause
+transitions are signalled via Fitness Machine Status (0x2ADA), and the
+no-application-keepalive finding.
 walkingpad-controller is distributed under the MIT License:
 
 ```

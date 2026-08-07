@@ -22,3 +22,6 @@
 - [ ] Changes CLI commands or flags — regenerate `completions/` (CI diffs them)
 - [ ] Touches the de-glitching in `db.rs` — please add the data shape that broke
 - [ ] Adds a network dependency — Trot is local-first, so this needs discussing
+- [ ] Adds a BLE write to a driver — writes that *query* the device are fine;
+      writes that actuate the belt will be declined (Trot observes, never
+      controls — see docs/drivers/README.md)

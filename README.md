@@ -140,6 +140,8 @@ directory; that's how the CLI and any UI find it.
 ## Security & privacy
 Trot is local-first: your data lives in a SQLite file on your machine, there is no
 account, no cloud, and no telemetry. The API is bound to `127.0.0.1` only.
+And Trot only *observes* your treadmill — it cannot start, stop, or change the
+speed of the belt; there is deliberately no code that controls the machine.
 
 What's enforced:
 - The data directory is created `0700` and `runtime.json` (which carries the API

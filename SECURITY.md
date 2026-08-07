@@ -32,6 +32,13 @@ token.
 
 **Enforced:**
 
+- **Trot cannot move your treadmill.** The engine contains no actuation code
+  path at all — no speed, start/stop, incline or mode commands, and none of
+  the vendor "unlock" writes that would enable them. The only BLE writes are
+  data queries and wake-the-stream init frames. This is a design commitment
+  (see docs/drivers/README.md), and it means that even a fully compromised
+  local API, or a hostile process holding the token, cannot make the belt
+  under your feet do anything.
 - The data directory is created `0700` and `runtime.json` `0600`, so other users
   on a shared machine can't read your data or drive the API.
 - Every state-changing call requires the per-launch token (`x-sc110-token`).
@@ -57,6 +64,8 @@ token.
 - Token leakage beyond the 0600 handshake file.
 - Memory-safety issues, or a crash reachable from device input (a malicious or
   malfunctioning treadmill sending crafted BLE frames is a legitimate threat).
+- Any code path through which the daemon could be made to actuate a treadmill —
+  that property is load-bearing, and a hole in it is a serious finding.
 - Anything in the release pipeline that would let a third party ship a binary
   under Trot's name.
 

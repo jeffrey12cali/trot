@@ -357,6 +357,56 @@ mod tests {
         );
     }
 
+    /// Trot observes treadmills; it never controls them (see
+    /// docs/drivers/README.md). This is a tripwire for the most likely way
+    /// actuation would re-enter the tree: porting FTMS Control Point code —
+    /// or the vendor "unlock" writes that gate it on shared ODM modules —
+    /// from an upstream reference. No driver source may mention the Control
+    /// Point's 16-bit UUID or the known unlock characteristic UUIDs, in code
+    /// OR in comments (documentation of those characteristics lives in git
+    /// history and the upstream projects, not here).
+    ///
+    /// Honesty note: this is a tripwire, not a proof. Vendor actuation frames
+    /// (a WiLink speed command, say) are plain bytes a source scan cannot
+    /// tell from data, so the real guarantee is review — CONTRIBUTING.md and
+    /// the driver guide state the policy a reviewer enforces.
+    #[test]
+    fn no_driver_references_control_point_or_unlock_uuids() {
+        // Built at runtime so this test doesn't trip itself.
+        let forbidden = [
+            format!("2ad{}", 9),              // FTMS Fitness Machine Control Point
+            format!("d18d2c1{}", 0),          // KingSmith ODM unlock characteristic
+            format!("59554c5{}", 5),          // Merach unlock characteristic
+            format!("CommandPreambl{}", 'e'), // the removed unlock-write helper
+        ];
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/drivers");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(&dir).expect("drivers dir must be listable") {
+            let path = entry.expect("dir entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            checked += 1;
+            let src = std::fs::read_to_string(&path)
+                .expect("driver source must be readable")
+                .to_ascii_lowercase();
+            for needle in &forbidden {
+                assert!(
+                    !src.contains(&needle.to_ascii_lowercase()),
+                    "{} references \"{}\" — Trot never writes belt commands; \
+                     drop the control path (docs/drivers/README.md, \"Trot \
+                     observes — it never controls\")",
+                    path.display(),
+                    needle
+                );
+            }
+        }
+        assert!(
+            checked >= 5,
+            "expected to scan the driver sources, found {checked}"
+        );
+    }
+
     /// Registry order is load-bearing: strict drivers first, the permissive
     /// LifeSpan fallback dead last. If this test fails because you added a
     /// driver, add it BEFORE "lifespan-fallback" — anything after the

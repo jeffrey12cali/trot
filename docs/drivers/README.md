@@ -10,6 +10,39 @@ protocol, and emits neutral SI-unit samples. Everything else — connecting,
 reconnecting, sessions, storage, the API — already exists and you must not
 touch it.
 
+## Trot observes — it never controls
+
+One rule sits above everything else in this guide: **Trot never actuates a
+treadmill.** No speed changes, no start or stop, no incline, no mode
+switching. This is a permanent product commitment, not a current limitation —
+the promise is that Trot *cannot* physically move a belt, under any
+circumstances — and it applies to every driver, including the one you're about
+to write. A PR that adds belt control will be declined however well it's
+built; CONTRIBUTING.md says the same.
+
+The distinction that matters is **what a write is for**, not whether you
+write:
+
+- **Query writes are fine, and often necessary.** Request/response protocols
+  must write in order to read — LifeSpan writes `A1 <opcode>` to ask for a
+  step count; WalkingPad writes `F7 A2 00 00 A2 FD` to ask for status — and
+  the init handshakes that wake a silent device's telemetry stream are just
+  as legitimate. Everything in `drivers/util.rs` exists for these.
+- **Actuation is not.** Anything that moves the belt or changes what it's
+  doing, and anything that exists only to *enable* such commands (FTMS
+  Control Point writes, the vendor "unlock" pre-ambles that gate them on
+  shared ODM modules), stays out of the tree.
+
+You *will* meet control code while porting: qdomyos-zwift, ph4-walkingpad and
+the other references below all set speed and start/stop belts, usually
+interleaved with the telemetry logic you're after. Port the reading; leave the
+controlling behind. Watch for message families that carry both — WiLink's
+`F7 A2 <subtype>` is a status query at subtype `00` and a speed command at
+subtype `01` — and take only the query subtypes. A registry test trips on the
+known control-path UUIDs, but the test is a tripwire, not the rule itself:
+when in doubt, if a write could make the belt do something, it doesn't belong
+here.
+
 ## How Trot talks to a treadmill
 
 ```
@@ -78,19 +111,7 @@ use, so your driver states intent and the timing lore stays in one place.
    them). Declare the sequence as `util::InitStep`s and run it once at the top
    of `run()` with `util::run_init_sequence`, then fall into a
    subscribe-and-push loop.
-4. **Per-command pre-amble.** Some shared vendor BLE modules require a write to
-   a *separate* unlock characteristic before each real command is accepted —
-   without it, KingSmith MC-21 answers FTMS Control Point writes with
-   `CONTROL_NOT_PERMITTED`, and Merach ignores commands outright. Configure a
-   `util::CommandPreamble` with the module's magic bytes and `apply()` it
-   before each gated write. These modules are shared Chinese ODM parts that
-   turn up across brands (the same unlock characteristic appears on KingSmith
-   and Sperax hardware), which is exactly why the pre-amble is a capability
-   you configure, not code you copy. `ftms::control_preamble` holds the
-   verified per-family configurations (KingSmith ODM, Merach) — note the
-   unlock gates *commands only*: telemetry notifications flow without it,
-   which is why the read-only FTMS driver never sends one.
-5. **Obfuscated transport.** The nastiest real-world case: a text protocol,
+4. **Obfuscated transport.** The nastiest real-world case: a text protocol,
    base64'd, run through a substitution cipher, split into 16-byte GATT chunks,
    terminated by a marker byte (some KingSmith generations). Your `run()` loop
    then has three layers: reassemble notifications into complete messages with
@@ -121,17 +142,15 @@ Five hard-won warnings:
 - **The device lies.** Counters emit stale frames, reset mid-session, and wrap.
   Report what the device says; the storage layer de-glitches. Never smooth,
   clamp, or invent values in the driver.
-- **Never block indefinitely awaiting a command acknowledgement.** Real
-  captures of an FTMS walking pad (KingSmith MC-21) show `REQUEST_CONTROL`
-  failing with `OPERATION_FAILED` on the first attempt and never being
-  indicated again — while every later command works — and other Control Point
-  opcodes being GATT-ACKed yet *never* producing an indication even on
-  success; the machine signals the outcome on its status characteristic
-  (FTMS `0x2ADA`) instead. Bound every wait, treat a missing indication as
-  "watch the status stream", and never treat a failed control handshake as
-  fatal. Relatedly: no application-level keepalive is needed — the captures
-  show none, and the link lives on link-layer keepalives plus the
-  notification stream. Don't add one.
+- **Watch the status stream, not just the data stream.** Real captures of an
+  FTMS walking pad (KingSmith MC-21) show start/stop/pause transitions
+  signalled only on the status characteristic (FTMS `0x2ADA`) — and a paused
+  belt reads 0 km/h exactly like a stopped one, so the status stream is the
+  only way to tell them apart. Subscribe to it where the device exposes it
+  and bound every wait; a notification that never comes must degrade to
+  "keep reading", not hang the driver. Relatedly: no application-level
+  keepalive is needed — the captures show none, and the link lives on
+  link-layer keepalives plus the notification stream. Don't add one.
 - **A standard-looking frame can smuggle vendor extensions.** KingSmith sets
   the *reserved* FTMS flags bit 13 to append a step count to Treadmill Data.
   Another vendor could set the same reserved bit meaning something else, so
@@ -159,6 +178,11 @@ already. Check licenses before you take more than knowledge:
 - Anything **without a license file is not usable** — don't copy from it, even
   a little. (This is why Trot's FTMS parser is a clean-room implementation from
   the Bluetooth SIG spec.)
+
+All of these references *control* their treadmills as well as read them.
+Trot doesn't — see "Trot observes — it never controls" above — so take the
+telemetry decode and leave the command paths (set-speed, start/stop, Control
+Point handshakes, unlock writes) where you found them.
 
 When implementations disagree on a field (one reads a u16 where another reads
 a u24), prefer the one whose raw captures you can re-verify, and say in your
@@ -306,19 +330,7 @@ subscribe_staggered(link, &[
 ]).await?;
 ```
 
-**Per-command pre-amble** (shape 4) — the unlock write for shared ODM
-modules, as configuration instead of copy-paste:
-
-```rust
-use super::util::CommandPreamble;
-
-let unlock = CommandPreamble::new(ODM_UNLOCK_CHAR, UNLOCK_MAGIC);
-// before every gated command:
-unlock.apply(link).await?;
-link.write(&control_point, &command, WriteType::WithResponse).await?;
-```
-
-**Frame reassembly + codec seam** (shape 5) — notifications are transport
+**Frame reassembly + codec seam** (shape 4) — notifications are transport
 chunks, not messages. Feed every chunk to the assembler; it yields each
 complete frame exactly once (terminator stripped), no matter how the radio
 split or coalesced them. One caveat: reassembling on a terminator byte only
@@ -433,6 +445,9 @@ Include:
   from another project.
 - What hardware you tested on, and which fields you verified against the
   console (speed? steps? distance?).
+- No actuation. If you ported from a project that controls the belt, say so —
+  and confirm every write your driver sends is a query or an init frame, not
+  a command (see "Trot observes — it never controls").
 
 Don't bump versions or edit `CHANGELOG.md` — releases are handled separately.
 
