@@ -169,6 +169,16 @@ full-size treadmills alike. Three ways in:
   [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)) and tested against
   published frame captures — not yet against real hardware, so reports welcome.
   Newer WalkingPads that broadcast FTMS (e.g. the Z1) use the FTMS path below.
+- **Urevo\* (E1L)** — the E1L broadcasts FTMS *and* a proprietary protocol, and
+  only the proprietary one reports steps, so it gets a **native adapter**
+  (ported from open-source reverse engineering, tested against published frame
+  captures — not yet against real hardware). Other Urevo pads (e.g. the
+  Spacewalk 3S) use the FTMS path below.
+- **Sperax\* (RM01 / RM-02)** — these revisions speak a proprietary protocol
+  (unlike the FTMS-broadcasting RM-01), so they get a **native adapter** too,
+  ported from open-source reverse engineering — untested on real hardware, and
+  reporting speed and steps only: the protocol carries no distance and Trot
+  doesn't invent one.
 - **Standard FTMS\*** — any treadmill that broadcasts the standard Bluetooth
   **Fitness Machine Service** (FTMS, `0x1826`). Models *documented* to broadcast
   FTMS include Horizon\* AT-series, Technogym MyRun\*, BowFlex\* T9, 3G Cardio\*,

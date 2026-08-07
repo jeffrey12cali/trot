@@ -19,6 +19,8 @@
 pub mod ftms;
 pub mod kingsmith_wilink;
 pub mod lifespan;
+pub mod sperax;
+pub mod urevo;
 pub mod util;
 
 use anyhow::Result;
@@ -40,6 +42,13 @@ use uuid::Uuid;
 ///   the FE01-notify/FE02-write roles, with the known FTMS/app-cipher
 ///   KingSmith models carved out by name) and outranks FTMS for the same
 ///   reason: the native protocol reports steps.
+/// * `Urevo` and `Sperax` both live on the contested `0xFFF0` block with
+///   LifeSpan-shaped roles, so they require a recognised advertised name
+///   (`URTM041…` / `SPERAX_RM01…`, `SPERAX_RM-02…`) on top of the roles.
+///   They outrank FTMS because the E1L exposes both protocols and only the
+///   native one reports steps (Sperax's hyphen-less models don't speak FTMS
+///   at all) — and they must come before the LifeSpan fallback or it would
+///   claim their FFF1/FFF2 shape first.
 /// * `Ftms` requires the standard Treadmill Data characteristic.
 /// * `LifeSpanFallback` is the deliberate last resort: a device nobody else
 ///   claimed, whose `FFF1`/`FFF2` roles are exactly LifeSpan-shaped, is
@@ -52,6 +61,8 @@ use uuid::Uuid;
 pub static DRIVERS: &[&dyn Driver] = &[
     &lifespan::LifeSpan,
     &kingsmith_wilink::KingSmithWiLink,
+    &urevo::Urevo,
+    &sperax::Sperax,
     &ftms::Ftms,
     &lifespan::LifeSpanFallback,
 ];
@@ -261,10 +272,13 @@ mod tests {
         assert!(any_match(&adv("URTM024", &[])));
         assert!(any_match(&adv("KS-MC21-D06BFD", &[])));
         assert!(any_match(&adv("SPERAX_RM-01", &[])));
+        // The proprietary-protocol devices on the 0xFFF0 block: the Urevo
+        // E1L and the hyphen-less/RM-02 Sperax revisions now have native
+        // drivers (they used to be deliberately unclaimed).
+        assert!(any_match(&adv("URTM041", &[])));
+        assert!(any_match(&adv("SPERAX_RM01", &[])));
+        assert!(any_match(&adv("SPERAX_RM-02", &[])));
         assert!(!any_match(&adv("Some Headphones", &[0x180f])));
-        // The hyphen-less Sperax speaks a different, proprietary protocol —
-        // it must stay unclaimed rather than be mis-driven as FTMS.
-        assert!(!any_match(&adv("SPERAX_RM01", &[])));
         assert!(!any_match(&adv("", &[])));
     }
 
@@ -333,6 +347,60 @@ mod tests {
             "FFF1 without a writable FFF2 must not claim the device for LifeSpan"
         );
         assert!(for_device(&anon, &gatt(&[(0x2a37, N)])).is_none());
+    }
+
+    /// The 0xFFF0 collision, adjudicated by name: LifeSpan, Urevo and Sperax
+    /// all expose the identical FFF1-notify/FFF2-write shape, so the
+    /// advertised name is the only thing keeping each device off the others'
+    /// protocols. A Urevo E1L must take the Urevo driver — even when it also
+    /// exposes real FTMS (the native protocol reports steps; FTMS on this
+    /// hardware does not) — and must never reach a LifeSpan entry.
+    #[test]
+    fn the_fff0_squatters_land_on_their_own_drivers() {
+        let shape = gatt(&[(0xfff1, N), (0xfff2, W)]);
+        let shape_with_ftms = gatt(&[(0xfff1, N), (0xfff2, W), (0x2acd, N)]);
+
+        assert_eq!(
+            for_device(&adv("URTM041", &[]), &shape).map(|d| d.id()),
+            Some("urevo")
+        );
+        assert_eq!(
+            for_device(&adv("URTM041", &[]), &shape_with_ftms).map(|d| d.id()),
+            Some("urevo"),
+            "the native protocol outranks the E1L's FTMS service"
+        );
+        // The Spacewalk 3S shares the URTM prefix but speaks plain FTMS.
+        assert_eq!(
+            for_device(&adv("URTM024", &[]), &shape_with_ftms).map(|d| d.id()),
+            Some("ftms")
+        );
+
+        // The Sperax hyphen split, both directions.
+        assert_eq!(
+            for_device(&adv("SPERAX_RM01_74FE70", &[]), &shape).map(|d| d.id()),
+            Some("sperax")
+        );
+        assert_eq!(
+            for_device(&adv("SPERAX_RM-02", &[]), &shape).map(|d| d.id()),
+            Some("sperax")
+        );
+        assert_eq!(
+            for_device(&adv("SPERAX_RM-01_74FE70", &[]), &shape_with_ftms).map(|d| d.id()),
+            Some("ftms"),
+            "the hyphenated RM-01 is FTMS hardware"
+        );
+
+        // A named LifeSpan console still takes the LifeSpan driver, and a
+        // nameless FFF0-shaped device still falls back to it — the two new
+        // strict drivers must widen neither claim.
+        assert_eq!(
+            for_device(&adv("LifeSpan-TM", &[]), &shape).map(|d| d.id()),
+            Some("lifespan")
+        );
+        assert_eq!(
+            for_device(&adv("", &[]), &shape).map(|d| d.id()),
+            Some("lifespan-fallback")
+        );
     }
 
     /// A named WalkingPad with the WiLink notify/write roles takes the native
@@ -416,7 +484,14 @@ mod tests {
         let ids = ids();
         assert_eq!(
             ids,
-            vec!["lifespan", "kingsmith-wilink", "ftms", "lifespan-fallback"]
+            vec![
+                "lifespan",
+                "kingsmith-wilink",
+                "urevo",
+                "sperax",
+                "ftms",
+                "lifespan-fallback"
+            ]
         );
         assert_eq!(
             ids.last(),

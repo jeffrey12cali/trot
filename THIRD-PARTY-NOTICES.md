@@ -11,8 +11,20 @@ Trot's LifeSpan / Omni protocol support (the "A1" command set over GATT
 [TreadSpan](https://github.com/blak3r/treadspan)** by Blake Robertson, an
 open-source project that reverse-engineered the LifeSpan Omni console protocol.
 TreadSpan's documented opcode map and field encodings informed Trot's
-independent reimplementation in Rust. TreadSpan is distributed under the MIT
-License:
+independent reimplementation in Rust.
+
+Trot's Urevo (E1L) driver additionally ports from TreadSpan: the proprietary
+status-stream protocol on the same `FFF0`/`FFF1`/`FFF2` block — the wake write
+and status-frame field map (`arduino/src/TreadmillDeviceUrevoProtocol.h`) and
+the annotated raw captures of a real E1L
+(`protocol-analysis/urevo-E1L/`), which are the fixture frames in Trot's
+tests and against which every field was re-verified (Trot's checksum rule and
+0.01-mile distance unit are derived from those captures). TreadSpan's Sperax
+RM-01 service dump and app capture (`protocol-analysis/sperax-rm-01/`) also
+serve as the cross-check that the hyphenated RM-01 speaks FTMS rather than
+the proprietary Sperax protocol.
+
+TreadSpan is distributed under the MIT License:
 
 ```
 MIT License
@@ -88,6 +100,16 @@ advertised-name list of real-world FTMS walking pads (Urevo, Merach, Sunny
 Health & Fitness, CitySports, WellFit, Mobvoi, Sportstech, YPOO, TheRun,
 Anplus, Focus, KingSmith, Sperax — `src/devices/bluetooth.cpp`, including the
 `SPERAX_RM-01`-is-FTMS / `SPERAX_RM01`-is-proprietary carve-out).
+
+Trot's Sperax driver **ports protocol knowledge from qdomyos-zwift's**
+`src/devices/speraxtreadmill/speraxtreadmill.cpp`, the only known
+implementation of the proprietary `F5 … FA` protocol: the init and poll
+frames (sent byte-identically), the ≥24-byte packet length requirement, the
+big-endian step-count offset and the end-anchored speed offset, plus the
+`SPERAX_RM01`/`SPERAX_RM-02` advertised-name routing
+(`src/devices/bluetooth.cpp`). The frame envelope's CRC-16 parameters and
+`F0`-escape rule were derived by Trot from the captured frames embedded in
+that source and verify against all 64 of them.
 
 qdomyos-zwift is distributed under the **GNU General Public License,
 version 3** — the same license as Trot; see [LICENSE](LICENSE) for the full
