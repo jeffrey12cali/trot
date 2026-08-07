@@ -255,9 +255,9 @@ impl Driver for LifeSpan {
 
     fn supports(&self, adv: &Advertisement, gatt: &BTreeSet<Characteristic>) -> bool {
         // Strict on purpose. 0xFFF0/FFF1/FFF2 is a generic vendor-module
-        // layout that at least five mutually incompatible treadmill protocols
-        // (LifeSpan, Urevo, Sperax, Deerrun, Zipro, Focus) squat on — and
-        // Deerrun swaps the notify/write roles relative to us. Claiming a
+        // layout that at least six mutually incompatible treadmill protocols
+        // (LifeSpan, Urevo, Sperax, FitShow, Deerrun, Zipro, Focus) squat on
+        // — and Deerrun swaps the notify/write roles relative to us. Claiming a
         // device on UUIDs alone would write LifeSpan opcodes at hardware
         // speaking a different protocol, so we require BOTH a recognised
         // advertised name AND the exact characteristic roles we use. A device
