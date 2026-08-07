@@ -111,9 +111,91 @@ big-endian step-count offset and the end-anchored speed offset, plus the
 `F0`-escape rule were derived by Trot from the captured frames embedded in
 that source and verify against all 64 of them.
 
+Trot's PitPat/Deerrun/SupeRun driver **ports protocol knowledge from
+qdomyos-zwift's** `src/devices/deerruntreadmill/deerruntreadmill.cpp` and
+its `PITPAT-T*` device matcher (`src/devices/bluetooth.cpp`): the Deerrun
+transport variant on service `0xFFF0` with the notify/write roles swapped
+relative to LifeSpan, and the status-query frame `6A 05 FD F8 43` with its
+`4D 00 <seq> <len>` transport envelope. qdomyos-zwift's belt-control paths
+(its speed/start/stop frames and its unlock preamble) are deliberately not
+ported; two of its captured control frames appear in Trot's tests solely as
+checksum vectors.
+
 qdomyos-zwift is distributed under the **GNU General Public License,
 version 3** — the same license as Trot; see [LICENSE](LICENSE) for the full
 text.
+
+## PaceKeeper — `peteh/pacekeeper`
+
+Trot's PitPat/Deerrun/SupeRun driver **ports protocol knowledge from
+[PaceKeeper](https://github.com/peteh/pacekeeper)** by peteh, the primary
+open-source implementation of the PitPat OEM treadmill protocol, verified on
+real hardware (a PitPat-T01 / SupeRun BA06-B1): the `FBA0`/`FBA1`/`FBA2`
+service layout (`src/platform.h`), the full status-frame field map including
+the step counter (`src/TreadmillHandler.cpp`), and the subscribe-and-push
+interaction model (PaceKeeper reads the telemetry stream without writing a
+single frame). PaceKeeper's belt-control functions are not ported.
+
+PaceKeeper is distributed under the **GNU General Public License,
+version 3** — the same license as Trot; see [LICENSE](LICENSE) for the full
+text.
+
+## pitpat-treadmill-control — `azmke/pitpat-treadmill-control`
+
+Trot's PitPat/Deerrun/SupeRun driver additionally **ports protocol knowledge
+from [pitpat-treadmill-control](https://github.com/azmke/pitpat-treadmill-control)**
+by azmke (Alexander), whose decoder (`src/treadmill_data.py`) carries
+vendor-app-level detail: the inbound XOR checksum rule (validated by no
+other implementation), the `FFFF`/`FF01`/`FF02` transport variant with its
+4-byte `4D 00 <seq> <len>` envelope (`src/bluetooth_manager.py`), the
+firmware-conditional duration unit (milliseconds on firmware ≥20, seconds
+before), and the only published real capture of a status frame — the 52-byte
+idle frame used as a test fixture in Trot's driver.
+pitpat-treadmill-control is distributed under the MIT License:
+
+```
+MIT License
+
+Copyright (c) 2025 Alexander
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+## PitPat-WebBT — `KeiranY/PitPat-WebBT`
+
+The PitPat status-frame field offsets and the characterization of
+`6A 05 FD F8 43` as the protocol's heartbeat/status query were
+**cross-checked against
+[PitPat-WebBT](https://github.com/KeiranY/PitPat-WebBT)** by Keiran Young
+(`treadmill.js`), an independent Web Bluetooth implementation released into
+the **public domain** (The Unlicense).
+
+## HomeAssistantWalkingPad — `sirfergy/HomeAssistantWalkingPad`
+
+The finding that the PitPat wire protocol stays **metric even when the
+console's panel is set to miles** (the imperial flag describes the display
+only, so a decoder must not rescale) comes from
+**[HomeAssistantWalkingPad](https://github.com/sirfergy/HomeAssistantWalkingPad)**
+by sirfergy (`custom_components/walkingpad/protocol.py`), a
+PaceKeeper-derived Home Assistant integration. HomeAssistantWalkingPad is
+distributed under the **GNU General Public License, version 3** — the same
+license as Trot; see [LICENSE](LICENSE) for the full text.
 
 ## walkingpad-controller — `mcdax/walkingpad-controller`
 

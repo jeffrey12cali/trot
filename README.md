@@ -179,6 +179,13 @@ full-size treadmills alike. Three ways in:
   ported from open-source reverse engineering — untested on real hardware, and
   reporting speed and steps only: the protocol carries no distance and Trot
   doesn't invent one.
+- **PitPat\* / Deerrun\* / SupeRun\*** — the shared OEM protocol behind a long
+  tail of budget walking pads that advertise as `PitPat-T…` (the SupeRun
+  BA06-B1 among them, whatever the box says). It reports steps, distance,
+  time and calories natively, so it gets a **native adapter**, ported from
+  open-source reverse engineering (see
+  [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)) and tested against a
+  published frame capture — not yet against real hardware, so reports welcome.
 - **Standard FTMS\*** — any treadmill that broadcasts the standard Bluetooth
   **Fitness Machine Service** (FTMS, `0x1826`). Models *documented* to broadcast
   FTMS include Horizon\* AT-series, Technogym MyRun\*, BowFlex\* T9, 3G Cardio\*,
@@ -225,7 +232,8 @@ on stop** (Ctrl-C or SIGTERM), so the belt's Bluetooth link isn't left open.
 Cargo.toml               # workspace
 crates/
   trot-core/             # engine library: ble · drivers (lifespan · kingsmith_wilink
-                         # · ftms) · telemetry · db · state · api · config
+                         # · urevo · sperax · pitpat · ftms) · telemetry · db · state
+                         # · api · config
   trot-daemon/           # the `trot` binary: `daemon` serves /api + /ws; the other
                          # subcommands (scan/pair/today/…) drive it over that API
 ```
@@ -294,8 +302,8 @@ data your treadmill already broadcasts over Bluetooth.
 
 LifeSpan, Horizon, BowFlex, Technogym, Matrix, 3G Cardio, WalkingPad / KingSmith,
 Urevo, Merach, Sunny Health & Fitness, CitySports, WellFit, Mobvoi, Sportstech,
-YPOO, TheRun, Sperax, NordicTrack, ProForm, Peloton and Echelon are trademarks or
-registered trademarks of their respective owners. The **Bluetooth®** word mark and logos are registered
+YPOO, TheRun, Sperax, PitPat, Deerrun, SupeRun, NordicTrack, ProForm, Peloton and
+Echelon are trademarks or registered trademarks of their respective owners. The **Bluetooth®** word mark and logos are registered
 trademarks owned by Bluetooth SIG, Inc. All other product and company names are the
 property of their respective holders; their use here is for identification and
 compatibility purposes only.
