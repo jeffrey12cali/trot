@@ -18,6 +18,7 @@
 
 pub mod ftms;
 pub mod lifespan;
+pub mod util;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -27,13 +28,27 @@ use std::collections::BTreeSet;
 use uuid::Uuid;
 
 /// Every driver Trot ships, in priority order — when a device satisfies more
-/// than one driver, the first match wins. LifeSpan consoles expose their
-/// native service alongside whatever else they advertise, and the native
-/// protocol reports steps where FTMS cannot, so it outranks FTMS.
+/// than one driver, the first match wins. **Order is load-bearing: strict
+/// drivers come before permissive ones.**
+///
+/// * `LifeSpan` matches strictly (advertised-name prefix AND the exact
+///   notify/write characteristic roles) and outranks FTMS because LifeSpan
+///   consoles expose their native service alongside whatever else they
+///   advertise, and the native protocol reports steps where FTMS cannot.
+/// * `Ftms` requires the standard Treadmill Data characteristic.
+/// * `LifeSpanFallback` is the deliberate last resort: a device nobody else
+///   claimed, whose `FFF1`/`FFF2` roles are exactly LifeSpan-shaped, is
+///   driven as LifeSpan even under an unrecognised name — that is what keeps
+///   an already-paired console working when its advertised name isn't in our
+///   prefix list. Every future driver goes **before** it.
 ///
 /// **This is the registration point.** One line here is the only edit outside
 /// your driver file.
-pub static DRIVERS: &[&dyn Driver] = &[&lifespan::LifeSpan, &ftms::Ftms];
+pub static DRIVERS: &[&dyn Driver] = &[
+    &lifespan::LifeSpan,
+    &ftms::Ftms,
+    &lifespan::LifeSpanFallback,
+];
 
 /// A treadmill protocol driver. In-tree, compiled in, reviewed — there is no
 /// dynamic loading, deliberately.
@@ -196,17 +211,21 @@ mod tests {
         }
     }
 
-    fn gatt(uuids: &[u16]) -> BTreeSet<Characteristic> {
-        uuids
-            .iter()
-            .map(|u| Characteristic {
-                uuid: sig_uuid(*u),
-                service_uuid: sig_uuid(0x0000),
-                properties: CharPropFlags::default(),
-                descriptors: BTreeSet::new(),
-            })
-            .collect()
+    fn chr(short: u16, properties: CharPropFlags) -> Characteristic {
+        Characteristic {
+            uuid: sig_uuid(short),
+            service_uuid: sig_uuid(0x0000),
+            properties,
+            descriptors: BTreeSet::new(),
+        }
     }
+
+    fn gatt(chars: &[(u16, CharPropFlags)]) -> BTreeSet<Characteristic> {
+        chars.iter().map(|(u, p)| chr(*u, *p)).collect()
+    }
+
+    const N: CharPropFlags = CharPropFlags::NOTIFY;
+    const W: CharPropFlags = CharPropFlags::WRITE;
 
     #[test]
     fn sig_uuid_builds_the_base_form() {
@@ -233,35 +252,85 @@ mod tests {
         assert!(!any_match(&adv("", &[])));
     }
 
-    /// Connect-time dispatch replicates the old hardcoded if/else: native
-    /// LifeSpan (FFF1+FFF2) outranks FTMS (2ACD) when a device exposes both;
-    /// FFF1 alone is not enough; a device with neither gets no driver.
+    /// Connect-time dispatch: a named LifeSpan console with the right
+    /// characteristic roles wins outright — including over FTMS, because the
+    /// native protocol reports steps where FTMS cannot.
     #[test]
-    fn gatt_dispatch_prefers_lifespan_then_ftms() {
+    fn a_named_lifespan_console_takes_the_strict_driver() {
+        let named = adv("LifeSpan-TM", &[]);
+        assert_eq!(
+            for_device(&named, &gatt(&[(0xfff1, N), (0xfff2, W), (0x2acd, N)])).map(|d| d.id()),
+            Some("lifespan")
+        );
+        assert_eq!(
+            for_device(&named, &gatt(&[(0xfff1, N), (0xfff2, W)])).map(|d| d.id()),
+            Some("lifespan")
+        );
+    }
+
+    /// A nameless device with LifeSpan-shaped roles and no other claim lands
+    /// on the fallback — this is what keeps an already-paired console working
+    /// when its advertised name isn't in the prefix list (or the platform
+    /// doesn't surface a name at connect time).
+    #[test]
+    fn an_unnamed_lifespan_shaped_device_falls_back_to_lifespan() {
         let anon = adv("", &[]);
         assert_eq!(
-            for_device(&anon, &gatt(&[0xfff1, 0xfff2, 0x2acd])).map(|d| d.id()),
-            Some("lifespan")
+            for_device(&anon, &gatt(&[(0xfff1, N), (0xfff2, W)])).map(|d| d.id()),
+            Some("lifespan-fallback")
         );
+    }
+
+    /// A device that ALSO speaks real FTMS is claimed by FTMS before the
+    /// LifeSpan fallback: an unrecognised name plus a generic FFFx vendor
+    /// block plus standard FTMS is the KingSmith/ODM shape, where FTMS is the
+    /// protocol that actually works and LifeSpan opcodes are garbage.
+    #[test]
+    fn ftms_outranks_the_lifespan_fallback() {
+        let anon = adv("", &[]);
         assert_eq!(
-            for_device(&anon, &gatt(&[0xfff1, 0xfff2])).map(|d| d.id()),
-            Some("lifespan")
-        );
-        assert_eq!(
-            for_device(&anon, &gatt(&[0x2acd])).map(|d| d.id()),
+            for_device(&anon, &gatt(&[(0xfff1, N), (0xfff2, W), (0x2acd, N)])).map(|d| d.id()),
             Some("ftms")
         );
         assert_eq!(
-            for_device(&anon, &gatt(&[0xfff1, 0x2acd])).map(|d| d.id()),
-            Some("ftms"),
-            "FFF1 without FFF2 must not claim the device for LifeSpan"
+            for_device(&anon, &gatt(&[(0x2acd, N)])).map(|d| d.id()),
+            Some("ftms")
         );
-        assert!(for_device(&anon, &gatt(&[0x2a37])).is_none());
     }
 
+    /// Role-swapped FFF1/FFF2 (the Deerrun shape: write on FFF1, notify on
+    /// FFF2) must not be claimed by ANY LifeSpan entry — writing LifeSpan
+    /// opcodes at it would mis-drive a different protocol. Likewise partial
+    /// tables and non-treadmills get no driver.
     #[test]
-    fn registry_ids_are_unique_and_stable() {
+    fn wrong_roles_or_partial_tables_get_no_driver() {
+        let anon = adv("", &[]);
+        assert!(for_device(&anon, &gatt(&[(0xfff1, W), (0xfff2, N)])).is_none());
+        assert!(
+            for_device(&adv("LifeSpan-TM", &[]), &gatt(&[(0xfff1, W), (0xfff2, N)])).is_none(),
+            "even a LifeSpan name cannot override role verification"
+        );
+        assert!(for_device(&anon, &gatt(&[(0xfff1, N)])).is_none());
+        assert_eq!(
+            for_device(&anon, &gatt(&[(0xfff1, N), (0x2acd, N)])).map(|d| d.id()),
+            Some("ftms"),
+            "FFF1 without a writable FFF2 must not claim the device for LifeSpan"
+        );
+        assert!(for_device(&anon, &gatt(&[(0x2a37, N)])).is_none());
+    }
+
+    /// Registry order is load-bearing: strict drivers first, the permissive
+    /// LifeSpan fallback dead last. If this test fails because you added a
+    /// driver, add it BEFORE "lifespan-fallback" — anything after the
+    /// fallback can never claim an FFF1/FFF2-shaped device.
+    #[test]
+    fn registry_ids_are_unique_and_the_fallback_stays_last() {
         let ids = ids();
-        assert_eq!(ids, vec!["lifespan", "ftms"]);
+        assert_eq!(ids, vec!["lifespan", "ftms", "lifespan-fallback"]);
+        assert_eq!(
+            ids.last(),
+            Some(&"lifespan-fallback"),
+            "the permissive fallback must remain the last registry entry"
+        );
     }
 }

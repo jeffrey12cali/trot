@@ -57,46 +57,64 @@ attached to an issue is a genuinely useful contribution on its own.
 ## Step 2: understand the protocol
 
 Treadmill BLE protocols come in a handful of shapes. Identify yours before
-writing code, because it decides what your `run()` loop looks like:
+writing code, because it decides what your `run()` loop looks like. The
+fiddly plumbing each shape needs — ordered init writes, command spacing,
+staggered subscriptions, frame reassembly — lives ready-made in
+`drivers/util.rs`; the "Shared plumbing" section below shows each helper in
+use, so your driver states intent and the timing lore stays in one place.
 
 1. **Subscribe-and-push.** The device notifies a data record on its own (~1 Hz)
    once you subscribe. Standard FTMS works this way — see `drivers/ftms.rs`.
 2. **Request/response polling.** The device answers one value per request: you
    write an opcode, it notifies the reply. LifeSpan works this way — see
    `drivers/lifespan.rs`, which rotates through its opcodes ~50 ms apart.
-   Others in this family (KingSmith WiLink, FitShow) add checksums and enforce
-   minimum spacing between commands (WiLink wants ≥690 ms) — your loop owns its
-   own timing, so just `sleep` accordingly.
+   Others in this family (KingSmith WiLink, FitShow) add checksums
+   (`util::checksum_sum`, `util::checksum_xor`) and enforce minimum spacing
+   between commands — WiLink drops writes closer than 690 ms
+   (`util::CommandSpacer`).
 3. **Init handshake, then push.** The device is silent until you write one or
-   more magic frames (Urevo, Sperax, and others need between 1 and ~11 ordered
-   init writes, some with delays between them). Do the writes at the top of
-   `run()`, then fall into a subscribe-and-push loop.
+   more magic frames (Urevo needs a single wake write; Sperax, PitPat/Deerrun
+   and Zipro need 3–11 ordered init writes, some with mandatory delays between
+   them). Declare the sequence as `util::InitStep`s and run it once at the top
+   of `run()` with `util::run_init_sequence`, then fall into a
+   subscribe-and-push loop.
 4. **Per-command pre-amble.** Some shared vendor BLE modules require a write to
-   a *separate* unlock characteristic before each real command is accepted. Do
-   the extra write in your loop. If the same module turns up in a second brand
-   (this happens — several Chinese ODM modules are shared across brands), pull
-   the helper up into a small shared module under `drivers/` rather than
-   copy-pasting it.
+   a *separate* unlock characteristic before each real command is accepted —
+   without it, KingSmith MC-21 answers FTMS Control Point writes with
+   `CONTROL_NOT_PERMITTED`, and Merach ignores commands outright. Configure a
+   `util::CommandPreamble` with the module's magic bytes and `apply()` it
+   before each gated write. These modules are shared Chinese ODM parts that
+   turn up across brands (the same unlock characteristic appears on KingSmith
+   and Sperax hardware), which is exactly why the pre-amble is a capability
+   you configure, not code you copy.
 5. **Obfuscated transport.** The nastiest real-world case: a text protocol,
    base64'd, run through a substitution cipher, split into 16-byte GATT chunks,
    terminated by a marker byte (some KingSmith generations). Your `run()` loop
-   then has three layers: reassemble notifications into complete messages
-   (buffer until the terminator), decode the transport, parse the payload. All
-   of that still lives in your one driver file — the trait hands you raw
-   notifications and doesn't care how many layers you stack on them.
+   then has three layers: reassemble notifications into complete messages with
+   `util::FrameAssembler` (buffer until the terminator — a frame can be split
+   across chunks AND several frames can share one chunk), decode the transport
+   behind the `util::TransportCodec` seam, then parse the payload. The cipher
+   tables themselves belong in your driver file — the seam exists so the
+   reassembly and parsing layers never have to know about them.
 
 Three hard-won warnings:
 
 - **A service UUID proves nothing.** `0xFFF0` with `FFF1`/`FFF2` is a generic
   vendor-module layout used by at least five mutually incompatible treadmill
-  protocols — and at least one of them swaps the notify/write roles relative to
-  the others. Match on the advertised **name prefix plus** the service, and in
-  `supports()` verify the characteristic **properties** (notify where you'll
-  subscribe, write where you'll write) rather than trusting UUIDs.
+  protocols — and at least one of them (Deerrun) swaps the notify/write roles
+  relative to the others. Match on the advertised **name prefix plus** the
+  service, and in `supports()` verify the characteristic **properties** (notify
+  where you'll subscribe, write where you'll write) rather than trusting UUIDs —
+  `util::has_notify` and `util::has_write` are those checks. This is why the
+  LifeSpan driver requires both, and why a role-verified-but-unnamed
+  `FFF1`/`FFF2` device is only claimed by the deliberate `lifespan-fallback`
+  entry at the very end of the registry, after every stricter driver has
+  passed on it.
 - **Firmware is fragile.** Cheap treadmill firmware silently drops notification
   subscriptions that arrive within a few tens of milliseconds of each other. If
   you subscribe to more than one characteristic and one mysteriously never
-  fires, space the subscriptions out (the vendor apps use 100–300 ms).
+  fires, space the subscriptions out with `util::subscribe_staggered` (the
+  vendor apps use 100–300 ms).
 - **The device lies.** Counters emit stale frames, reset mid-session, and wrap.
   Report what the device says; the storage layer de-glitches. Never smooth,
   clamp, or invent values in the driver.
@@ -200,6 +218,105 @@ derive it from belt speed the way the FTMS driver does (moving ⇒ `Running`).
 `"mph"`). Ignore it unless your wire format itself depends on the console's
 display setting — LifeSpan is the only known case.
 
+### Shared plumbing: `drivers/util.rs`
+
+The timing and framing quirks above repeat across brands, so they live once,
+tested, in `drivers/util.rs`. Everything is opt-in: a driver that needs none
+of it (LifeSpan needs no write spacing, for instance) pays nothing. In rough
+order of how often you'll want them:
+
+**Init handshake** (shape 3) — declare the frames, don't hand-roll the loop.
+Delays between steps are part of the protocol on several devices; skip them
+and the device just never streams, silently:
+
+```rust
+use super::util::{run_init_sequence, InitStep};
+
+let wake = [
+    InitStep::write(CMD, [0x02, 0x51, 0x0B, 0x03]).then_wait_ms(100),
+    InitStep::write(CMD, [0x0A, 0x0B]).then_wait_ms(250),
+    InitStep::write(CMD, [0x0C]).without_response(), // some chars only take WWR
+];
+link.subscribe(&data).await?;          // subscribe FIRST — don't miss frame one
+run_init_sequence(link, &wake).await?; // then wake the device
+```
+
+**Command spacing** (the WiLink family) — some firmware drops or garbles
+writes that arrive too close together. `pace()` before each write; the first
+call is free and time you spent decoding counts toward the gap:
+
+```rust
+use super::util::CommandSpacer;
+
+let mut spacer = CommandSpacer::new(Duration::from_millis(690)); // measured, not folklore
+loop {
+    spacer.pace().await;
+    link.write(&cmd, &request, WriteType::WithResponse).await?;
+    // ... read the reply ...
+}
+```
+
+Only add a spacer when you have evidence the device needs one — every gap is
+added latency on live speed readings.
+
+**Staggered subscriptions** — if you subscribe to more than one
+characteristic, space the enables or one of them silently never fires:
+
+```rust
+use super::util::subscribe_staggered;
+
+subscribe_staggered(link, &[
+    (DATA,   Duration::from_millis(100)),
+    (STATUS, Duration::from_millis(200)),
+    (EXTRA,  Duration::from_millis(300)),
+]).await?;
+```
+
+**Per-command pre-amble** (shape 4) — the unlock write for shared ODM
+modules, as configuration instead of copy-paste:
+
+```rust
+use super::util::CommandPreamble;
+
+let unlock = CommandPreamble::new(ODM_UNLOCK_CHAR, UNLOCK_MAGIC);
+// before every gated command:
+unlock.apply(link).await?;
+link.write(&control_point, &command, WriteType::WithResponse).await?;
+```
+
+**Frame reassembly + codec seam** (shape 5) — notifications are transport
+chunks, not messages. Feed every chunk to the assembler; it yields each
+complete frame exactly once (terminator stripped), no matter how the radio
+split or coalesced them. Put your transport decode behind `TransportCodec` —
+`IdentityCodec` for plain protocols, your cipher for the obfuscated ones —
+and the layers stay separable and testable:
+
+```rust
+use super::util::{FrameAssembler, IdentityCodec, TransportCodec};
+
+let codec = IdentityCodec; // or your driver's cipher-table codec
+let mut assembler = FrameAssembler::new(0x0D);
+while let Some(n) = notifications.next().await {
+    host.record_frame(0x00, &n.value);
+    for frame in assembler.push(&n.value) {
+        let payload = codec.decode(&frame)?;
+        // parse `payload` with your pure functions, emit the Sample
+    }
+}
+```
+
+Outbound on an obfuscated transport: `encode` the whole message first, then
+split it into MTU-sized writes (`wire.chunks(16)`) — the cipher runs over the
+message, not the chunks.
+
+**Checksums** — the two trailer bytes that actually occur in the wild:
+`checksum_sum(&frame)` (additive, mod 256 — FitShow, KingSmith
+request/response) and `checksum_xor(&frame)`.
+
+**Property checks** — `has_notify(gatt, uuid)` and `has_write(gatt, uuid)`
+are the `supports()` building blocks: they verify a characteristic's *role*,
+not just its UUID, which is what keeps your driver off a lookalike device.
+
 ### Register it
 
 Two edits in `drivers/mod.rs`:
@@ -207,12 +324,23 @@ Two edits in `drivers/mod.rs`:
 ```rust
 pub mod yourdevice;
 
-pub static DRIVERS: &[&dyn Driver] = &[&lifespan::LifeSpan, &ftms::Ftms, &yourdevice::YourDevice];
+pub static DRIVERS: &[&dyn Driver] = &[
+    &lifespan::LifeSpan,
+    &yourdevice::YourDevice,
+    &ftms::Ftms,
+    &lifespan::LifeSpanFallback,
+];
 ```
 
-Order matters: the first driver whose `supports()` accepts a device wins. Put
-a native protocol *before* FTMS if your device exposes both (native protocols
-usually report more — steps, most importantly). That registration makes the
+Order matters, twice over: the first driver whose `supports()` accepts a
+device wins, so **strict drivers go before permissive ones**. Put a native
+protocol *before* FTMS if your device exposes both (native protocols usually
+report more — steps, most importantly). And nothing goes after
+`lifespan-fallback`: it deliberately claims any device with LifeSpan-shaped
+`FFF1`/`FFF2` roles that no other driver wanted (that's what keeps a paired
+LifeSpan console with an unrecognised advertised name connectable), so a
+driver registered behind it would never see one of those devices. A test pins
+the ordering; it will fail if you get this wrong. That registration makes the
 device discoverable in `trot scan` and connectable by the daemon; there is no
 second place to edit.
 
@@ -417,10 +545,17 @@ Registered in `drivers/mod.rs`:
 
 ```rust
 pub mod acme;
-pub static DRIVERS: &[&dyn Driver] = &[&lifespan::LifeSpan, &acme::Acme, &ftms::Ftms];
+pub static DRIVERS: &[&dyn Driver] = &[
+    &lifespan::LifeSpan,
+    &acme::Acme,
+    &ftms::Ftms,
+    &lifespan::LifeSpanFallback, // always last
+];
 ```
 
 That's the whole surface. If your treadmill needs more ceremony — ordered init
 frames with delays, a pre-amble write before each command, reassembling chunked
-notifications into messages, or decoding an obfuscated transport — it all goes
-inside your `run()` and your pure decode functions, in the same one file.
+notifications into messages, or decoding an obfuscated transport — it still all
+happens inside your `run()` and your pure decode functions, in the same one
+file; you just call the `drivers/util.rs` helpers for the plumbing instead of
+rediscovering the timing quirks yourself.
