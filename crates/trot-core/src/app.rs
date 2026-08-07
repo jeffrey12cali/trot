@@ -3,7 +3,7 @@
 //! Mirrors the responsibilities split across backend/app.py + worker.py + hub.py.
 
 use crate::db::{now_ts, Db};
-use crate::protocol::{speed_kmh, speed_mph, Telemetry};
+use crate::telemetry::{speed_kmh, speed_mph, Telemetry};
 use chrono::{Local, TimeZone};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};

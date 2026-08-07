@@ -1,51 +1,30 @@
-//! BLE worker: owns the connection to the one SC110, polls the opcode rotation,
-//! decodes via the protocol Reader, detects session boundaries, persists samples,
-//! and broadcasts every update to the hub. Ported from backend/worker.py using
-//! btleplug instead of bleak.
+//! BLE engine: owns the connection to the one paired treadmill, picks the
+//! driver for it from the registry, and does everything a driver must not —
+//! scanning, connect/reconnect with backoff, give-up-after-N-failures,
+//! cancellation (pause / device switch / shutdown), session detection,
+//! throttled persistence, and the WebSocket broadcast.
+//!
+//! Drivers (see `drivers/`) only translate a device's Bluetooth traffic into
+//! neutral `Sample`s; the conversion to the presentation `Telemetry` happens
+//! once, here, at `Telemetry::from_sample`.
 
 use crate::app::{state_dict, unix_now, AppState};
-use crate::ftms;
-use crate::protocol::{
-    self, build_request, Reader, Telemetry, ADV_NAME_PREFIXES, DEFAULT_POLL_ROTATION,
-    NOTIFY_CHAR_UUID, WRITE_CHAR_UUID,
-};
+use crate::drivers::{self, Advertisement, DriverHost, Sample};
+use crate::telemetry::Telemetry;
 use anyhow::{anyhow, Result};
-use btleplug::api::{Central, Manager as _, Peripheral as _, ScanFilter, WriteType};
+use btleplug::api::{Central, Manager as _, Peripheral as _, ScanFilter};
 use btleplug::platform::{Adapter, Manager, Peripheral};
-use futures::{FutureExt, StreamExt};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
-use uuid::Uuid;
 
 const RECONNECT_DELAY: Duration = Duration::from_secs(5);
 /// Consecutive failed connect attempts (never reaching the treadmill) before the
 /// worker gives up and waits for a manual reconnect, instead of scanning forever.
 /// Each attempt scans up to ~10s, so this is roughly a minute of trying.
 const MAX_CONNECT_ATTEMPTS: u32 = 6;
-const RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
-const POLL_INTERVAL: Duration = Duration::from_millis(50);
-/// Consecutive unanswered polls (~2s each) before we treat a seemingly-"connected"
-/// link as dead and force a full reconnect. macOS can leave a peripheral handle
-/// open with no disconnect event after the treadmill sleeps/powers off; without
-/// this the worker would poll a stale link forever and never re-scan when the
-/// belt comes back.
-const MAX_DEAD_POLLS: u32 = 15;
 const SESSION_DEBOUNCE: i32 = 1;
-/// FTMS treadmills push Treadmill Data ~1 Hz; tolerate a quiet belt before
-/// treating the link as dead.
-const FTMS_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
-
-fn notify_uuid() -> Uuid {
-    Uuid::parse_str(NOTIFY_CHAR_UUID).unwrap()
-}
-fn write_uuid() -> Uuid {
-    Uuid::parse_str(WRITE_CHAR_UUID).unwrap()
-}
-fn ftms_data_uuid() -> Uuid {
-    Uuid::parse_str(ftms::TREADMILL_DATA_UUID).unwrap()
-}
 
 async fn first_adapter() -> Result<Adapter> {
     let manager = Manager::new().await?;
@@ -56,7 +35,17 @@ async fn first_adapter() -> Result<Adapter> {
         .ok_or_else(|| anyhow!("no Bluetooth adapter found"))
 }
 
-/// Active scan returning SC110-looking candidates (or everything if all_devices).
+/// What a peripheral advertised, in the neutral shape drivers match against.
+fn advertisement(name: &str, services: &[uuid::Uuid]) -> Advertisement {
+    Advertisement {
+        name: name.to_string(),
+        services: services.to_vec(),
+    }
+}
+
+/// Active scan returning treadmill-looking candidates (or everything if
+/// all_devices). "Treadmill-looking" is decided by the driver registry, so a
+/// newly added driver's devices show up here with no extra wiring.
 pub async fn scan(seconds: f64, all_devices: bool) -> Result<serde_json::Value> {
     let seconds = seconds.clamp(1.0, 15.0);
     let adapter = first_adapter().await?;
@@ -72,17 +61,7 @@ pub async fn scan(seconds: f64, all_devices: bool) -> Result<serde_json::Value> 
             None => continue,
         };
         let name = props.local_name.clone().unwrap_or_default();
-        let advertises = |uuid: &str| {
-            props
-                .services
-                .iter()
-                .any(|u| u.to_string().eq_ignore_ascii_case(uuid))
-        };
-        // Match SC110 (service 0xFFF0), any FTMS treadmill (0x1826), or a known
-        // LifeSpan/ESP32 advertised name.
-        let is_match = ADV_NAME_PREFIXES.iter().any(|pfx| name.starts_with(pfx))
-            || advertises(protocol::SERVICE_UUID)
-            || advertises(ftms::FITNESS_MACHINE_SERVICE_UUID);
+        let is_match = drivers::any_match(&advertisement(&name, &props.services));
         if !all_devices && !is_match {
             continue;
         }
@@ -215,6 +194,29 @@ async fn find_peripheral(adapter: &Adapter, device_id: &str) -> Result<Periphera
     Err(anyhow!("device {device_id} not found in scan"))
 }
 
+/// Resolves when the driver must be torn down: shutdown, a manual disconnect
+/// (pause), or the paired device changing under us. Registered-before-check on
+/// `wake`, for the same lost-wake reason as the worker loop above.
+async fn cancelled(state: &Arc<AppState>, device_id: &str) {
+    loop {
+        let wake = state.wake.notified();
+        tokio::pin!(wake);
+        wake.as_mut().enable();
+        if state.stop.load(Ordering::Relaxed) {
+            return;
+        }
+        if state.is_paused() {
+            tracing::info!("manual disconnect requested; dropping link");
+            return;
+        }
+        if state.device_id().as_deref() != Some(device_id) {
+            tracing::info!("device_id changed; dropping connection");
+            return;
+        }
+        wake.as_mut().await;
+    }
+}
+
 /// Returns `Ok(true)` once a link was established (a later mid-session drop is
 /// still `true` — a normal reconnect, not a failure), `Ok(false)` if we never
 /// reached the treadmill (counts toward the give-up limit).
@@ -238,190 +240,61 @@ async fn connect_and_poll(state: &Arc<AppState>, device_id: &str) -> Result<bool
         return Ok(false);
     }
 
-    let chars = peripheral.characteristics();
-    let notify_char = chars.iter().find(|c| c.uuid == notify_uuid()).cloned();
-    let write_char = chars.iter().find(|c| c.uuid == write_uuid()).cloned();
-
-    // Prefer the native SC110 protocol (FFF1/FFF2). Fall back to the standard
-    // Bluetooth FTMS Treadmill Data characteristic (0x2ACD) so other LifeSpan
-    // models and third-party FTMS treadmills work too.
-    let poll = if let (Some(notify_char), Some(write_char)) = (notify_char, write_char) {
-        poll_sc110(state, &peripheral, device_id, notify_char, write_char).await
-    } else if let Some(data_char) = chars.iter().find(|c| c.uuid == ftms_data_uuid()).cloned() {
-        stream_ftms(state, &peripheral, device_id, data_char).await
-    } else {
-        let _ = peripheral.disconnect().await;
-        return Err(anyhow!(
-            "device exposes neither SC110 (FFF1/FFF2) nor FTMS (2ACD) characteristics"
-        ));
+    // Pick the driver: first registry entry whose `supports()` accepts this
+    // device's GATT table (and advertisement). Registry order is the tiebreak —
+    // see `drivers::DRIVERS` for why LifeSpan outranks FTMS.
+    let adv = match peripheral.properties().await {
+        Ok(Some(props)) => advertisement(&props.local_name.unwrap_or_default(), &props.services),
+        _ => advertisement("", &[]),
     };
-    if let Err(e) = poll {
+    let gatt = peripheral.characteristics();
+    let driver = match drivers::for_device(&adv, &gatt) {
+        Some(d) => d,
+        None => {
+            let _ = peripheral.disconnect().await;
+            return Err(anyhow!(
+                "no driver supports this device's characteristics (drivers: {})",
+                drivers::ids().join(", ")
+            ));
+        }
+    };
+
+    announce_connected(state, device_id, driver.id());
+
+    // The display unit is captured once per connection: the driver interprets
+    // its wire format with it and `from_sample` re-encodes with it, and the two
+    // MUST agree or raw values would drift on a mid-session unit change.
+    let unit = state.display_unit();
+    let recorder = |tag: u8, frame: &[u8]| state.record_frame(tag, frame);
+    let host = DriverHost::new(unit.clone(), &recorder);
+
+    let mut last_status: Option<u8> = None;
+    let mut status_streak: i32 = 0;
+    let mut last_persist: f64 = 0.0;
+    let mut emit = |sample: Sample| {
+        let telem = Telemetry::from_sample(&sample, &unit);
+        ingest_sample(
+            state,
+            &telem,
+            &mut last_status,
+            &mut status_streak,
+            &mut last_persist,
+        );
+        broadcast_state(state, &telem);
+    };
+
+    // The driver runs until the link errors; we cancel it on shutdown, pause,
+    // or device switch. Either way the disconnect below is ours, not the
+    // driver's — a driver never manages the link's lifecycle.
+    let outcome = tokio::select! {
+        r = driver.run(&peripheral, &host, &mut emit) => r,
+        _ = cancelled(state, device_id) => Ok(()),
+    };
+    let _ = peripheral.disconnect().await;
+    if let Err(e) = outcome {
         tracing::warn!("BLE session ended: {e:#}");
     }
     Ok(true) // we did connect; a drop here is a normal reconnect
-}
-
-/// Native SC110 path: poll the opcode rotation and decode via `Reader`.
-async fn poll_sc110(
-    state: &Arc<AppState>,
-    peripheral: &Peripheral,
-    device_id: &str,
-    notify_char: btleplug::api::Characteristic,
-    write_char: btleplug::api::Characteristic,
-) -> Result<()> {
-    peripheral.subscribe(&notify_char).await?;
-    let mut notifications = peripheral.notifications().await?;
-
-    announce_connected(state, device_id, "SC110");
-
-    let mut reader = Reader::new(&state.display_unit());
-    let mut last_status: Option<u8> = None;
-    let mut status_streak: i32 = 0;
-    let mut last_persist: f64 = 0.0;
-    let mut idx = 0usize;
-    let mut dead_polls: u32 = 0;
-
-    while !state.stop.load(Ordering::Relaxed) {
-        if state.is_paused() {
-            tracing::info!("manual disconnect requested; dropping link");
-            break;
-        }
-        if state.device_id().as_deref() != Some(device_id) {
-            tracing::info!("device_id changed; dropping connection");
-            break;
-        }
-        let opcode = DEFAULT_POLL_ROTATION[idx % DEFAULT_POLL_ROTATION.len()];
-        idx += 1;
-
-        // Drain any stale buffered notifications so the response we read below is
-        // the one for THIS request. Responses don't echo their opcode, so a single
-        // buffered/lagging frame would otherwise mis-assign every field (speed
-        // reading as steps, etc.).
-        while notifications.next().now_or_never().flatten().is_some() {}
-
-        // Bound the write: a stale link can block the write forever with no
-        // disconnect event, which would wedge the worker.
-        match tokio::time::timeout(
-            RESPONSE_TIMEOUT,
-            peripheral.write(&write_char, &build_request(opcode), WriteType::WithResponse),
-        )
-        .await
-        {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => return Err(e.into()), // real BLE error → reconnect
-            Err(_) => {
-                dead_polls += 1;
-                tracing::warn!(
-                    "timeout writing opcode 0x{opcode:02x} ({dead_polls}/{MAX_DEAD_POLLS})"
-                );
-                if dead_polls >= MAX_DEAD_POLLS {
-                    return Err(anyhow!("link unresponsive; forcing reconnect"));
-                }
-                tokio::time::sleep(POLL_INTERVAL).await;
-                continue;
-            }
-        }
-
-        // Await the next notification with a timeout (responses don't echo opcode).
-        let frame = match tokio::time::timeout(RESPONSE_TIMEOUT, notifications.next()).await {
-            Ok(Some(n)) => n.value,
-            Ok(None) => return Err(anyhow!("notification stream ended")),
-            Err(_) => {
-                dead_polls += 1;
-                tracing::warn!(
-                    "timeout waiting for response to opcode 0x{opcode:02x} ({dead_polls}/{MAX_DEAD_POLLS})"
-                );
-                if dead_polls >= MAX_DEAD_POLLS {
-                    return Err(anyhow!("link unresponsive; forcing reconnect"));
-                }
-                tokio::time::sleep(POLL_INTERVAL).await;
-                continue;
-            }
-        };
-        dead_polls = 0; // a frame arrived → the link is alive
-        state.record_frame(opcode, &frame); // raw capture for protocol diagnostics
-
-        let telem = match reader.feed(opcode, &frame) {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::warn!("decode error opcode 0x{opcode:02x}: {e}");
-                tokio::time::sleep(POLL_INTERVAL).await;
-                continue;
-            }
-        };
-
-        ingest_sample(
-            state,
-            &telem,
-            &mut last_status,
-            &mut status_streak,
-            &mut last_persist,
-        );
-        broadcast_state(state, &telem);
-        tokio::time::sleep(POLL_INTERVAL).await;
-    }
-    let _ = peripheral.disconnect().await;
-    Ok(())
-}
-
-/// Standard FTMS path: subscribe to Treadmill Data and decode each push.
-async fn stream_ftms(
-    state: &Arc<AppState>,
-    peripheral: &Peripheral,
-    device_id: &str,
-    data_char: btleplug::api::Characteristic,
-) -> Result<()> {
-    peripheral.subscribe(&data_char).await?;
-    let mut notifications = peripheral.notifications().await?;
-
-    announce_connected(state, device_id, "FTMS");
-
-    let mut last_status: Option<u8> = None;
-    let mut status_streak: i32 = 0;
-    let mut last_persist: f64 = 0.0;
-
-    while !state.stop.load(Ordering::Relaxed) {
-        if state.is_paused() {
-            tracing::info!("manual disconnect requested; dropping link");
-            break;
-        }
-        if state.device_id().as_deref() != Some(device_id) {
-            tracing::info!("device_id changed; dropping connection");
-            break;
-        }
-        let frame = match tokio::time::timeout(FTMS_IDLE_TIMEOUT, notifications.next()).await {
-            Ok(Some(n)) => n.value,
-            Ok(None) => return Err(anyhow!("notification stream ended")),
-            Err(_) => {
-                // A quiet belt is normal for FTMS (no push when stopped). Only
-                // treat the link as dead if the OS no longer considers us
-                // connected — recovers a stale handle without churning on
-                // legitimate pauses.
-                if !peripheral.is_connected().await.unwrap_or(false) {
-                    return Err(anyhow!("FTMS link dropped; reconnecting"));
-                }
-                continue;
-            }
-        };
-        let data = match ftms::parse_treadmill_data(&frame) {
-            Ok(d) => d,
-            Err(e) => {
-                tracing::warn!("FTMS decode error: {e}");
-                continue;
-            }
-        };
-        let telem = ftms_to_telemetry(&data, &state.display_unit());
-        ingest_sample(
-            state,
-            &telem,
-            &mut last_status,
-            &mut status_streak,
-            &mut last_persist,
-        );
-        broadcast_state(state, &telem);
-    }
-    let _ = peripheral.disconnect().await;
-    Ok(())
 }
 
 fn announce_connected(state: &Arc<AppState>, device_id: &str, kind: &str) {
@@ -440,50 +313,6 @@ fn broadcast_state(state: &Arc<AppState>, telem: &Telemetry) {
         m.insert("active_session_id".into(), json!(state.active_session()));
     }
     state.broadcast(msg);
-}
-
-/// Map a decoded FTMS Treadmill Data record onto the app's `Telemetry` shape so
-/// the existing UI, session detection, and storage work unchanged. FTMS does not
-/// report step counts, so `steps` stays `None` for these treadmills.
-fn ftms_to_telemetry(d: &ftms::FtmsTreadmillData, unit: &str) -> Telemetry {
-    let mut t = Telemetry::new(unit);
-    if let Some(kmh) = d.instantaneous_speed {
-        // Telemetry.speed_raw is hundredths of the *displayed* unit.
-        let displayed = if unit == "mph" {
-            kmh / protocol::KMH_PER_MPH
-        } else {
-            kmh
-        };
-        let raw = (displayed * 100.0).round().max(0.0) as u32;
-        t.speed_raw = Some(raw);
-        t.speed_kmh = Some(protocol::speed_kmh(raw, unit));
-        t.speed_mph = Some(protocol::speed_mph(raw, unit));
-        let running = kmh > 0.05;
-        let status = if running {
-            protocol::STATUS_RUNNING
-        } else {
-            protocol::STATUS_STANDBY
-        };
-        t.status = Some(status);
-        t.status_name = Some(protocol::status_name(status));
-        t.is_running = running;
-    }
-    if let Some(m) = d.total_distance_m {
-        // Telemetry.distance_raw is decameters (×10 = meters).
-        let raw = (m as f64 / 10.0).round() as u32;
-        t.distance_raw = Some(raw);
-        t.distance_m = Some(protocol::distance_meters(raw));
-        t.distance_km = Some(protocol::distance_meters(raw) as f64 / 1000.0);
-        t.distance_mi =
-            Some(protocol::distance_meters(raw) as f64 / 1000.0 / protocol::KMH_PER_MPH);
-    }
-    if let Some(s) = d.elapsed_time_s {
-        t.duration_s = Some(s);
-    }
-    if let Some(c) = d.total_energy_kcal {
-        t.calories = Some(c);
-    }
-    t
 }
 
 /// Minimum spacing between PERSISTED raw samples. We poll far faster than this
@@ -603,14 +432,11 @@ fn persist_close(state: &Arc<AppState>, sid: i64, telem: Option<&Telemetry>, rea
     );
 }
 
-use serde_json::Value;
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::db::Db;
-    use crate::protocol::STATUS_RUNNING;
-    use crate::protocol::STATUS_STANDBY;
+    use crate::telemetry::{STATUS_RUNNING, STATUS_STANDBY};
 
     fn running(steps: u32) -> Telemetry {
         let mut t = Telemetry::new("km/h");
