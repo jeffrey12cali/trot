@@ -101,9 +101,10 @@ use, so your driver states intent and the timing lore stays in one place.
 2. **Request/response polling.** The device answers one value per request: you
    write an opcode, it notifies the reply. LifeSpan works this way — see
    `drivers/lifespan.rs`, which rotates through its opcodes ~50 ms apart.
-   Others in this family (KingSmith WiLink, FitShow) add checksums
-   (`util::checksum_sum`, `util::checksum_xor`) and enforce minimum spacing
-   between commands — WiLink drops writes closer than 690 ms
+   Others in this family (KingSmith WiLink — `drivers/kingsmith_wilink.rs`;
+   FitShow — `drivers/fitshow.rs`) add checksums (`util::checksum_sum`,
+   `util::checksum_xor`) and sometimes enforce minimum spacing between
+   commands — WiLink drops writes closer than 690 ms
    (`util::CommandSpacer`).
 3. **Init handshake, then push.** The device is silent until you write one or
    more magic frames (Urevo needs a single wake write — see
@@ -133,7 +134,7 @@ use, so your driver states intent and the timing lore stays in one place.
 Five hard-won warnings:
 
 - **A service UUID proves nothing.** `0xFFF0` with `FFF1`/`FFF2` is a generic
-  vendor-module layout used by at least five mutually incompatible treadmill
+  vendor-module layout used by at least six mutually incompatible treadmill
   protocols — and at least one of them (Deerrun) swaps the notify/write roles
   relative to the others. Match on the advertised **name prefix plus** the
   service, and in `supports()` verify the characteristic **properties** (notify
@@ -142,16 +143,18 @@ Five hard-won warnings:
   LifeSpan driver requires both, and why a role-verified-but-unnamed
   `FFF1`/`FFF2` device is only claimed by the deliberate `lifespan-fallback`
   entry at the very end of the registry, after every stricter driver has
-  passed on it. Four in-tree drivers now share that exact block — LifeSpan,
-  Urevo (`drivers/urevo.rs`) and Sperax (`drivers/sperax.rs`) on the
-  notify-FFF1/write-FFF2 arrangement, kept apart purely by their
-  advertised-name gates, plus PitPat (`drivers/pitpat.rs`), whose Deerrun
-  transport variant is the *swapped* arrangement the role checks exist for;
-  `drivers/mod.rs` has a test adjudicating every combination, and your
-  driver joins it. A protocol can also ship behind **several** service
-  layouts at once — the PitPat family uses at least four — in which case
-  `supports()` probes them in order of how well each is verified rather
-  than assuming one (see `pitpat.rs`'s `select_transport`). Names can be
+  passed on it. Five in-tree drivers now share that exact block — LifeSpan,
+  Urevo (`drivers/urevo.rs`), Sperax (`drivers/sperax.rs`) and FitShow
+  (`drivers/fitshow.rs`) on the notify-FFF1/write-FFF2 arrangement, kept
+  apart purely by their advertised-name gates, plus PitPat
+  (`drivers/pitpat.rs`), whose Deerrun transport variant is the *swapped*
+  arrangement the role checks exist for; `drivers/mod.rs` has a test
+  adjudicating every combination, and your driver joins it. A protocol can
+  also ship behind **several** service layouts at once — the PitPat family
+  uses at least four, FitShow three — in which case `supports()` probes
+  them in order of how well each is verified rather than assuming one (see
+  `pitpat.rs`'s `select_transport`, or `fitshow.rs`'s for the
+  deployed-preference variant). Names can be
   treacherous on their own, too: Sperax ships two revisions distinguished
   only by a hyphen (`SPERAX_RM01` speaks the proprietary protocol,
   `SPERAX_RM-01` speaks FTMS), and only one Urevo model (`URTM041`) is

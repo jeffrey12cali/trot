@@ -111,6 +111,22 @@ big-endian step-count offset and the end-anchored speed offset, plus the
 `F0`-escape rule were derived by Trot from the captured frames embedded in
 that source and verify against all 64 of them.
 
+Trot's FitShow driver **ports protocol knowledge from qdomyos-zwift's**
+`src/devices/fitshowtreadmill/fitshowtreadmill.{cpp,h}`, the most widely
+deployed implementation of the FitShow `02 … 03` protocol: the frame
+envelope and XOR trailer, the status-response field map in both its byte
+orders (standard little-endian and the big-endian "anyrun" variant, which
+Trot implements for tests but deliberately does not auto-select — upstream
+gates it behind a user setting because no on-wire discriminator exists),
+the status-code table, the three transport layouts (`FFF0`, `AE00`,
+`FFE0`/`FFE4`) with their deployed preference order, and the
+advertised-name matcher with its carve-outs (`FS-YK-`, the
+NoblePro/`SW`-rule FTMS routing, the Tunturi T80/T60/T90 split —
+`src/devices/bluetooth.cpp`). qdomyos-zwift's belt-control paths (its
+`0x53` control-family frames, the user-data login among them) are
+deliberately not ported; two of those frames appear in Trot's tests solely
+as checksum vectors.
+
 Trot's PitPat/Deerrun/SupeRun driver **ports protocol knowledge from
 qdomyos-zwift's** `src/devices/deerruntreadmill/deerruntreadmill.cpp` and
 its `PITPAT-T*` device matcher (`src/devices/bluetooth.cpp`): the Deerrun
@@ -196,6 +212,58 @@ by sirfergy (`custom_components/walkingpad/protocol.py`), a
 PaceKeeper-derived Home Assistant integration. HomeAssistantWalkingPad is
 distributed under the **GNU General Public License, version 3** — the same
 license as Trot; see [LICENSE](LICENSE) for the full text.
+
+## milltender — `sstjohn/milltender`
+
+Trot's FitShow driver **ports protocol knowledge (no code) from
+[milltender](https://github.com/sstjohn/milltender)** by sstjohn
+(`milltender.py`, `phase0/fitshow_probe.py`), the only FitShow telemetry
+implementation verified on real hardware (a TX6 Glow-Up walking pad on a
+FitShow FS-BT-D2 module): the finding that the status stream answers a
+bare `02 51 51 03` poll with no login or init write of any kind, the
+`FFF0` transport's LifeSpan-shaped roles (write FFF2, notify FFF1), the
+≥12-byte status-payload floor, inbound XOR validation, and the imperial
+wire scales on that hardware (0.1 mph speed, 0.001 mile distance, and the
+0.1 kcal calorie reading whose conflict with qdomyos-zwift is why Trot
+reports no calories from this protocol). milltender is distributed under
+the **GNU Affero General Public License, version 3**
+(<https://www.gnu.org/licenses/agpl-3.0.html>).
+
+## fitshow-treadmill-accessible — `aradix85/fitshow-treadmill-accessible`
+
+The finding that newer FitShow modules (FS-BT-C1, still advertising
+`FS-…`) speak plain standard FTMS with the vendor `FFF0` service reduced
+to a notify-only side channel — which is why Trot's FitShow driver
+verifies the vendor *write* role and lets such hardware fall through to
+the FTMS driver — comes from
+**[fitshow-treadmill-accessible](https://github.com/aradix85/fitshow-treadmill-accessible)**
+by aradix85 (`docs/PROTOCOL.md`, a reverse-engineered protocol note for
+the VirtuFit TR600i). fitshow-treadmill-accessible is distributed under
+the MIT License:
+
+```
+MIT License
+
+Copyright (c) 2026 aradix85
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
 
 ## walkingpad-controller — `mcdax/walkingpad-controller`
 

@@ -16,6 +16,7 @@
 //! line makes the device discoverable *and* connectable. The full guide for
 //! contributors lives in `docs/drivers/README.md`.
 
+pub mod fitshow;
 pub mod ftms;
 pub mod kingsmith_wilink;
 pub mod lifespan;
@@ -55,6 +56,15 @@ use uuid::Uuid;
 ///   of its four verified transport layouts — including the Deerrun variant
 ///   on 0xFFF0 with the notify/write roles SWAPPED relative to LifeSpan,
 ///   which the role checks keep out of every LifeSpan entry.
+/// * `FitShow` (the white-label OEM platform behind `FS-…`, NoblePro,
+///   Tunturi T80 and friends) requires a recognised name plus one of its
+///   three role-verified transports — including the contested `0xFFF0`
+///   block with LifeSpan's EXACT role arrangement, which is why its name
+///   gate (like Urevo's and Sperax's) is the whole adjudication there. For
+///   the names qdomyos routes to FTMS when FTMS is present (NoblePro,
+///   WinFita, `SW…`, BF70), `supports()` steps aside the moment the table
+///   carries Treadmill Data; the `FS-`/TR510/Tunturi-T80 core keeps the
+///   native protocol even alongside FTMS because it reports steps.
 /// * `Ftms` requires the standard Treadmill Data characteristic.
 /// * `LifeSpanFallback` is the deliberate last resort: a device nobody else
 ///   claimed, whose `FFF1`/`FFF2` roles are exactly LifeSpan-shaped, is
@@ -70,6 +80,7 @@ pub static DRIVERS: &[&dyn Driver] = &[
     &urevo::Urevo,
     &sperax::Sperax,
     &pitpat::PitPat,
+    &fitshow::FitShow,
     &ftms::Ftms,
     &lifespan::LifeSpanFallback,
 ];
@@ -93,7 +104,7 @@ pub trait Driver: Send + Sync {
     ///
     /// Match on what you will actually subscribe to or write — and be aware
     /// that a service UUID alone proves nothing: 0xFFF0 alone hosts at least
-    /// five mutually incompatible vendor protocols, some with the notify/write
+    /// six mutually incompatible vendor protocols, some with the notify/write
     /// roles swapped. When your protocol shares a service with others, check
     /// characteristic properties and the advertised name, not just UUIDs. A
     /// device whose advertisement looked like yours but whose table doesn't
@@ -292,6 +303,19 @@ mod tests {
             !any_match(&adv("PITPAT-S1", &[])),
             "PITPAT-S is the PitPat bike — Trot reads treadmills only"
         );
+        // The FitShow OEM family: by name only (its three service blocks
+        // are all generic or contested).
+        assert!(any_match(&adv("FS-3D6CD7", &[])));
+        assert!(any_match(&adv("NOBLEPRO CONNECT 1", &[])));
+        assert!(any_match(&adv("TUNTURI T80-2", &[])));
+        assert!(
+            !any_match(&adv("TUNTURI T90-2", &[])),
+            "the T60/T90 are plain FTMS and surface via 0x1826, not by name"
+        );
+        assert!(
+            !any_match(&adv("FS-YK-100", &[])),
+            "FS-YK is a FitShow-named exercise BIKE — Trot reads treadmills only"
+        );
         assert!(!any_match(&adv("Some Headphones", &[0x180f])));
         assert!(!any_match(&adv("", &[])));
     }
@@ -477,6 +501,104 @@ mod tests {
         assert!(for_device(&adv("PITPAT-S1", &[]), &gatt(&[(0xfba1, W), (0xfba2, N)])).is_none());
     }
 
+    /// The FitShow adjudication on the contested 0xFFF0 block — the hardest
+    /// case yet, because FitShow's FFF0 arrangement is byte-identical to
+    /// LifeSpan's (notify FFF1, write FFF2): role checks cannot tell them
+    /// apart, so the advertised name carries the whole decision. A
+    /// FitShow-named device must land on the FitShow driver and never on a
+    /// LifeSpan entry; a LifeSpan console must never reach FitShow; a
+    /// nameless device stays with the deliberate fallback. Plus both
+    /// directions of the FTMS split qdomyos ships for this family.
+    #[test]
+    fn the_fitshow_family_adjudication_across_transports_and_ftms() {
+        let lifespan_shape = gatt(&[(0xfff1, N), (0xfff2, W)]);
+
+        // Every FitShow transport, by name: FFF0 (LifeSpan-shaped), AE00,
+        // and FFE0 (whose notify characteristic is FFE4, not FFE1).
+        for (label, shape) in [
+            ("FFF0", gatt(&[(0xfff1, N), (0xfff2, W)])),
+            ("AE00", gatt(&[(0xae02, N), (0xae01, W)])),
+            (
+                "FFE0",
+                gatt(&[(0xffe4, N), (0xffe1, CharPropFlags::WRITE_WITHOUT_RESPONSE)]),
+            ),
+        ] {
+            assert_eq!(
+                for_device(&adv("FS-3D6CD7", &[]), &shape).map(|d| d.id()),
+                Some("fitshow"),
+                "{label}"
+            );
+        }
+
+        // The 0xFFF0 name adjudication, all three ways.
+        assert_eq!(
+            for_device(&adv("LifeSpan-TM", &[]), &lifespan_shape).map(|d| d.id()),
+            Some("lifespan"),
+            "a LifeSpan console never reaches FitShow"
+        );
+        assert_eq!(
+            for_device(&adv("", &[]), &lifespan_shape).map(|d| d.id()),
+            Some("lifespan-fallback"),
+            "nameless FFF1/FFF2 stays with the deliberate fallback"
+        );
+        assert_eq!(
+            for_device(&adv("FS-3D6CD7", &[]), &lifespan_shape).map(|d| d.id()),
+            Some("fitshow"),
+            "a FitShow name claims the shape before the fallback"
+        );
+
+        // The FTMS split, both directions. The FS-/TR510/Tunturi-T80 core
+        // keeps the native protocol even alongside real FTMS (it reports
+        // steps); the FTMS-preferred names (NoblePro, WinFita, SW…, BF70)
+        // yield to FTMS the moment Treadmill Data is present.
+        let fff0_with_ftms = gatt(&[(0xfff1, N), (0xfff2, W), (0x2acd, N)]);
+        let ae00_with_ftms = gatt(&[(0xae02, N), (0xae01, W), (0x2acd, N)]);
+        assert_eq!(
+            for_device(&adv("TUNTURI T80-1", &[]), &fff0_with_ftms).map(|d| d.id()),
+            Some("fitshow")
+        );
+        assert_eq!(
+            for_device(&adv("FS-3D6CD7", &[]), &fff0_with_ftms).map(|d| d.id()),
+            Some("fitshow")
+        );
+        assert_eq!(
+            for_device(&adv("NOBLEPRO CONNECT 1", &[]), &ae00_with_ftms).map(|d| d.id()),
+            Some("ftms"),
+            "qdomyos routes a NoblePro with FTMS to FTMS; so do we"
+        );
+        assert_eq!(
+            for_device(
+                &adv("NOBLEPRO CONNECT 1", &[]),
+                &gatt(&[(0xae02, N), (0xae01, W)])
+            )
+            .map(|d| d.id()),
+            Some("fitshow"),
+            "…and to FitShow without it"
+        );
+
+        // A modern FS-BT-C1 module: plain FTMS, vendor FFF1 notify-only
+        // (no FFF2 write role) — the role check refuses the vendor block
+        // and the device lands on FTMS.
+        assert_eq!(
+            for_device(&adv("FS-AB12CD", &[]), &gatt(&[(0xfff1, N), (0x2acd, N)])).map(|d| d.id()),
+            Some("ftms")
+        );
+
+        // The Deerrun-swapped FFF0 roles with a FitShow name: no driver —
+        // that table is neither FitShow nor LifeSpan, whatever the name
+        // says, and mis-claiming the contested block is the failure this
+        // registry is built to prevent.
+        assert!(for_device(
+            &adv("FS-3D6CD7", &[]),
+            &gatt(&[(0xfff1, CharPropFlags::WRITE_WITHOUT_RESPONSE), (0xfff2, N)])
+        )
+        .is_none());
+
+        // The FitShow-named exercise bike: no driver even on a
+        // FitShow-shaped table — Trot reads treadmills only.
+        assert!(for_device(&adv("FS-YK-100", &[]), &gatt(&[(0xae02, N), (0xae01, W)])).is_none());
+    }
+
     /// A named WalkingPad with the WiLink notify/write roles takes the native
     /// driver — including over FTMS (some newer pads expose both, and only
     /// the native protocol reports steps). The carved-out FTMS model with the
@@ -564,6 +686,7 @@ mod tests {
                 "urevo",
                 "sperax",
                 "pitpat",
+                "fitshow",
                 "ftms",
                 "lifespan-fallback"
             ]

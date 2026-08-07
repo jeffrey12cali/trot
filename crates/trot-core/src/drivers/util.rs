@@ -312,15 +312,18 @@ impl TransportCodec for IdentityCodec {
 
 // ---- Checksums ---------------------------------------------------------------
 
-/// Additive checksum: `sum(bytes) mod 256`. The most common trailer byte in
-/// vendor treadmill frames (FitShow and the KingSmith request/response family
-/// among them).
+/// Additive checksum: `sum(bytes) mod 256`. One of the two trailer bytes
+/// that occur in the wild (the KingSmith request/response family among its
+/// users).
 pub fn checksum_sum(bytes: &[u8]) -> u8 {
     bytes.iter().fold(0u8, |acc, b| acc.wrapping_add(*b))
 }
 
 /// XOR checksum: `bytes[0] ^ bytes[1] ^ …`. The other trailer byte that
-/// actually occurs in the wild.
+/// actually occurs in the wild — FitShow's `02 … 03` frames and the PitPat
+/// family both use it. (An earlier comment here claimed FitShow's trailer
+/// was additive; it is not — every FitShow source, its own OEM spec
+/// included, XORs.)
 pub fn checksum_xor(bytes: &[u8]) -> u8 {
     bytes.iter().fold(0u8, |acc, b| acc ^ b)
 }
