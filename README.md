@@ -314,7 +314,7 @@ data your treadmill already broadcasts over Bluetooth.
 LifeSpan, Horizon, BowFlex, Technogym, Matrix, 3G Cardio, WalkingPad / KingSmith,
 Urevo, Merach, Sunny Health & Fitness, CitySports, WellFit, Mobvoi, Sportstech,
 YPOO, TheRun, Sperax, PitPat, Deerrun, SupeRun, FitShow, NoblePro, Tunturi,
-WinFita, NordicTrack, ProForm, Peloton and
+WinFita, Anplus, Focus Fitness, VirtuFit, Woodway, NordicTrack, ProForm, Peloton and
 Echelon are trademarks or registered trademarks of their respective owners. The **Bluetooth®** word mark and logos are registered
 trademarks owned by Bluetooth SIG, Inc. All other product and company names are the
 property of their respective holders; their use here is for identification and
