@@ -148,6 +148,24 @@ relative to LifeSpan, and the status-query frame `6A 05 FD F8 43` with its
 ported; two of its captured control frames appear in Trot's tests solely as
 checksum vectors.
 
+Trot's KingSmith app-cipher (R2/X21) driver **ports protocol knowledge
+from qdomyos-zwift's**
+`src/devices/kingsmithr2treadmill/kingsmithr2treadmill.{cpp,h}`, the most
+widely deployed implementation of the obfuscated `props` text protocol:
+the seven substitution-cipher tables and the transport pipeline (UTF-8 →
+base64 → per-character substitution → `0x0D` terminator → 16-byte
+write-without-response chunks), the three service/characteristic address
+spaces (`0x1234`/`FED7`/`FED8` and its `0001…`/`0002…` variants) with
+their per-model routing and fallbacks, the init message sequence and the
+observed reply to each frame, the `props <key> <value>…` response grammar
+with its `Error`/`mcu_version`/`goal` special cases, the telemetry key
+list, and the advertised-name matcher (`src/devices/bluetooth.cpp`).
+qdomyos-zwift's belt-control paths — its `props CurrentSpeed`/`runState`/
+`ControlMode` setter writes — and its clock-setting `time_posix` init
+write are deliberately not ported. Where qdomyos-zwift exposes the
+cipher-table choice as a user setting, Trot detects the table from the
+traffic instead — an independent design, documented in the driver.
+
 qdomyos-zwift is distributed under the **GNU General Public License,
 version 3** — the same license as Trot; see [LICENSE](LICENSE) for the full
 text.
@@ -332,3 +350,22 @@ Copyright (C) 2021 Dorian Rudolph, a third independent implementation of the
 WalkingPad protocol (`Protocol.cpp`). QWalkingPad is distributed under the
 **GNU General Public License, version 3** — the same license as Trot; see
 [LICENSE](LICENSE) for the full text.
+
+## walkingpad-ble-footpod — `LucasFrendorf/walkingpad-ble-footpod`
+
+Trot's KingSmith app-cipher (R2/X21) driver was **cross-checked against
+[walkingpad-ble-footpod](https://github.com/LucasFrendorf/walkingpad-ble-footpod)**
+by LucasFrendorf, a client for the KS-NGCH-G1C built on the same protocol
+(`kingsmith_g1c.py`). It confirms both 128-bit address-space variants on
+real G1C hardware revisions, the 16-byte write-without-response chunking,
+and the G1C's default v6 cipher table — and it is the source that
+establishes the poll-driven steady state: its monitor loop re-sends
+`servers getProp …` at 1 Hz and reads the full telemetry from the `props`
+replies. Its belt-control writes and its clock-setting `time_posix` init
+frame are not ported. walkingpad-ble-footpod is distributed under the
+**GNU General Public License, version 3** — the same license as Trot; see
+[LICENSE](LICENSE) for the full text.
+
+A further public implementation of this protocol exists (a Kotlin Android
+client) but carries no license; per this project's rules nothing was taken
+from it and it is deliberately absent from these notices.

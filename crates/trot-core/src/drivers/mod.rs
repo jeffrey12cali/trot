@@ -18,6 +18,7 @@
 
 pub mod fitshow;
 pub mod ftms;
+pub mod kingsmith_props;
 pub mod kingsmith_wilink;
 pub mod lifespan;
 pub mod pitpat;
@@ -44,6 +45,12 @@ use uuid::Uuid;
 ///   the FE01-notify/FE02-write roles, with the known FTMS/app-cipher
 ///   KingSmith models carved out by name) and outranks FTMS for the same
 ///   reason: the native protocol reports steps.
+/// * `KingSmithProps` is the app-cipher KingSmith generation (R2/X21/X23/
+///   G1/K12 Pro) on its own obfuscated text transport — service x1234 with
+///   FED8-notify/FED7-write in one of three UUID address spaces. Its name
+///   list is the exact complement of WiLink's carve-outs (a test in the
+///   driver pins the boundary both ways), and its transport collides with
+///   nothing else in the tree.
 /// * `Urevo` and `Sperax` both live on the contested `0xFFF0` block with
 ///   LifeSpan-shaped roles, so they require a recognised advertised name
 ///   (`URTM041…` / `SPERAX_RM01…`, `SPERAX_RM-02…`) on top of the roles.
@@ -77,6 +84,7 @@ use uuid::Uuid;
 pub static DRIVERS: &[&dyn Driver] = &[
     &lifespan::LifeSpan,
     &kingsmith_wilink::KingSmithWiLink,
+    &kingsmith_props::KingSmithProps,
     &urevo::Urevo,
     &sperax::Sperax,
     &pitpat::PitPat,
@@ -286,6 +294,12 @@ mod tests {
         assert!(any_match(&adv("", &[0x1826])));
         assert!(any_match(&adv("WalkingPad A1", &[])));
         assert!(any_match(&adv("", &[0xfe00])));
+        // The app-cipher KingSmith generation: by name or its 0x1234
+        // service (the two 128-bit address-space variants are covered in
+        // the driver's own tests).
+        assert!(any_match(&adv("KS-X21C-1234", &[])));
+        assert!(any_match(&adv("KS-NGCH-G1C", &[])));
+        assert!(any_match(&adv("", &[0x1234])));
         // FTMS walking pads that advertise a known name without 0x1826.
         assert!(any_match(&adv("URTM024", &[])));
         assert!(any_match(&adv("KS-MC21-D06BFD", &[])));
@@ -599,6 +613,54 @@ mod tests {
         assert!(for_device(&adv("FS-YK-100", &[]), &gatt(&[(0xae02, N), (0xae01, W)])).is_none());
     }
 
+    /// The two native KingSmith generations, adjudicated: an app-cipher
+    /// name on the props transport lands on the props driver; the same
+    /// name on a WiLink-shaped table reaches NEITHER native driver (the
+    /// name is carved out of WiLink, and the table isn't the props
+    /// layout); a WiLink name never reaches the props driver. The props
+    /// transport requires characteristics under their own service, so the
+    /// test builds the table with real service UUIDs.
+    #[test]
+    fn the_two_kingsmith_generations_never_cross_claim() {
+        let props_shape: BTreeSet<Characteristic> = [
+            Characteristic {
+                uuid: sig_uuid(0xfed8),
+                service_uuid: sig_uuid(0x1234),
+                properties: N,
+                descriptors: BTreeSet::new(),
+            },
+            Characteristic {
+                uuid: sig_uuid(0xfed7),
+                service_uuid: sig_uuid(0x1234),
+                properties: CharPropFlags::WRITE_WITHOUT_RESPONSE,
+                descriptors: BTreeSet::new(),
+            },
+        ]
+        .into();
+        let wilink_shape = gatt(&[(0xfe01, N), (0xfe02, W)]);
+
+        assert_eq!(
+            for_device(&adv("KS-NGCH-G1C", &[]), &props_shape).map(|d| d.id()),
+            Some("kingsmith-props")
+        );
+        assert_eq!(
+            for_device(&adv("", &[]), &props_shape).map(|d| d.id()),
+            Some("kingsmith-props"),
+            "nameless on the distinctive props layout stays connectable"
+        );
+        // An app-cipher name on WiLink's table: no native driver — the
+        // WiLink carve-out refuses the name, the props driver refuses the
+        // table, and polling either protocol at the other would garble.
+        assert!(for_device(&adv("KS-HDSY-X21C", &[]), &wilink_shape).is_none());
+        // A WiLink pad never reaches the props driver, with or without
+        // the props service present in the advertisement.
+        assert_eq!(
+            for_device(&adv("WalkingPad A1", &[]), &wilink_shape).map(|d| d.id()),
+            Some("kingsmith-wilink")
+        );
+        assert!(for_device(&adv("WalkingPad A1", &[]), &props_shape).is_none());
+    }
+
     /// A named WalkingPad with the WiLink notify/write roles takes the native
     /// driver — including over FTMS (some newer pads expose both, and only
     /// the native protocol reports steps). The carved-out FTMS model with the
@@ -683,6 +745,7 @@ mod tests {
             vec![
                 "lifespan",
                 "kingsmith-wilink",
+                "kingsmith-props",
                 "urevo",
                 "sperax",
                 "pitpat",

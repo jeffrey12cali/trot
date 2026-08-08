@@ -3,6 +3,18 @@
 **Status:** internal review draft · prepared 2026-08-08 · covers the tree at
 branch `docs/licensing-audit` (parent commit `bdfcb9c`).
 
+> **Addendum 2026-08-08:** the KingSmith app-cipher (R2/X21) driver
+> (`kingsmith_props.rs`) was added after this audit's snapshot. Its two
+> sources are covered by the inventory below: the `cagnulein/qdomyos-zwift`
+> row now includes it, and `LucasFrendorf/walkingpad-ble-footpod` (GPL-3.0,
+> verified via the GitHub Licenses API on 2026-08-08) has its own row. The
+> pattern is the one this audit already analyses — knowledge only, no code,
+> control paths deliberately not ported, notices kept — with one addition in
+> Trot's favour: where the upstream ships the cipher-table choice as a user
+> setting, Trot's traffic-based table detection is an independent design with
+> no upstream counterpart. A third public implementation (Kotlin, unlicensed)
+> was identified and deliberately not consulted, per §6's guardrails.
+
 > **This is not legal advice.** It was written by an AI assistant, not a
 > lawyer, for a project owner who is also not a lawyer. It is a structured
 > summary of what the sources say and where the genuine uncertainty sits. Every
@@ -81,7 +93,8 @@ full.
 
 | Source | Licence (verified) | What Trot took (code / knowledge only) | Compatible with GPLv3? | Obligations we must meet | Currently met? | Risk |
 |---|---|---|---|---|---|---|
-| `cagnulein/qdomyos-zwift` | **GPL-3.0** (repo `LICENSE` = GPLv3 text, 674 lines; no per-file "or later" grant found) | Knowledge only, across 4 drivers: WiLink init handshake + name list; FTMS advertised-name list; Sperax `F5…FA` frames (**frames sent byte-identically**) and field offsets; FitShow envelope, field map, status codes, transports, name matcher; PitPat Deerrun transport + poll frame | ✅ Yes — same licence | If code were copied: keep GPL notices, licence whole under GPL, state changes (§5). For knowledge: nothing legally required | ✅ Attributed in notices + 4 module headers | **Low** |
+| `cagnulein/qdomyos-zwift` | **GPL-3.0** (repo `LICENSE` = GPLv3 text, 674 lines; no per-file "or later" grant found) | Knowledge only, across 5 drivers + FTMS: WiLink init handshake + name list; FTMS advertised-name list; Sperax `F5…FA` frames (**frames sent byte-identically**) and field offsets; FitShow envelope, field map, status codes, transports, name matcher; PitPat Deerrun transport + poll frame; KingSmith R2/X21 cipher tables, transport pipeline, address spaces, init sequence, `props` grammar + name matcher (post-audit addendum) | ✅ Yes — same licence | If code were copied: keep GPL notices, licence whole under GPL, state changes (§5). For knowledge: nothing legally required | ✅ Attributed in notices + 5 module headers | **Low** |
+| `LucasFrendorf/walkingpad-ble-footpod` | **GPL-3.0** (verified 2026-08-08; bare GPLv3 `LICENSE`, no "or later" grant) | Knowledge only — KingSmith R2/X21 cross-check: both GATT address spaces on real G1C hardware, 16-byte WWR chunking, G1C v6 table default, the poll-driven steady state (post-audit addendum) | ✅ Yes — same licence | Same as above | ✅ Notices + `kingsmith_props.rs` header | **Low** |
 | `peteh/pacekeeper` | **GPL-3.0** (repo `LICENSE`; sources carry no per-file header) | Knowledge only — FBA0 service layout, status-frame field map incl. steps, subscribe-and-push interaction model | ✅ Yes — same licence | Same as above | ✅ Notices + `pitpat.rs` header | **Low** |
 | `DorianRudolph/QWalkingPad` | **GPL-3.0-or-later** (per-file header in `Protocol.cpp`: "either version 3 … or (at your option) any later version") | Knowledge only — independent confirmation of WiLink field offsets and belt-state semantics | ✅ Yes | Same as above | ✅ Notices + `kingsmith_wilink.rs` header | **Low** |
 | `sirfergy/HomeAssistantWalkingPad` | **GPL-3.0** | Knowledge only — one finding: PitPat wire stays metric when the panel displays miles | ✅ Yes | Same as above | ✅ Notices + `pitpat.rs` header | **Low** |

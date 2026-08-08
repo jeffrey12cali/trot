@@ -123,13 +123,24 @@ use, so your driver states intent and the timing lore stays in one place.
    can't.
 4. **Obfuscated transport.** The nastiest real-world case: a text protocol,
    base64'd, run through a substitution cipher, split into 16-byte GATT chunks,
-   terminated by a marker byte (some KingSmith generations). Your `run()` loop
-   then has three layers: reassemble notifications into complete messages with
-   `util::FrameAssembler` (buffer until the terminator — a frame can be split
-   across chunks AND several frames can share one chunk), decode the transport
-   behind the `util::TransportCodec` seam, then parse the payload. The cipher
-   tables themselves belong in your driver file — the seam exists so the
-   reassembly and parsing layers never have to know about them.
+   terminated by a marker byte — the app-cipher KingSmith generation, and
+   now an in-tree reality: see `drivers/kingsmith_props.rs`. Your `run()`
+   loop then has three layers: reassemble notifications into complete
+   messages with `util::FrameAssembler` (buffer until the terminator — a
+   frame can be split across chunks AND several frames can share one
+   chunk), decode the transport behind the `util::TransportCodec` seam,
+   then parse the payload. The cipher tables themselves belong in your
+   driver file — the seam exists so the reassembly and parsing layers
+   never have to know about them. Two lessons from building the real one:
+   the terminator trick is only sound because the payload is base64 text
+   (the marker byte cannot occur inside a frame — check that before you
+   reuse the pattern), and when the cipher is per-model with no on-wire
+   discriminator, don't ship a user setting — a substitution cipher over
+   text can be *detected from the traffic*, provided you treat detection
+   as elimination across frames rather than a per-frame guess (short
+   frames decode plausibly under several tables; kingsmith_props.rs
+   documents which frames discriminate and which genuinely cannot, and
+   refuses to emit from a frame its surviving candidates disagree on).
 
 Five hard-won warnings:
 
@@ -201,6 +212,10 @@ already. Check licenses before you take more than knowledge:
   transport envelope from **azmke/pitpat-treadmill-control**, MIT).
 - **DorianRudolph/QWalkingPad** (GPL-3.0) — a further independent KingSmith
   WiLink implementation, useful as a cross-check.
+- **LucasFrendorf/walkingpad-ble-footpod** (GPL-3.0) — the app-cipher
+  KingSmith generation (KS-NGCH-G1C): both GATT address spaces on real
+  hardware and the poll-driven steady state — the cross-check for
+  `drivers/kingsmith_props.rs`.
 - **ph4-walkingpad** and **blak3r/treadspan** (both MIT) — clean references
   with raw captures for KingSmith, and for LifeSpan, Urevo and Sperax,
   respectively. Published captures make excellent test fixtures even for

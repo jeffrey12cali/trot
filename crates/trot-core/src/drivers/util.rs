@@ -671,7 +671,8 @@ mod tests {
     }
 
     /// The seam accepts a non-trivial transform (here ROT13-ish byte add) —
-    /// the shape a later KingSmith cipher-table codec will take.
+    /// the shape the KingSmith cipher-table codec takes for real
+    /// (`kingsmith_props::AppCipherCodec`).
     #[test]
     fn a_custom_codec_plugs_into_the_seam() {
         struct AddOne;
