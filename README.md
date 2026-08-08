@@ -169,6 +169,16 @@ full-size treadmills alike. Three ways in:
   [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)) and tested against
   published frame captures — not yet against real hardware, so reports welcome.
   Newer WalkingPads that broadcast FTMS (e.g. the Z1) use the FTMS path below.
+- **WalkingPad\* / KingSmith (R2 / X21 / X23 / G1 / K12 Pro)** — the
+  app-cipher generation (`KS-X21…`, `KS-R1AC`, `KS-HC-R1A…`, `KS-NACH-…`,
+  `KS-NGCH-…`, and the Xiaomi\*-branded `KS-ST-K12PRO`) speaks an obfuscated
+  text protocol with a per-model transport cipher, and it reports steps, so
+  it gets a **native adapter** too, ported from open-source reverse
+  engineering (see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)) —
+  untested on real hardware. The cipher table is detected automatically
+  from the traffic (no setting to pick). One honest limit: the calorie
+  scale is documented but unverified, so if your console's calories
+  disagree with Trot's, send a capture.
 - **Urevo\* (E1L)** — the E1L broadcasts FTMS *and* a proprietary protocol, and
   only the proprietary one reports steps, so it gets a **native adapter**
   (ported from open-source reverse engineering, tested against published frame
@@ -243,8 +253,8 @@ on stop** (Ctrl-C or SIGTERM), so the belt's Bluetooth link isn't left open.
 Cargo.toml               # workspace
 crates/
   trot-core/             # engine library: ble · drivers (lifespan · kingsmith_wilink
-                         # · urevo · sperax · pitpat · fitshow · ftms) · telemetry
-                         # · db · state · api · config
+                         # · kingsmith_props · urevo · sperax · pitpat · fitshow
+                         # · ftms) · telemetry · db · state · api · config
   trot-daemon/           # the `trot` binary: `daemon` serves /api + /ws; the other
                          # subcommands (scan/pair/today/…) drive it over that API
 ```
@@ -312,7 +322,7 @@ with, endorsed by, or sponsored by** any treadmill manufacturer, and it only rea
 data your treadmill already broadcasts over Bluetooth.
 
 LifeSpan, Horizon, BowFlex, Technogym, Matrix, 3G Cardio, WalkingPad / KingSmith,
-Urevo, Merach, Sunny Health & Fitness, CitySports, WellFit, Mobvoi, Sportstech,
+Xiaomi, Urevo, Merach, Sunny Health & Fitness, CitySports, WellFit, Mobvoi, Sportstech,
 YPOO, TheRun, Sperax, PitPat, Deerrun, SupeRun, FitShow, NoblePro, Tunturi,
 WinFita, Anplus, Focus Fitness, VirtuFit, Woodway, NordicTrack, ProForm, Peloton and
 Echelon are trademarks or registered trademarks of their respective owners. The **Bluetooth®** word mark and logos are registered
