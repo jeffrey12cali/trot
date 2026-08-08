@@ -1,8 +1,19 @@
 # Third-party notices
 
-Trot is licensed under **GPL-3.0-or-later**. It includes work derived from the
-third-party projects below, whose copyright and license notices are reproduced
-here as required.
+Trot is licensed under **GPL-3.0-or-later**.
+
+Trot contains **no third-party source code**. Each driver is an independent
+implementation written against protocol facts — byte offsets, checksums, frame
+layouts — established by studying the projects below. Under EU software
+copyright law those facts are not protected subject matter (Directive
+2009/24/EC Art. 1(2); CJEU C-406/10 *SAS v World Programming*), and studying a
+program to extract them is expressly lawful.
+
+The notices below therefore reproduce copyright and licence text as a matter of
+**credit to the people whose reverse engineering made this possible**, and to
+record precisely what was learned from whom. Several go beyond what the licences
+require. Where a licence does impose conditions on the knowledge we took, those
+conditions are met. See `docs/licensing-audit.md` for the full analysis.
 
 ## TreadSpan — `blak3r/treadspan`
 

@@ -1,5 +1,9 @@
 //! LifeSpan (Omni console) driver — the native protocol on service 0xFFF0.
-//! Ported faithfully from the Python `lifespan_sc110` package (parser.py + __init__.py).
+//!
+//! The decoders are a faithful port of the author's own earlier Python package
+//! `lifespan_sc110` (`parser.py`, `__init__.py`), relicensed here under GPLv3
+//! by its sole copyright holder. It is not third-party work and so has no
+//! entry in THIRD-PARTY-NOTICES.md.
 //!
 //! Protocol knowledge was bootstrapped from and cross-checked against
 //! blak3r/treadspan (MIT, © 2025 Blake Robertson). See THIRD-PARTY-NOTICES.md.
