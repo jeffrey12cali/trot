@@ -18,13 +18,16 @@
 
 - **Website:** [trot.puchalla.dev](https://trot.puchalla.dev)
 - **License:** GPLv3.
-- **Status:** early days — `v0.3` is a working CLI + daemon for LifeSpan
-  (native) and generic FTMS treadmills, with signed macOS builds and shell
-  completions. Interfaces may still shift before 1.0.
+- **Status:** early days — `v0.3` is a working CLI + daemon with native
+  adapters for LifeSpan, KingSmith WalkingPad (two generations), Urevo,
+  Sperax, PitPat/Deerrun and FitShow, plus generic FTMS for everything else
+  (see [Supported treadmills](#supported-treadmills)), with signed macOS
+  builds and shell completions. Interfaces may still shift before 1.0.
 
 ## What it does
-- Device connectivity for under-desk treadmills (LifeSpan/Omni + generic FTMS
-  first; architected for more adapters).
+- Device connectivity for under-desk treadmills — seven native protocol
+  adapters plus generic FTMS, one self-contained file each (see
+  [Supported treadmills](#supported-treadmills)).
 - Automatic session detection (starts when the belt moves, closes when it stops),
   with per-minute rollups and local-first history that survives retention pruning.
 - Metrics: steps, distance, time, speed and calories, as the console reports them.
@@ -202,11 +205,13 @@ full-size treadmills alike. Three ways in:
   its native protocol reports steps where FTMS cannot, so it gets a **native
   adapter**, ported from open-source reverse engineering (see
   [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)) — not tested by us on real
-  hardware. Two honest limits until someone sends a capture: speed is scaled by
-  your configured display unit (the wire unit is device-dependent and
-  undeclared), and distance/calories are only reported where the scale is
-  verified (distance on mph consoles; calories not yet). Newer FitShow modules
-  that broadcast FTMS use the FTMS path below.
+  hardware. Two honest limits until someone sends a capture: the wire speed
+  unit is device-dependent and undeclared, so Trot assumes it from your
+  configured display unit (it logs the assumption when it connects — if speed
+  reads about 1.6× wrong, change the display unit); and distance and calories
+  are not reported at all, because no capture has pinned their wire scales
+  and a guess would be written into your permanent history. Newer FitShow
+  modules that broadcast FTMS use the FTMS path below.
 - **Standard FTMS\*** — any treadmill that broadcasts the standard Bluetooth
   **Fitness Machine Service** (FTMS, `0x1826`). Models *documented* to broadcast
   FTMS include Horizon\* AT-series, Technogym MyRun\*, BowFlex\* T9, 3G Cardio\*,

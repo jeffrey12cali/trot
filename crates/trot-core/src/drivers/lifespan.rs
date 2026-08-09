@@ -39,7 +39,7 @@ pub const WRITE_CHAR_UUID: Uuid = super::sig_uuid(0xfff2);
 
 // Match any LifeSpan console (TR1200/TR5000/SC/DT… all share the Omni protocol),
 // not just "LifeSpan-TM". "ESP32" is kept as a fallback for units whose BLE
-// module advertises only its generic chipset name. See docs/lifespan-models.md.
+// module advertises only its generic chipset name.
 pub const ADV_NAME_PREFIXES: &[&str] = &["LifeSpan", "ESP32"];
 
 pub const REQ_PREFIX: u8 = 0xA1;
@@ -601,6 +601,12 @@ mod tests {
         // Recognised name, wrong roles → refuse; the table isn't ours.
         assert!(!LifeSpan.supports(&adv("LifeSpan-TM"), &deerrun_shaped()));
         // Recognised name, UUIDs present but no properties at all → refuse.
+        // DELIBERATE, not incidental: the role checks accept either
+        // subscription flavour (NOTIFY or INDICATE — see util::has_notify),
+        // but a table too broken to declare a single property is no evidence
+        // of a role, and claiming it would write LifeSpan opcodes at an
+        // unknown table. If a real console ever ships an all-zero property
+        // bitmap, that is the finding that reopens this — with a capture.
         assert!(!LifeSpan.supports(
             &adv("LifeSpan-TM"),
             &gatt(&[
@@ -608,6 +614,24 @@ mod tests {
                 (WRITE_CHAR_UUID, CharPropFlags::default()),
             ])
         ));
+    }
+
+    /// An indicate-only FFF1 also satisfies the notify role: btleplug's
+    /// subscribe() handles INDICATE exactly like NOTIFY, and a console
+    /// refused here would match no driver at all — not even the fallback —
+    /// and present as connect_failed (util::has_notify documents the rule).
+    #[test]
+    fn indicate_only_notify_satisfies_the_notify_role() {
+        let table = gatt(&[
+            (NOTIFY_CHAR_UUID, CharPropFlags::INDICATE),
+            (WRITE_CHAR_UUID, CharPropFlags::WRITE),
+        ]);
+        assert!(
+            LifeSpan.supports(&adv("LifeSpan-TM"), &table),
+            "an indicate-only console must stay connectable — has_notify \
+             accepts NOTIFY | INDICATE (drivers/util.rs)"
+        );
+        assert!(LifeSpanFallback.supports(&adv(""), &table));
     }
 
     /// The fallback ignores the name but still verifies roles — it exists to

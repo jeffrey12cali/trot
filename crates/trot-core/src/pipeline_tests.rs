@@ -8,14 +8,19 @@
 //! rising counters, pause, resume, stop) through the actual ingest path and
 //! assert the recorded totals are exactly right.
 //!
-//! Time note: `ingest_sample` reads the real wall clock, so a whole test
-//! session spans well under a second. The persistence throttle is defeated
-//! by resetting `last_persist` before each push (throttling itself is pinned
-//! in `ble.rs`), and the sub-second timeline means the 5-second baseline
-//! self-heal window in `db::update_active_session` is *always open* during
-//! these tests — a mid-session counter reset here rebaselines the session
-//! row where on real hardware (reset arriving minutes in) it would not.
-//! Day totals are unaffected either way; tests below note it where it shows.
+//! Time note: `ingest_sample` takes the clock as a parameter, and the rig
+//! below drives it synthetically — each pushed frame advances a virtual
+//! clock by 5 s (comfortably past `ble::SESSION_DEBOUNCE`, so "the 2nd
+//! frame of a held state confirms" reads exactly as it did when the
+//! debounce counted frames). Timestamps therefore run up to a minute or two
+//! into the real future; `db::update_active_session`'s 5-second baseline
+//! self-heal window compares the REAL wall clock against those future
+//! `started_ts` values, so the window is *always open* during these tests —
+//! a mid-session counter reset here rebaselines the session row where on
+//! real hardware (reset arriving minutes in) it would not. The persistence
+//! throttle is defeated by resetting `last_persist` before each push
+//! (throttling itself is pinned in `ble.rs`). Day totals are unaffected
+//! either way; tests below note it where it shows.
 
 use crate::app::AppState;
 use crate::ble;
@@ -25,14 +30,19 @@ use crate::drivers::{ftms, kingsmith_wilink, lifespan};
 use crate::telemetry::Telemetry;
 use std::sync::Arc;
 
+/// Virtual seconds between pushed frames: must exceed `ble::SESSION_DEBOUNCE`
+/// so that the second frame of a held state confirms it.
+const FRAME_SPACING_S: f64 = 5.0;
+
 /// The real ingest path with its loop-local state, as `connect_and_poll`
-/// holds it.
+/// holds it, on a synthetic clock.
 struct Rig {
     db: Arc<Db>,
     state: Arc<AppState>,
     last_status: Option<u8>,
-    streak: i32,
+    run_held: Option<(bool, f64)>,
     last_persist: f64,
+    clock: f64,
 }
 
 impl Rig {
@@ -43,18 +53,21 @@ impl Rig {
             db,
             state,
             last_status: None,
-            streak: 0,
+            run_held: None,
             last_persist: 0.0,
+            clock: crate::db::now_ts(),
         }
     }
 
     fn push(&mut self, telem: &Telemetry) {
+        self.clock += FRAME_SPACING_S;
         self.last_persist = 0.0; // defeat the 1 Hz throttle (see module docs)
         ble::ingest_sample(
             &self.state,
             telem,
+            self.clock,
             &mut self.last_status,
-            &mut self.streak,
+            &mut self.run_held,
             &mut self.last_persist,
         );
     }
@@ -202,10 +215,11 @@ async fn lifespan_session_end_to_end_through_storage_api_and_rollup() {
     assert_eq!(json["totals"]["duration_s"], 65);
 
     // The rollup boundary: bank everything into per-minute rollups (forcing
-    // the current minute complete), and the day must not move by a single
-    // step — the 0.3.2 bug class was exactly a total that shrank when the
-    // rollup ran. A second run must be a no-op.
-    let now = crate::db::now_ts();
+    // every sample's minute complete — the rollup instant is based on the
+    // rig's virtual clock, which the samples were stamped with), and the day
+    // must not move by a single step — the 0.3.2 bug class was exactly a
+    // total that shrank when the rollup ran. A second run must be a no-op.
+    let now = rig.clock;
     rig.db.rollup_samples_at(now + 120.0).unwrap();
     let rolled = rig.today();
     assert_eq!(rolled["steps"], 150, "rollup changed the step total");
@@ -283,9 +297,9 @@ fn wilink_session_with_reset_then_a_stepless_ftms_session() {
     let sessions = rig.sessions();
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0].steps_end, Some(60), "the closing counter value");
-    // (start_steps was self-healed to 3 by the reset because the whole test
-    // runs inside the 5 s baseline window — see the module docs. On real
-    // hardware a reset minutes in leaves start_steps at 510.)
+    // (start_steps was self-healed to 3 by the reset because the rig's
+    // virtual timestamps keep the 5 s baseline window open — see the module
+    // docs. On real hardware a reset minutes in leaves start_steps at 510.)
 
     // Now an FTMS walking pad (no step counter) does a session on the same
     // day: speed-only frames, so the belt state is derived from speed.
@@ -378,10 +392,9 @@ fn ftms_session_accrues_distance_but_never_steps() {
     assert_eq!(sessions[0].steps_end, None);
     assert_eq!(sessions[0].distance_raw_end, Some(35));
 
-    // The rollup must not move a single meter.
-    rig.db
-        .rollup_samples_at(crate::db::now_ts() + 120.0)
-        .unwrap();
+    // The rollup must not move a single meter. (Rolled relative to the
+    // rig's virtual clock so every sample's minute is complete.)
+    rig.db.rollup_samples_at(rig.clock + 120.0).unwrap();
     let rolled = rig.today();
     assert_eq!(rolled["steps"], 0);
     assert_eq!(rolled["distance_raw"], 35);
@@ -472,9 +485,7 @@ fn a_mid_walk_connect_keeps_its_baseline_through_the_rollup() {
     let day = rig.today();
     assert_eq!(day["steps"], 1900, "the pre-connect walk must be banked");
 
-    rig.db
-        .rollup_samples_at(crate::db::now_ts() + 120.0)
-        .unwrap();
+    rig.db.rollup_samples_at(rig.clock + 120.0).unwrap();
     assert_eq!(
         rig.today()["steps"],
         1900,

@@ -737,6 +737,18 @@ fn finite(value: &str) -> Option<f64> {
     value.parse::<f64>().ok().filter(|v| v.is_finite())
 }
 
+/// A finite, non-negative value no larger than `u32::MAX` — the same range
+/// discipline [`counter`] applies to the integer counters, for the f64
+/// fields of the same frame family. The wire is decimal text, so nothing
+/// stops a garbled or hostile line from carrying `1e30`; unbounded, a
+/// `RunningDistance` like that saturates the presentation encoding
+/// (`distance_raw`) to `u32::MAX` and writes garbage into permanent
+/// history. (`telemetry::distance_meters` saturates as well — both layers
+/// guard, because that value would be stored.)
+fn bounded(value: &str) -> Option<f64> {
+    finite(value).filter(|v| (0.0..=u32::MAX as f64).contains(v))
+}
+
 fn counter(value: &str) -> Option<u32> {
     finite(value)
         .filter(|v| (0.0..=u32::MAX as f64).contains(v))
@@ -750,12 +762,12 @@ impl PadState {
     pub fn apply(&mut self, key: &str, value: &str) -> bool {
         match key {
             "CurrentSpeed" => {
-                if let Some(v) = finite(value) {
+                if let Some(v) = bounded(value) {
                     self.speed_kmh = Some(v);
                 }
             }
             "RunningDistance" => {
-                if let Some(v) = finite(value) {
+                if let Some(v) = bounded(value) {
                     self.distance_m = Some(v);
                 }
             }
@@ -1642,6 +1654,36 @@ mod tests {
         assert!(!state.apply("ControlMode", "1"));
         assert!(!state.apply("mcu_version", "V1.0.19"));
         assert!(!state.apply("NoSuchKey", "1"));
+    }
+
+    /// Range discipline is uniform across the frame family: the f64 fields
+    /// (`CurrentSpeed`, `RunningDistance`) reject out-of-range values exactly
+    /// like the integer counters do. The wire is decimal text — a garbled or
+    /// hostile `RunningDistance 1e30` used to sail through as a finite f64,
+    /// saturate `distance_raw` to `u32::MAX` at the presentation boundary,
+    /// and (pre-fix) overflow `telemetry::distance_meters` into a panic.
+    #[test]
+    fn absurd_speed_and_distance_values_are_dropped_like_absurd_counters() {
+        let mut state = PadState::default();
+        state.apply("CurrentSpeed", "3.5");
+        state.apply("RunningDistance", "1234");
+        for hostile in ["1e30", "-1", "4294967296", "inf", "NaN"] {
+            state.apply("CurrentSpeed", hostile);
+            state.apply("RunningDistance", hostile);
+        }
+        assert_eq!(
+            state.speed_kmh,
+            Some(3.5),
+            "CurrentSpeed must apply the same 0..=u32::MAX range filter as \
+             the integer counters — see `bounded` in kingsmith_props.rs"
+        );
+        assert_eq!(
+            state.distance_m,
+            Some(1234.0),
+            "RunningDistance must apply the same 0..=u32::MAX range filter \
+             as the integer counters (an unbounded value here becomes a \
+             permanently stored distance) — see `bounded` in kingsmith_props.rs"
+        );
     }
 
     /// Keys accumulate across partial updates — the device may report any

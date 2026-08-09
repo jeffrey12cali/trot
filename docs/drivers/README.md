@@ -316,12 +316,25 @@ fill a hole (a fabricated step count would silently corrupt day totals that
 real hardware reports correctly).
 
 `state` drives session detection: sustained `Running` opens a session,
-sustained not-`Running` closes it. If your device has no explicit status,
-derive it from belt speed the way the FTMS driver does (moving ⇒ `Running`).
+sustained not-`Running` closes it (the engine debounces by *time* held, not
+frame count, so emit as often as your protocol updates). Map every state your
+protocol documents; an unknown byte passes through as `BeltState::Other` and
+will **never open a session** — and its raw value lands in the API's `status`
+namespace, where `3` and `5` already mean RUNNING and PAUSED
+(`BeltState::Other`'s rustdoc in `drivers/mod.rs` has the full consequences).
+If your device has no explicit status, derive it from belt speed the way the
+FTMS driver does (moving ⇒ `Running`).
 
 `host.display_unit` is the unit the user's console displays (`"km/h"` or
 `"mph"`). Ignore it unless your wire format itself depends on the console's
-display setting — LifeSpan is the only known case.
+display setting. Two drivers currently do: LifeSpan, whose console genuinely
+encodes speed in hundredths of the *displayed* unit, and FitShow, which uses
+it as a documented **heuristic** for an undeclared device-dependent wire
+scale — acceptable there only because speed is a live, visible, recoverable
+reading (the driver logs the assumption at INFO). Never let `display_unit`
+decide a stored cumulative counter such as distance: a user preference must
+not determine a number written into permanent history (that is why the
+FitShow driver reports no distance at all).
 
 ### Shared plumbing: `drivers/util.rs`
 
