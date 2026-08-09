@@ -291,7 +291,7 @@ pub(crate) fn belt_state(v: u8) -> BeltState {
 /// A [`Status`] as a neutral SI sample. WiLink reports SI-adjacent units
 /// natively (0.1 km/h, 10 m, seconds), so this is pure scaling; the console's
 /// display unit is irrelevant to the wire format.
-fn to_sample(s: &Status) -> Sample {
+pub(crate) fn to_sample(s: &Status) -> Sample {
     Sample {
         speed_kmh: Some(s.speed_raw as f64 / 10.0),
         distance_m: Some(s.distance_raw as f64 * 10.0),

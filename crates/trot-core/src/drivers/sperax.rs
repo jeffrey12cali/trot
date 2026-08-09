@@ -292,7 +292,7 @@ pub fn parse_status(frame: &[u8]) -> Result<Status, ProtocolError> {
 /// zero, and never derived (upstream integrates distance from speed over
 /// time; we refuse to present a derivation as a measurement). State comes
 /// from the speed, as in the FTMS driver.
-fn to_sample(s: &Status) -> Sample {
+pub(crate) fn to_sample(s: &Status) -> Sample {
     Sample {
         speed_kmh: Some(s.speed_raw as f64 / 10.0),
         distance_m: None,

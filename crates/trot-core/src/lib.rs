@@ -13,5 +13,8 @@ pub mod drivers;
 pub mod engine;
 pub mod telemetry;
 
+#[cfg(test)]
+mod pipeline_tests;
+
 pub use app::AppState;
 pub use engine::{start_engine, Engine};

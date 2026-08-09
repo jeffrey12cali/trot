@@ -506,7 +506,7 @@ pub fn wire_unit(display_unit: &str) -> WireUnit {
 /// distance is reported only where its scale is verified (imperial);
 /// calories are never reported (scale conflict) — all per the module docs.
 /// The state comes from the status byte alone, never from speed.
-fn to_sample(s: &Status, unit: WireUnit) -> Sample {
+pub(crate) fn to_sample(s: &Status, unit: WireUnit) -> Sample {
     match &s.counters {
         Some(c) => Sample {
             speed_kmh: Some(match unit {

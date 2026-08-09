@@ -261,7 +261,7 @@ pub(crate) fn belt_state(v: u8) -> BeltState {
 /// A [`Status`] as a neutral SI sample. The wire speaks imperial (0.1 mph,
 /// 0.01 mi) regardless of anything the user configured, so the conversion is
 /// fixed; `host.display_unit` is irrelevant to this driver.
-fn to_sample(s: &Status) -> Sample {
+pub(crate) fn to_sample(s: &Status) -> Sample {
     match &s.counters {
         Some(c) => Sample {
             speed_kmh: Some(c.speed_raw as f64 * KMH_PER_RAW_SPEED),

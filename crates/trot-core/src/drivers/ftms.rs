@@ -511,7 +511,7 @@ const RUNNING_THRESHOLD_KMH: f64 = 0.05;
 /// mostly a field mapping; only the belt state is synthesised (from speed).
 /// Standard FTMS has no step counter, so `steps` is only ever set from the
 /// name-gated KingSmith extension — absent everywhere else, never zero.
-fn to_sample(d: &FtmsTreadmillData) -> Sample {
+pub(crate) fn to_sample(d: &FtmsTreadmillData) -> Sample {
     Sample {
         speed_kmh: d.instantaneous_speed,
         distance_m: d.total_distance_m.map(|m| m as f64),
