@@ -214,7 +214,7 @@ impl Reader {
 /// A [`Readout`] as a neutral SI sample. `display_unit` is needed because the
 /// console reports speed in hundredths of whatever unit it *displays* — the
 /// one place this driver's wire format depends on user configuration.
-fn to_sample(r: &Readout, display_unit: &str) -> Sample {
+pub(crate) fn to_sample(r: &Readout, display_unit: &str) -> Sample {
     Sample {
         speed_kmh: r.speed_raw.map(|raw| speed_kmh(raw, display_unit)),
         distance_m: r.distance_raw.map(|raw| (raw * 10) as f64),

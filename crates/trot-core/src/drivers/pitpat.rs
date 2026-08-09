@@ -510,7 +510,7 @@ fn duration_seconds(raw: u32, fw_version: u8) -> u32 {
 /// A [`Status`] as a neutral SI sample. The wire is metric regardless of
 /// the imperial-display flag (see the module docs), so this is pure
 /// scaling; `host.display_unit` is irrelevant to this driver.
-fn to_sample(s: &Status) -> Sample {
+pub(crate) fn to_sample(s: &Status) -> Sample {
     Sample {
         speed_kmh: Some(s.speed_raw as f64 / 1000.0),
         distance_m: Some(s.distance_raw as f64),

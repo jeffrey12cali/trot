@@ -324,7 +324,7 @@ fn broadcast_state(state: &Arc<AppState>, telem: &Telemetry) {
 /// samples back into seconds; the two MUST stay in step.
 const SAMPLE_MIN_INTERVAL_S: f64 = crate::db::SAMPLE_INTERVAL_S;
 
-fn ingest_sample(
+pub(crate) fn ingest_sample(
     state: &Arc<AppState>,
     telem: &Telemetry,
     last_status: &mut Option<u8>,

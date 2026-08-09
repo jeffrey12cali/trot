@@ -16,6 +16,8 @@
 //! line makes the device discoverable *and* connectable. The full guide for
 //! contributors lives in `docs/drivers/README.md`.
 
+#[cfg(test)]
+mod cross_driver;
 pub mod fitshow;
 pub mod ftms;
 pub mod kingsmith_props;
