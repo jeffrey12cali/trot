@@ -120,7 +120,7 @@ directory; that's how the CLI and any UI find it.
 | Route | Method | What it gives you |
 |---|---|---|
 | `/api/health` | GET | Is the daemon up, is a treadmill connected, and which engine version |
-| `/api/state` | GET | Full snapshot: connection, live telemetry, today's totals |
+| `/api/state` | GET | Full snapshot: connection, live telemetry, today's totals, which protocol driver claimed the treadmill and whether it has reported steps |
 | `/api/today` | GET | Today's totals plus a 24-hour step breakdown |
 | `/api/sessions`, `/api/sessions/:id` | GET | Recorded sessions |
 | `/api/analytics` | GET | Bucketed timeseries (`metric`, `resolution`, `range_days`) |

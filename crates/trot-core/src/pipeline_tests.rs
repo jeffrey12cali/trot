@@ -35,13 +35,14 @@ use std::sync::Arc;
 const FRAME_SPACING_S: f64 = 5.0;
 
 /// The real ingest path with its loop-local state, as `connect_and_poll`
-/// holds it, on a synthetic clock.
+/// holds it, on a synthetic clock. `IngestState` includes the plausibility
+/// gate, so every fixture stream here also proves itself plausible to the
+/// gate — a fixture these tests accept is one the shipped ingest path
+/// accepts whole.
 struct Rig {
     db: Arc<Db>,
     state: Arc<AppState>,
-    last_status: Option<u8>,
-    run_held: Option<(bool, f64)>,
-    last_persist: f64,
+    ing: ble::IngestState,
     clock: f64,
 }
 
@@ -52,24 +53,15 @@ impl Rig {
         Rig {
             db,
             state,
-            last_status: None,
-            run_held: None,
-            last_persist: 0.0,
+            ing: ble::IngestState::default(),
             clock: crate::db::now_ts(),
         }
     }
 
     fn push(&mut self, telem: &Telemetry) {
         self.clock += FRAME_SPACING_S;
-        self.last_persist = 0.0; // defeat the 1 Hz throttle (see module docs)
-        ble::ingest_sample(
-            &self.state,
-            telem,
-            self.clock,
-            &mut self.last_status,
-            &mut self.run_held,
-            &mut self.last_persist,
-        );
+        self.ing.last_persist = 0.0; // defeat the 1 Hz throttle (see module docs)
+        ble::ingest_sample(&self.state, telem, self.clock, &mut self.ing);
     }
 
     fn today(&self) -> serde_json::Value {

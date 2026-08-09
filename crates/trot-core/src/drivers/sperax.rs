@@ -77,10 +77,21 @@
 //! No inbound capture of a data packet is public (treadspan's Sperax capture
 //! is the FTMS-speaking RM-01), so inbound parsing follows upstream's
 //! hardware-verified reader exactly: envelope checks (F5 prefix, FA
-//! terminator, minimum length) but **no inbound CRC enforcement** — we
-//! cannot verify where the trailer sits on frames nobody has published, and
-//! rejecting every real frame on a wrong guess would be worse than
-//! upstream's parity.
+//! terminator, minimum length, and the length byte agreeing with the wire
+//! length — the module's own framing rule, which also rejects the
+//! settings/info replies the device sends on the same characteristic) but
+//! **no inbound CRC enforcement** — we cannot verify where the trailer sits
+//! on frames nobody has published, and rejecting every real frame on a
+//! wrong guess would be worse than upstream's parity.
+//!
+//! One known inconsistency, kept deliberately: the header above documents
+//! that interior bytes `0xF0..=0xFF` are escaped on the wire, yet inbound
+//! parsing reads RAW WIRE offsets — an escape occurring before byte 15
+//! would shift the step field and misread it. That is upstream's
+//! hardware-verified reader taken verbatim, and it stays that way as
+//! upstream parity until a real inbound capture shows whether data packets
+//! are escaped at all; decoding through `unescape_frame` instead would
+//! diverge from the only tested implementation on hardware nobody owns.
 
 use super::util::{run_init_sequence, CommandSpacer, InitStep};
 use super::{Advertisement, BeltState, Driver, DriverHost, Emit, Sample};
@@ -255,6 +266,15 @@ pub enum ProtocolError {
     BadLength(usize),
     #[error("bad prefix 0x{0:02x}")]
     BadPrefix(u8),
+    /// The frame's own length byte disagrees with the wire length. Every
+    /// frame in this protocol carries its wire length at byte 1 (the
+    /// framing rule `escape_frame` implements), so a mismatch means this is
+    /// not a well-formed single frame — a settings/info reply of another
+    /// length, or several frames coalesced into one notification. Without
+    /// this check such replies decode into "steps" and "speed" and get
+    /// emitted as telemetry.
+    #[error("length byte says {declared}, wire carries {actual} bytes")]
+    BadDeclaredLength { declared: u8, actual: usize },
     #[error("missing 0xFA terminator")]
     BadTerminator,
 }
@@ -278,6 +298,15 @@ pub fn parse_status(frame: &[u8]) -> Result<Status, ProtocolError> {
     }
     if frame[0] != FRAME_START {
         return Err(ProtocolError::BadPrefix(frame[0]));
+    }
+    // The length byte must agree with the wire length (see the error's doc
+    // — this is what keeps the device's settings/info replies, and coalesced
+    // notifications, from decoding into telemetry).
+    if frame[1] as usize != frame.len() {
+        return Err(ProtocolError::BadDeclaredLength {
+            declared: frame[1],
+            actual: frame.len(),
+        });
     }
     if frame[frame.len() - 1] != FRAME_END {
         return Err(ProtocolError::BadTerminator);
@@ -628,6 +657,44 @@ mod tests {
         let s = parse_status(&f).unwrap();
         assert_eq!(s.steps, 200);
         assert_eq!(s.speed_raw, 8, "must read len-7, not absolute 17");
+    }
+
+    /// The length byte must agree with the wire length — the module's own
+    /// framing rule (`escape_frame` patches byte 1 to the wire length). The
+    /// device converses on FFF1 in more than status packets: a settings/info
+    /// reply padded or coalesced to ≥24 bytes carries its own (different)
+    /// length byte, and before this check it decoded into "steps" and
+    /// "speed" and was emitted as telemetry.
+    #[test]
+    fn a_frame_whose_length_byte_disagrees_is_rejected() {
+        // A ≥24-byte notification whose declared length is a settings
+        // reply's (8), padded out by the stack — valid prefix, valid
+        // terminator, plausible junk where the counters would be.
+        let mut f = synthetic_frame_24();
+        f[1] = 8;
+        assert_eq!(
+            parse_status(&f),
+            Err(ProtocolError::BadDeclaredLength {
+                declared: 8,
+                actual: 24
+            }),
+            "a frame whose length byte disagrees with the wire length is not \
+             a status packet and must not decode into steps/speed (framing \
+             rule: byte 1 is the wire length — see escape_frame and the \
+             module docs in sperax.rs)"
+        );
+        // Two coalesced frames in one notification fail the same way.
+        let mut two = synthetic_frame_24();
+        two.extend_from_slice(&synthetic_frame_24());
+        assert!(matches!(
+            parse_status(&two),
+            Err(ProtocolError::BadDeclaredLength {
+                declared: 24,
+                actual: 48
+            })
+        ));
+        // And the well-formed packet still parses.
+        assert!(parse_status(&synthetic_frame_24()).is_ok());
     }
 
     #[test]

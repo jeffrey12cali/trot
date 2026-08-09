@@ -123,9 +123,19 @@ pub const WAKE_FRAME: [u8; 4] = [FRAME_PREFIX, MSG_STATUS, 0x0B, TERMINATOR];
 /// Deep-standby frames are 6 bytes: STX, family, status, one unknown byte,
 /// checksum, ETX.
 pub const MIN_FRAME_LEN: usize = 6;
-/// Counters need indexes up to 12; the only observed full frame is 19 bytes,
-/// but start-anchored offsets stay valid on any longer variant.
-pub const COUNTER_FRAME_MIN_LEN: usize = 13;
+/// Shortest frame whose counter fields can be trusted.
+///
+/// The counters end at byte 12 (steps are bytes 11..13), but the TRAILER is
+/// positional from the END — checksum at `len-2`, ETX at `len-1` — so on a
+/// 13-byte frame bytes 11 and 12 ARE the trailer: `steps` would decode as
+/// `(ETX << 8) | checksum` ≈ 800–1000, a plausible, correctly-checksummed
+/// fabrication that flows straight into stored history. On a 14-byte frame
+/// the low steps byte is still the checksum. 15 is the first length at which
+/// every counter byte is clear of the trailer, so 15 is the floor.
+/// Start-anchored offsets then stay valid on any longer variant (the only
+/// observed full frame is 19 bytes). Do NOT lower this back to 13 to "accept
+/// shorter variants": a shorter variant does not carry these counters.
+pub const COUNTER_FRAME_MIN_LEN: usize = 15;
 
 /// km/h per 0.1 mph wire unit.
 pub const KMH_PER_RAW_SPEED: f64 = 0.160_934_4;
@@ -519,6 +529,40 @@ mod tests {
         assert_eq!(sample.steps, None);
         assert_eq!(sample.speed_kmh, None);
         assert_eq!(sample.distance_m, None);
+    }
+
+    /// The trailer is END-anchored (checksum at `len-2`, ETX at `len-1`)
+    /// while the counters are START-anchored (steps at 11..13). On a 13- or
+    /// 14-byte frame those regions OVERLAP, so a valid trailer would decode
+    /// as a plausible step count. Such frames must yield no counters at all.
+    #[test]
+    fn frames_too_short_for_the_counters_yield_none_not_trailer_bytes() {
+        // A hypothetical mid-length variant: valid envelope, valid checksum,
+        // counter region zeroed — at these lengths the trailer bytes sit
+        // where steps would be read.
+        for len in [13usize, 14] {
+            let mut frame = vec![0u8; len];
+            frame[0] = FRAME_PREFIX;
+            frame[1] = MSG_STATUS;
+            frame[2] = 0x03; // running
+            frame[len - 1] = TERMINATOR;
+            frame[len - 2] = checksum(&frame[..len - 2]);
+            let s = parse_status(&frame).unwrap();
+            assert_eq!(
+                s.counters, None,
+                "a {len}-byte frame reported counters — its trailer overlaps \
+                 the steps field, so `steps` would be fabricated from the \
+                 checksum/ETX bytes (see COUNTER_FRAME_MIN_LEN's comment in \
+                 urevo.rs: the floor for the current field set is 15)"
+            );
+        }
+        // The real 19-byte capture is unaffected: counters still decode.
+        let s = parse_status(&hx(RUNNING_FIXTURE)).unwrap();
+        assert_eq!(
+            s.counters.unwrap().steps,
+            363,
+            "the 19-byte fixture must keep decoding"
+        );
     }
 
     // ---- Checksum ------------------------------------------------------------

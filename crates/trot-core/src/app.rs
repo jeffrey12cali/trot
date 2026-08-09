@@ -6,7 +6,7 @@ use crate::db::{now_ts, Db};
 use crate::telemetry::{speed_kmh, speed_mph, Telemetry};
 use chrono::{Local, TimeZone};
 use serde_json::{json, Value};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{broadcast, Notify};
 
@@ -23,6 +23,23 @@ pub struct AppState {
     pub token: String,
     pub device_id: Mutex<Option<String>>,
     pub connected: AtomicBool,
+    /// The id of the driver whose `supports()` claimed the current (or most
+    /// recent) connection — `/api/state`'s `driver` field. `None` until a
+    /// driver has claimed the paired device; cleared when the paired device
+    /// changes, so a stale id can never describe different hardware.
+    driver: Mutex<Option<String>>,
+    /// Whether a sample with `steps.is_some()` has arrived from this
+    /// treadmill — the observed half of `/api/state`'s tri-state
+    /// `steps_supported` (`null` until then, `true` thereafter, NEVER
+    /// `false`; see `steps_supported_json`). Observed from the stream, not
+    /// declared by the driver — `Sample`'s `None` already IS the capability
+    /// channel, and a declared flag would be a second source of truth.
+    steps_seen: AtomicBool,
+    /// Samples the plausibility gate stripped a field from since launch —
+    /// `rejected_samples` in `/api/diag`. Zero on a healthy decode; a
+    /// climbing value during a hardware test means a unit-scale error in
+    /// the active driver (see the PLAUSIBILITY GATE comment in `ble.rs`).
+    rejected_samples: AtomicU64,
     pub active_session_id: Mutex<Option<i64>>,
     pub last_state: Mutex<Option<Telemetry>>,
     /// Ring buffer of the most recent (ts, opcode, raw response bytes) for
@@ -93,6 +110,9 @@ impl AppState {
             token,
             device_id: Mutex::new(device_id),
             connected: AtomicBool::new(false),
+            driver: Mutex::new(None),
+            steps_seen: AtomicBool::new(false),
+            rejected_samples: AtomicU64::new(0),
             paused: AtomicBool::new(false),
             connect_failed: AtomicBool::new(false),
             active_session_id: Mutex::new(None),
@@ -173,11 +193,58 @@ impl AppState {
 
     pub fn set_device_id(&self, id: Option<String>) {
         *lock(&self.device_id) = id;
+        // A different treadmill is a different protocol and a different step
+        // capability: what was observed of the old one must not describe the
+        // new one.
+        *lock(&self.driver) = None;
+        self.steps_seen.store(false, Ordering::Relaxed);
         // A (re)paired or switched device should connect, even if we were paused
         // by a manual disconnect or had given up.
         self.paused.store(false, Ordering::Relaxed);
         self.connect_failed.store(false, Ordering::Relaxed);
         self.wake.notify_waiters();
+    }
+
+    /// Record which driver claimed the connection (`/api/state`'s `driver`).
+    pub fn set_driver(&self, id: &str) {
+        *lock(&self.driver) = Some(id.to_string());
+    }
+
+    /// The claiming driver's id, if a driver has claimed the paired device.
+    pub fn driver(&self) -> Option<String> {
+        lock(&self.driver).clone()
+    }
+
+    /// A sample with `steps.is_some()` arrived: `steps_supported` becomes
+    /// `true` (and stays true until the paired device changes).
+    pub fn note_steps_seen(&self) {
+        self.steps_seen.store(true, Ordering::Relaxed);
+    }
+
+    /// The tri-state `steps_supported` value: `null` until a sample with
+    /// steps has been seen from this treadmill, `true` thereafter — and
+    /// NEVER `false`. Deliberate: accumulating drivers (LifeSpan's `Reader`,
+    /// props' `PadState`) legitimately emit steps-`None` samples for their
+    /// first poll cycles, so any "conclude false after a while" heuristic
+    /// would be a new invariant with edge cases. `null` means "no step data
+    /// seen from this treadmill yet", nothing stronger.
+    pub fn steps_supported_json(&self) -> Value {
+        if self.steps_seen.load(Ordering::Relaxed) {
+            json!(true)
+        } else {
+            Value::Null
+        }
+    }
+
+    /// Count a sample the plausibility gate stripped a field from.
+    pub fn count_rejected_sample(&self) {
+        self.rejected_samples.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Samples rejected (field-stripped) by the plausibility gate since
+    /// launch — surfaced as `rejected_samples` in `/api/diag`.
+    pub fn rejected_samples(&self) -> u64 {
+        self.rejected_samples.load(Ordering::Relaxed)
     }
 
     pub fn is_connected(&self) -> bool {
@@ -290,6 +357,10 @@ impl AppState {
     }
 
     /// Full snapshot sent on WS connect and exposed at /api/state.
+    ///
+    /// `driver` and `steps_supported` are ADDITIVE (0.3.x): existing fields
+    /// are frozen contract and must not move. `steps_supported` is
+    /// tri-state — see `steps_supported_json`.
     pub fn snapshot(&self) -> Value {
         json!({
             "connected": self.is_connected(),
@@ -297,6 +368,8 @@ impl AppState {
             "connect_failed": self.is_connect_failed(),
             "display_unit": self.display_unit(),
             "device_id": self.device_id(),
+            "driver": self.driver(),
+            "steps_supported": self.steps_supported_json(),
             "state": lock(&self.last_state).clone(),
             "active_session_id": self.active_session(),
             "today": self.today_payload(),
@@ -398,6 +471,65 @@ mod tests {
             "a cache entry for a different local date must be ignored"
         );
         assert_eq!(today, AppState::today_str());
+    }
+
+    /// `steps_supported` is TRI-STATE: `null` until a sample with steps has
+    /// been seen, `true` thereafter — and NEVER `false`, because
+    /// accumulating drivers legitimately emit steps-`None` samples for
+    /// their first poll cycles (rule documented on `steps_supported_json`).
+    /// `driver` is additive too, and both reset when the paired device
+    /// changes so they can never describe different hardware.
+    #[test]
+    fn driver_and_steps_supported_are_additive_and_tri_state() {
+        let s = state();
+        let snap = s.snapshot();
+        assert_eq!(snap["driver"], Value::Null, "no driver has claimed yet");
+        assert_eq!(
+            snap["steps_supported"],
+            Value::Null,
+            "steps_supported must be null (unknown) before any sample with \
+             steps — never false (steps_supported_json in app.rs)"
+        );
+        // Frozen fields stay put — additive means additive.
+        for key in [
+            "connected",
+            "display_unit",
+            "device_id",
+            "state",
+            "active_session_id",
+            "today",
+        ] {
+            assert!(
+                snap.get(key).is_some(),
+                "existing /api/state field {key:?} vanished — the contract \
+                 freezes existing fields (CONTRIBUTING.md: /api is public)"
+            );
+        }
+
+        s.set_driver("urevo");
+        assert_eq!(s.snapshot()["driver"], json!("urevo"));
+        // Steps-None samples keep it null; a steps sample flips it true…
+        assert_eq!(s.snapshot()["steps_supported"], Value::Null);
+        s.note_steps_seen();
+        assert_eq!(s.snapshot()["steps_supported"], json!(true));
+        // …and nothing observed later may un-conclude it: there is no API
+        // that sets it false short of switching devices.
+        assert_eq!(
+            s.snapshot()["steps_supported"],
+            json!(true),
+            "steps_supported must never regress from true while the same \
+             device is paired"
+        );
+
+        // Switching the paired device resets both observations.
+        s.set_device_id(Some("other-device".into()));
+        let snap = s.snapshot();
+        assert_eq!(
+            snap["driver"],
+            Value::Null,
+            "a stale driver id must not describe a different treadmill"
+        );
+        assert_eq!(snap["steps_supported"], Value::Null);
     }
 
     /// The BLE worker parks on `wake.notified()` when paused. `notify_waiters()`

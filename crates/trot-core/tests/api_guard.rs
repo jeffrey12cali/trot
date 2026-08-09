@@ -232,3 +232,68 @@ async fn health_reports_the_engine_version() {
 async fn unknown_routes_are_404_not_500() {
     assert_eq!(status(req("GET", "/api/nope")).await, StatusCode::NOT_FOUND);
 }
+
+/// `/api/state` carries the additive observability fields (`driver`,
+/// tri-state `steps_supported`) WITHOUT moving any frozen field. Adding is
+/// allowed; changing or removing is a breaking change (CONTRIBUTING.md:
+/// /api + /ws is a public contract).
+#[tokio::test]
+async fn state_carries_the_additive_driver_and_steps_supported_fields() {
+    let resp = app().oneshot(req("GET", "/api/state")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    // The additive fields exist and start in their unknown states.
+    assert!(
+        v.as_object().unwrap().contains_key("driver"),
+        "driver (additive, 0.3.x) missing from /api/state: {v}"
+    );
+    assert_eq!(v["driver"], serde_json::Value::Null);
+    assert!(
+        v.as_object().unwrap().contains_key("steps_supported"),
+        "steps_supported (additive, 0.3.x) missing from /api/state: {v}"
+    );
+    assert_eq!(
+        v["steps_supported"],
+        serde_json::Value::Null,
+        "steps_supported is TRI-STATE: null until a sample with steps is \
+         observed, true thereafter, never false \
+         (AppState::steps_supported_json in app.rs)"
+    );
+
+    // The frozen fields did not move.
+    for key in [
+        "connected",
+        "paused",
+        "connect_failed",
+        "display_unit",
+        "device_id",
+        "state",
+        "active_session_id",
+        "today",
+    ] {
+        assert!(
+            v.as_object().unwrap().contains_key(key),
+            "frozen /api/state field {key:?} vanished — existing fields are \
+             contract and must not move: {v}"
+        );
+    }
+}
+
+/// `/api/diag` exposes the plausibility gate's rejected-sample counter —
+/// the loud half of the gate (its constants live in ble.rs).
+#[tokio::test]
+async fn diag_reports_the_gate_rejection_counter() {
+    let resp = app().oneshot(req("GET", "/api/diag")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        v["rejected_samples"],
+        serde_json::json!(0),
+        "rejected_samples must be in /api/diag (and 0 on a fresh engine): a \
+         silent plausibility gate is a maintainability loss — see the \
+         PLAUSIBILITY GATE comment in ble.rs: {v}"
+    );
+}
