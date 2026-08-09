@@ -124,6 +124,11 @@ pub trait Driver: Send + Sync {
     /// Drive the device: subscribe/poll/handshake as the protocol requires and
     /// call `emit` with a cumulative [`Sample`] on every update.
     ///
+    /// Sustained [`BeltState::Running`] opens a session; the engine debounces
+    /// by *time* held, not by frame count, so emit as often as your protocol
+    /// updates — a fast stream cannot flap sessions and a slow one is not
+    /// penalised.
+    ///
     /// Run forever. Do not watch for shutdown or pause and do not disconnect —
     /// the engine cancels this future and tears the link down itself. Return
     /// `Err` only when the link is dead or unusable; that triggers the
@@ -187,6 +192,33 @@ pub enum BeltState {
     /// Workout paused.
     Paused,
     /// A state Trot doesn't know; the raw device value is passed through.
+    ///
+    /// Three consequences of that passthrough, all deliberate — this rustdoc
+    /// is the one home for them (the SQL comments in `db.rs` point here):
+    ///
+    /// 1. **The raw byte lands in the contract's presentation namespace.**
+    ///    `telemetry::status_code` serializes `Other(v)` as `v` itself, and
+    ///    the contract's `status` field already assigns meanings to
+    ///    `0x01/0x03/0x04/0x05` — so `Other(5)` reads as PAUSED and
+    ///    `Other(3)` as RUNNING to any API client. Frozen behaviour: the
+    ///    LifeSpan driver pins `status_code(belt_state(v)) == v` for all 256
+    ///    bytes, because for that console the bytes ARE the contract's codes
+    ///    and changing the mapping would move bytes on the wire for real
+    ///    devices. Prefer a named state where your protocol's evidence
+    ///    allows one (WiLink and FitShow both map known wire values away
+    ///    from the colliding codes for exactly this reason).
+    /// 2. **`Other` never opens or closes a session.** `Telemetry::
+    ///    is_running` derives from `state == Running`, not from the status
+    ///    byte, so an unknown byte that happens to be `0x03` presents as
+    ///    RUNNING (consequence 1) yet accrues no session — sessions follow
+    ///    the driver's judgement, never a raw byte.
+    /// 3. **`Other(3)` interacts with stored aggregates via session
+    ///    attribution.** Samples store the presentation byte, and "running
+    ///    time" aggregates count status-3 samples *within sessions* —
+    ///    consequence 2 means `Other(3)` samples are never in one, so they
+    ///    never count. Both SQL sites (`timeseries`' raw path and the
+    ///    rollup writer's `running_samples`, in `db.rs`) share that
+    ///    in-session definition; comments there point back here.
     Other(u8),
 }
 

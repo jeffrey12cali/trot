@@ -140,6 +140,20 @@ fn matrix() -> Vec<Row> {
             lifespan_shape(),
             &["lifespan", "lifespan-fallback"],
         ),
+        // An indicate-only FFF1 (or a stack reporting a sparse property
+        // bitmap): btleplug's subscribe() handles INDICATE exactly like
+        // NOTIFY, so the role checks accept either — a console rejected here
+        // would match NO driver at all and present as connect_failed
+        // (util::has_notify's rustdoc documents the rule).
+        row(
+            "indicate-only LifeSpan console (sparse property bitmap)",
+            "LifeSpan-TM",
+            gatt(&[
+                (0xfff0, 0xfff1, CharPropFlags::INDICATE),
+                (0xfff0, 0xfff2, W),
+            ]),
+            &["lifespan", "lifespan-fallback"],
+        ),
         row(
             "nameless FFF1/FFF2 device",
             "",

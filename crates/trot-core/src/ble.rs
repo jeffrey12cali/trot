@@ -24,7 +24,23 @@ const RECONNECT_DELAY: Duration = Duration::from_secs(5);
 /// worker gives up and waits for a manual reconnect, instead of scanning forever.
 /// Each attempt scans up to ~10s, so this is roughly a minute of trying.
 const MAX_CONNECT_ATTEMPTS: u32 = 6;
-const SESSION_DEBOUNCE: i32 = 1;
+/// How long a belt state (running / not running) must hold before it opens or
+/// closes a session.
+///
+/// A DURATION, deliberately not a frame count. Frame rate varies ~20× across
+/// drivers (LifeSpan answers a status opcode every ~0.5 s, FTMS pushes at
+/// 1 Hz, the props transport streams sub-second), so "two frames" meant
+/// anything from 100 ms to 2 s depending on the treadmill. Worse, a frame
+/// count amplifies a real failure shape: three drivers derive state from a
+/// speed threshold, and a belt sitting at that threshold can alternate
+/// running/not-running in PAIRS by chance — with a per-frame debounce each
+/// pair opened and closed a session every four frames, each cycle
+/// invalidating the today-cache and forcing a full `day_totals` de-glitch
+/// walk under the DB mutex (quadratic as the day grows; single-frame
+/// alternation was always harmless — only pairs fired). Requiring the state
+/// to HOLD for this long is uniform across the frame-rate spread and kills
+/// the pair-alternation path outright: an alternating state never holds.
+const SESSION_DEBOUNCE: Duration = Duration::from_secs(3);
 
 async fn first_adapter() -> Result<Adapter> {
     let manager = Manager::new().await?;
@@ -269,15 +285,16 @@ async fn connect_and_poll(state: &Arc<AppState>, device_id: &str) -> Result<bool
     let host = DriverHost::new(unit.clone(), &recorder);
 
     let mut last_status: Option<u8> = None;
-    let mut status_streak: i32 = 0;
+    let mut run_held: Option<(bool, f64)> = None;
     let mut last_persist: f64 = 0.0;
     let mut emit = |sample: Sample| {
         let telem = Telemetry::from_sample(&sample, &unit);
         ingest_sample(
             state,
             &telem,
+            unix_now(),
             &mut last_status,
-            &mut status_streak,
+            &mut run_held,
             &mut last_persist,
         );
         broadcast_state(state, &telem);
@@ -324,30 +341,41 @@ fn broadcast_state(state: &Arc<AppState>, telem: &Telemetry) {
 /// samples back into seconds; the two MUST stay in step.
 const SAMPLE_MIN_INTERVAL_S: f64 = crate::db::SAMPLE_INTERVAL_S;
 
+/// Ingest one telemetry update: session detection, throttled persistence.
+///
+/// `now` is the wall clock, injected so the time-based session debounce is
+/// testable. `run_held` is the debounce state: the `is_running` value the
+/// stream is currently holding and when it started holding it — a session
+/// opens (closes) only once `is_running` has held true (false) for
+/// [`SESSION_DEBOUNCE`], regardless of how many frames arrived in between.
 pub(crate) fn ingest_sample(
     state: &Arc<AppState>,
     telem: &Telemetry,
+    now: f64,
     last_status: &mut Option<u8>,
-    status_streak: &mut i32,
+    run_held: &mut Option<(bool, f64)>,
     last_persist: &mut f64,
 ) {
-    let now = unix_now();
     state.set_last_state(Some(telem.clone()));
 
-    // Remember the status we came in with: the streak bookkeeping below overwrites
-    // `last_status`, but the persistence throttle needs to know whether this
-    // telemetry represents a transition.
+    // The persistence throttle needs to know whether this telemetry
+    // represents a status transition (transitions always persist).
     let status_changed = telem.status.is_some() && telem.status != *last_status;
-
-    if let Some(st) = telem.status {
-        if Some(st) == *last_status {
-            *status_streak += 1;
-        } else {
-            *status_streak = 0;
-            *last_status = Some(st);
-        }
+    if telem.status.is_some() {
+        *last_status = telem.status;
     }
-    let confirmed = *status_streak >= SESSION_DEBOUNCE;
+
+    // Session debounce, by TIME held, not frames seen (see SESSION_DEBOUNCE):
+    // any flip of is_running restarts the clock, so an alternating stream
+    // never confirms anything.
+    let held_s = match *run_held {
+        Some((running, since)) if running == telem.is_running => now - since,
+        _ => {
+            *run_held = Some((telem.is_running, now));
+            0.0
+        }
+    };
+    let confirmed = held_s >= SESSION_DEBOUNCE.as_secs_f64();
     let active = state.active_session();
 
     if confirmed && telem.is_running && active.is_none() {
@@ -459,15 +487,16 @@ mod tests {
     fn throttles_raw_writes_but_never_drops_a_transition() {
         let db = Arc::new(Db::open(":memory:").unwrap());
         let state = AppState::new(db.clone(), "km/h".into(), None, "tok".into());
-        let (mut last_status, mut streak, mut last_persist) = (None, 0i32, 0.0f64);
+        let (mut last_status, mut run_held, mut last_persist) = (None, None, 0.0f64);
 
         // A burst of same-status telemetry, all well inside one interval.
         for i in 0..50 {
             ingest_sample(
                 &state,
                 &running(i),
+                unix_now(),
                 &mut last_status,
-                &mut streak,
+                &mut run_held,
                 &mut last_persist,
             );
         }
@@ -486,8 +515,9 @@ mod tests {
         ingest_sample(
             &state,
             &stopped,
+            unix_now(),
             &mut last_status,
-            &mut streak,
+            &mut run_held,
             &mut last_persist,
         );
         assert_eq!(
@@ -495,5 +525,121 @@ mod tests {
             2,
             "a status change must be written through the throttle"
         );
+    }
+
+    /// The real ingest loop-state, driven on a synthetic clock.
+    struct DebounceRig {
+        state: Arc<AppState>,
+        last_status: Option<u8>,
+        run_held: Option<(bool, f64)>,
+        last_persist: f64,
+        base: f64,
+    }
+
+    impl DebounceRig {
+        fn new() -> Self {
+            let db = Arc::new(Db::open(":memory:").unwrap());
+            DebounceRig {
+                state: AppState::new(db, "km/h".into(), None, "tok".into()),
+                last_status: None,
+                run_held: None,
+                last_persist: 0.0,
+                base: unix_now(),
+            }
+        }
+
+        fn push_at(&mut self, offset_s: f64, telem: &Telemetry) {
+            self.last_persist = 0.0; // the throttle is pinned elsewhere
+            ingest_sample(
+                &self.state,
+                telem,
+                self.base + offset_s,
+                &mut self.last_status,
+                &mut self.run_held,
+                &mut self.last_persist,
+            );
+        }
+    }
+
+    fn stopped() -> Telemetry {
+        let mut t = Telemetry::new("km/h");
+        t.status = Some(STATUS_STANDBY);
+        t.status_name = Some("STANDBY".into());
+        t.is_running = false;
+        t
+    }
+
+    /// The debounce is a DURATION, not a frame count: frame rate varies ~20×
+    /// across drivers, so only "state held for SESSION_DEBOUNCE" means the
+    /// same thing on every treadmill. Many fast frames must not confirm; a
+    /// held state must, at any frame rate.
+    #[test]
+    fn session_debounce_counts_time_held_not_frames_seen() {
+        let mut rig = DebounceRig::new();
+
+        // 20 running frames in under a second — a fast driver. A frame-count
+        // debounce would have opened on the second frame.
+        for i in 0..20 {
+            rig.push_at(i as f64 * 0.05, &running(i));
+        }
+        assert_eq!(
+            rig.state.active_session(),
+            None,
+            "20 running frames inside 1 s opened a session — the debounce \
+             must count time held, not frames seen (SESSION_DEBOUNCE in \
+             ble.rs is a Duration; drivers emit at wildly different rates)"
+        );
+
+        // The same state still held after SESSION_DEBOUNCE: opens.
+        rig.push_at(3.5, &running(30));
+        assert!(
+            rig.state.active_session().is_some(),
+            "running held past SESSION_DEBOUNCE must open a session"
+        );
+
+        // Closing mirrors opening: a fresh stop frame doesn't close…
+        rig.push_at(4.0, &stopped());
+        rig.push_at(5.0, &stopped());
+        assert!(
+            rig.state.active_session().is_some(),
+            "a stop held less than SESSION_DEBOUNCE must not close the session"
+        );
+        // …but a stop held past the debounce does.
+        rig.push_at(7.5, &stopped());
+        assert_eq!(
+            rig.state.active_session(),
+            None,
+            "not-running held past SESSION_DEBOUNCE must close the session"
+        );
+    }
+
+    /// The amplifier the duration killed: a status stream alternating in
+    /// PAIRS (a belt sitting at a speed-threshold boundary — ftms.rs and
+    /// sperax.rs derive state from speed). With a frame-count debounce each
+    /// pair confirmed, so a session opened and closed every four frames,
+    /// invalidating the today-cache and walking day_totals under the DB
+    /// mutex each time. An alternating state never HOLDS, so a time-based
+    /// debounce confirms nothing.
+    #[test]
+    fn pair_alternation_never_opens_or_closes_sessions() {
+        let mut rig = DebounceRig::new();
+        for i in 0..100u32 {
+            // R R S S R R S S …, one frame per second — each state holds
+            // only 1 s, well under SESSION_DEBOUNCE.
+            let telem = if (i / 2) % 2 == 0 {
+                running(i)
+            } else {
+                stopped()
+            };
+            rig.push_at(i as f64, &telem);
+            assert_eq!(
+                rig.state.active_session(),
+                None,
+                "frame {i}: a pair-alternating status stream opened a \
+                 session — this is the flapping amplifier SESSION_DEBOUNCE's \
+                 time basis exists to kill (see its comment in ble.rs); no \
+                 state in this stream ever holds for the debounce duration"
+            );
+        }
     }
 }

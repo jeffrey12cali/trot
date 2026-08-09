@@ -1137,9 +1137,26 @@ impl Db {
                     .collect())
             }
             "duration_running_s" => {
+                // In-session samples only — the SAME definition the rollup
+                // writer uses for `running_samples` (see `aggregate_and_upsert`
+                // below). This filter is load-bearing twice over:
+                //
+                // * Consistency across the rollup floor. Without it, running
+                //   time counted from un-attributed raw samples showed in
+                //   recent chart buckets and then VANISHED once the rollup ran
+                //   (rollups only ever count in-session samples) — walking
+                //   time evaporating from the chart.
+                // * `status = 3` alone is not "walking". The stored byte is
+                //   the contract's presentation value, and `BeltState::Other`
+                //   passes unrecognised device bytes through raw — an unknown
+                //   byte of 0x03 stores as status 3 without ever opening a
+                //   session (see `BeltState::Other`'s rustdoc in drivers/mod.rs).
+                //   Session attribution is the engine's judgement that the belt
+                //   was genuinely running; counting only attributed samples
+                //   keeps that judgement authoritative here too.
                 let raw_sql = format!(
                     "SELECT {raw_bucket} AS bucket_ts, SUM(CASE WHEN status = 3 THEN 1 ELSE 0 END) * {SAMPLE_INTERVAL_S} AS value
-                     FROM samples s WHERE s.ts >= ? AND s.ts < ? GROUP BY bucket_ts"
+                     FROM samples s WHERE s.ts >= ? AND s.ts < ? AND s.session_id IS NOT NULL GROUP BY bucket_ts"
                 );
                 let roll_sql = format!(
                     "SELECT {roll_bucket} AS bucket_ts, SUM(running_samples) * {SAMPLE_INTERVAL_S} AS value
@@ -1366,6 +1383,13 @@ impl Db {
                     MIN(CASE WHEN s.speed_raw > 0 THEN s.speed_raw END) AS speed_raw_min,
                     AVG(CASE WHEN s.speed_raw > 0 THEN s.speed_raw END) AS speed_raw_avg,
                     MAX(CASE WHEN s.speed_raw > 0 THEN s.speed_raw END) AS speed_raw_max,
+                    -- running_samples counts in-session status-3 samples (the
+                    -- session filter is on the enclosing WHERE). The raw-path
+                    -- `duration_running_s` query above uses the SAME in-session
+                    -- definition — keep the two in step, or running time
+                    -- changes value when the rollup crosses it. On why
+                    -- `status = 3` needs the session filter at all, see
+                    -- BeltState::Other's rustdoc in drivers/mod.rs.
                     SUM(CASE WHEN s.status = 3 THEN 1 ELSE 0 END) AS running_samples,
                     COUNT(*) AS total_samples
              FROM samples s WHERE s.ts >= ? AND s.ts < ? AND s.session_id IS NOT NULL
@@ -2174,6 +2198,82 @@ mod tests {
         assert_eq!(
             total as i64, 104,
             "timeseries raw tail must de-glitch, not MAX-MIN"
+        );
+    }
+
+    /// `duration_running_s` must mean the same thing on both sides of the
+    /// rollup floor: in-session status-3 samples ONLY. Un-attributed status-3
+    /// samples exist legitimately (the debounce window before a session
+    /// confirms, the closing frame stored after the close) and illegitimately
+    /// (a device emitting `BeltState::Other(0x03)`, whose raw byte stores as
+    /// status 3 without ever opening a session — see BeltState::Other's
+    /// rustdoc in drivers/mod.rs). Neither kind may count: before this was
+    /// pinned, the raw-tail query had no session filter, so such samples
+    /// showed as running time in recent chart buckets and then VANISHED when
+    /// the rollup ran.
+    #[test]
+    fn duration_running_s_counts_the_same_before_and_after_the_rollup() {
+        let db = mem();
+        let base = (((now_ts() as i64) / 60) * 60 - 600) as f64;
+        let sid = db
+            .open_session(base, "km/h", Some(0), Some(0), None)
+            .unwrap();
+        // 60 s of genuine in-session walking…
+        for i in 0..60 {
+            db.insert_sample(
+                Some(sid),
+                base + i as f64,
+                Some(i as u32),
+                Some(i as u32),
+                Some(60),
+                Some(0),
+                Some(0),
+                Some(3),
+            )
+            .unwrap();
+        }
+        // …and 30 un-attributed status-3 samples (an Other(0x03) device, or
+        // pre-debounce frames): stored, but never part of any session.
+        for i in 0..30 {
+            db.insert_sample(
+                None,
+                base + 120.0 + i as f64,
+                None,
+                None,
+                Some(60),
+                None,
+                None,
+                Some(3),
+            )
+            .unwrap();
+        }
+
+        let sum = |db: &Db| -> i64 {
+            db.timeseries("duration_running_s", 60, base - 60.0, base + 900.0)
+                .unwrap()
+                .iter()
+                .map(|b| b["value"].as_f64().unwrap())
+                .sum::<f64>() as i64
+        };
+
+        let before = sum(&db);
+        assert_eq!(
+            before, 60,
+            "raw-path duration_running_s must count IN-SESSION status-3 \
+             samples only — the same definition the rollup writer uses for \
+             running_samples. If this reads 90, the session filter was \
+             dropped from the raw query in `timeseries` (db.rs) and running \
+             time will evaporate when the rollup runs"
+        );
+
+        db.rollup_samples_at(base + 900.0).unwrap();
+        let after = sum(&db);
+        assert_eq!(
+            after, before,
+            "duration_running_s changed value when the rollup crossed it — \
+             the raw query in `timeseries` and the rollup writer's \
+             running_samples (both in db.rs) must share one in-session \
+             definition of running time"
         );
     }
 

@@ -44,7 +44,9 @@
 //!   bytes 5..8:   elapsed time, seconds (u24 BE)
 //!   bytes 8..11:  distance, units of 10 m (u24 BE)
 //!   bytes 11..14: steps (u24 BE)
-//!   byte  14:     app target speed, 0.1 km/h
+//!   byte  14:     app target speed, km/h = raw / 30 (the real capture shows
+//!                 raw 180 alongside a 6.0 km/h belt; 18 km/h is impossible
+//!                 on this hardware, so 0.1 km/h it is not)
 //!   byte  15:     (unknown)
 //!   byte  16:     controller button
 //!   byte  17:     (unknown)
@@ -218,7 +220,9 @@ pub struct Status {
     pub distance_raw: u32,
     /// Cumulative steps.
     pub steps: u32,
-    /// The app-requested target speed in 0.1 km/h (not the belt speed).
+    /// The app-requested target speed (not the belt speed), km/h = raw / 30
+    /// (see the frame-format note in the module docs). Unparsed beyond the
+    /// raw byte — Trot never consumes a target speed.
     pub app_speed_raw: u8,
     /// Controller button byte.
     pub button: u8,
@@ -269,22 +273,36 @@ pub fn parse_status(frame: &[u8]) -> Result<Status, ProtocolError> {
     })
 }
 
-/// The wire's belt-state byte as a neutral [`BeltState`].
+/// The wire's belt-state byte as a neutral [`BeltState`] — **total**: every
+/// byte maps to `Standby` or `Running`, none to [`BeltState::Other`].
 ///
 /// What the sources establish: real captures show `1` while the belt moves
-/// (ph4-walkingpad README); QWalkingPad treats `0` and `5` as "not running"
-/// and `5` is the asleep/locked state (qdomyos calls it the "lock byte";
-/// ph4's demo shows it alongside mode 2, sleep). `5` maps to `Standby` rather
-/// than `Other(5)` **on purpose**: it is a known not-running state, and the
-/// raw passthrough byte would collide with the API contract's `PAUSED` code
-/// (0x05), presenting a sleeping pad as paused. Everything else is unverified
-/// and passes through as [`BeltState::Other`].
+/// (ph4-walkingpad README); QWalkingPad treats exactly `0` and `5` as "not
+/// running" (`padRunning = s != 0 && s != 5`) and `5` is the asleep/locked
+/// state (qdomyos calls it the "lock byte"; ph4's demo shows it alongside
+/// mode 2, sleep). `5` maps to `Standby` rather than `Other(5)` **on
+/// purpose**: it is a known not-running state, and the raw passthrough byte
+/// would collide with the API contract's `PAUSED` code (0x05), presenting a
+/// sleeping pad as paused.
+///
+/// Every other byte maps to `Running` because that is QWalkingPad's
+/// hardware-tested predicate taken *whole*: its author verified on real pads
+/// that any state outside {0, 5} means the belt moves. Mapping those bytes
+/// to `Other` instead — as this driver once did — meant a pad reporting a
+/// state outside {0, 1, 5} mid-walk recorded zero session time and zero
+/// steps for the entire walk (`Other` never opens a session).
+///
+/// ⚠️ **Do not port this shape to another protocol.** "Everything else ⇒
+/// Running" is justified here *only* by an upstream predicate tested on real
+/// hardware. For a protocol without that evidence, unknown-⇒-`Running` is
+/// strictly worse than unknown-⇒-`Other`: it would open sessions (and accrue
+/// walking time) on bytes nobody has ever observed. Urevo, PitPat, FitShow
+/// and props all correctly map unknown bytes to `Other` — the divergence is
+/// deliberate, per-protocol, evidence-driven.
 pub(crate) fn belt_state(v: u8) -> BeltState {
     match v {
-        0 => BeltState::Standby,
-        1 => BeltState::Running,
-        5 => BeltState::Standby, // asleep / locked — not running
-        other => BeltState::Other(other),
+        0 | 5 => BeltState::Standby, // 5 = asleep / locked — not running
+        _ => BeltState::Running,
     }
 }
 
@@ -627,16 +645,28 @@ mod tests {
 
     // ---- Belt state ----------------------------------------------------------
 
-    /// 0 and 5 are the documented not-running states (QWalkingPad:
-    /// `padRunning = s != 0 && s != 5`), 1 is running in every real capture;
-    /// anything else passes through raw.
+    /// The mapping is TOTAL, taken whole from QWalkingPad's hardware-tested
+    /// predicate `padRunning = s != 0 && s != 5`: 0 and 5 are the only
+    /// not-running states, everything else means the belt moves. Routing the
+    /// "everything else" bytes to `Other` instead would record zero session
+    /// time and zero steps for a whole walk on a pad reporting a state
+    /// outside {0, 1, 5} — `Other` never opens a session.
     #[test]
-    fn belt_states_map_and_unknowns_pass_through() {
+    fn belt_state_is_total_per_the_upstream_predicate() {
         assert_eq!(belt_state(0), BeltState::Standby);
         assert_eq!(belt_state(1), BeltState::Running);
         assert_eq!(belt_state(5), BeltState::Standby, "asleep/locked");
         for v in [2u8, 3, 4, 6, 9, 0x7f, 0xff] {
-            assert_eq!(belt_state(v), BeltState::Other(v), "byte {v}");
+            assert_eq!(
+                belt_state(v),
+                BeltState::Running,
+                "byte {v}: WiLink takes QWalkingPad's predicate WHOLE — any \
+                 state outside {{0, 5}} is Running on this hardware. If you \
+                 changed this to Other(v), a moving pad in state {v} records \
+                 no session at all; if you are porting this shape to another \
+                 protocol, don't — see belt_state's rustdoc in \
+                 kingsmith_wilink.rs for why the evidence is WiLink-only"
+            );
         }
     }
 

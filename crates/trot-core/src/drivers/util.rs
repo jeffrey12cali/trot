@@ -330,19 +330,38 @@ pub fn checksum_xor(bytes: &[u8]) -> u8 {
 
 // ---- Verifying characteristic properties -------------------------------------
 
-/// Does this GATT table have a notifiable characteristic with this UUID?
+/// Does this GATT table have a subscribable (NOTIFY **or** INDICATE)
+/// characteristic with this UUID?
 ///
 /// Property checks are how a driver avoids claiming a lookalike: vendor
 /// UUID blocks like `0xFFF0`/`FFF1`/`FFF2` are shared across mutually
 /// incompatible protocols, and at least one (Deerrun) swaps the notify/write
 /// roles relative to the others. A UUID proves nothing; a UUID **with the
 /// role you need** is evidence.
+///
+/// INDICATE counts on purpose. btleplug's `subscribe()` enables whichever of
+/// the two flavours the characteristic offers (CoreBluetooth and BlueZ
+/// alike), so an indicate-only stream reads exactly like a notify stream to
+/// a driver — and real vendor firmware ships indicate-only tables and sparse
+/// property bitmaps. Before matching consulted properties at all, such a
+/// console connected fine; requiring NOTIFY exactly would leave it matching
+/// **no driver** (not even the LifeSpan fallback, which is blind to property
+/// regressions) and present as `connect_failed`, indistinguishable from a
+/// switched-off treadmill.
+///
+/// A characteristic reporting NO properties at all still fails both checks —
+/// deliberately (see the "UUIDs present but zero properties" cases in
+/// `lifespan.rs` and `tests/driver_matrix.rs`): a table too broken to declare
+/// a single property is no evidence of a role.
 pub fn has_notify(
     gatt: &std::collections::BTreeSet<btleplug::api::Characteristic>,
     char_uuid: Uuid,
 ) -> bool {
-    gatt.iter()
-        .any(|c| c.uuid == char_uuid && c.properties.contains(CharPropFlags::NOTIFY))
+    gatt.iter().any(|c| {
+        c.uuid == char_uuid
+            && c.properties
+                .intersects(CharPropFlags::NOTIFY | CharPropFlags::INDICATE)
+    })
 }
 
 /// Does this GATT table have a writable (with or without response)
@@ -742,5 +761,49 @@ mod tests {
         assert!(!has_notify(&deerrun_shaped, sig_uuid(0xfff1)));
         assert!(!has_write(&deerrun_shaped, sig_uuid(0xfff2)));
         assert!(has_write(&deerrun_shaped, sig_uuid(0xfff1)));
+    }
+
+    /// Both subscription flavours satisfy the notify role — and a table with
+    /// no properties at all satisfies neither.
+    #[test]
+    fn indicate_only_satisfies_the_notify_role() {
+        use btleplug::api::Characteristic;
+        use std::collections::BTreeSet;
+
+        let chr = |short: u16, props: CharPropFlags| Characteristic {
+            uuid: sig_uuid(short),
+            service_uuid: sig_uuid(0xfff0),
+            properties: props,
+            descriptors: BTreeSet::new(),
+        };
+        // An indicate-only console (or a stack reporting a sparse bitmap):
+        // btleplug's subscribe() handles INDICATE exactly like NOTIFY, so the
+        // role check must accept it or the device matches NO driver at all —
+        // not even the LifeSpan fallback — and the user sees connect_failed.
+        let indicate_only: BTreeSet<_> = [
+            chr(0xfff1, CharPropFlags::INDICATE),
+            chr(0xfff2, CharPropFlags::WRITE),
+        ]
+        .into();
+        assert!(
+            has_notify(&indicate_only, sig_uuid(0xfff1)),
+            "has_notify must accept INDICATE as well as NOTIFY — btleplug's \
+             subscribe() handles both, and an indicate-only console rejected \
+             here matches no driver at all (see has_notify's rustdoc in \
+             drivers/util.rs)"
+        );
+        // Both flags together, obviously fine.
+        let both: BTreeSet<_> =
+            [chr(0xfff1, CharPropFlags::NOTIFY | CharPropFlags::INDICATE)].into();
+        assert!(has_notify(&both, sig_uuid(0xfff1)));
+        // No properties at all: still refused — DELIBERATE. A table too
+        // broken to declare a single property is no evidence of a role
+        // (pinned again in lifespan.rs and tests/driver_matrix.rs).
+        let no_props: BTreeSet<_> = [chr(0xfff1, CharPropFlags::empty())].into();
+        assert!(
+            !has_notify(&no_props, sig_uuid(0xfff1)),
+            "a zero-property characteristic must NOT satisfy the notify role \
+             — that refusal is deliberate (has_notify rustdoc, drivers/util.rs)"
+        );
     }
 }

@@ -142,21 +142,27 @@
 //! always", contradicted by its own metric default), and milltender's US
 //! walking pad demonstrably wires 0.1 mph / 0.001 mile. Trot's analog of
 //! qdomyos' user setting is `host.display_unit` — the unit the user's
-//! console displays — so this driver scales speed by it (the LifeSpan
-//! precedent: the wire unit follows the console's unit setting):
-//! `"km/h"` → 0.1 km/h per unit; anything else → 0.1 mph per unit
-//! (matching `telemetry.rs`'s same-string convention).
+//! console displays — so this driver scales **speed** by it (`"km/h"` →
+//! 0.1 km/h per unit; anything else → 0.1 mph per unit, matching
+//! `telemetry.rs`'s same-string convention). That heuristic is acceptable
+//! for speed and ONLY for speed: speed is a live reading, not a stored
+//! cumulative counter, so a wrong guess is visible on screen (~1.6× off)
+//! and recoverable by changing the display unit — `run()` logs the
+//! assumption at INFO once per connection so the trail is in the log.
 //!
 //! Two fields are deliberately not reported:
 //!
-//! * **Distance on metric consoles.** The imperial scale (0.001 mi,
-//!   ×1.609344 m) is hardware-verified by milltender; the metric scale is
-//!   not verified anywhere — qdomyos decodes ÷10 (0.1 km) but the value is
-//!   dead code (it integrates speed over wall-clock instead), and the
-//!   symmetric guess would be 0.001 km, a 100× disagreement. A distance
-//!   that might be 100× wrong would corrupt stored day totals, so on
-//!   metric consoles `distance_m` stays `None` until someone sends a
-//!   capture. (Imperial consoles get the verified scale.)
+//! * **Distance, on every device.** The imperial scale (0.001 mi,
+//!   ×1.609344 m) is hardware-verified by milltender — on exactly one
+//!   device — and the metric scale is verified nowhere: qdomyos decodes
+//!   ÷10 (0.1 km) but the value is dead code (it integrates speed over
+//!   wall-clock instead), and the symmetric guess would be 0.001 km, a
+//!   100× disagreement. More fundamentally, `wire_unit` infers the
+//!   device's wire scale from the *user's display preference*, and a user
+//!   preference must not determine a number written into permanent
+//!   history — this was briefly the one place in the tree where it did.
+//!   `distance_m` stays `None` on both console units until a capture pins
+//!   a scale against an advertised name.
 //! * **Calories, on every device.** qdomyos reads the field as whole kcal
 //!   but never uses the value; milltender — the only implementation that
 //!   consumes it — divides by 10 on its hardware. A 10× conflict between
@@ -292,8 +298,12 @@ pub const COUNTER_PAYLOAD_MIN_LEN: usize = 12;
 pub const KMH_PER_RAW_SPEED_METRIC: f64 = 0.1;
 /// km/h per 0.1 mph wire unit (imperial consoles; milltender's hardware).
 pub const KMH_PER_RAW_SPEED_IMPERIAL: f64 = 0.160_934_4;
-/// Meters per 0.001 mile wire unit (imperial consoles; milltender's
-/// hardware — the only verified distance scale in any source).
+/// Meters per 0.001 mile wire unit — milltender's hardware, the only
+/// verified distance scale in any source. **Currently unused by the
+/// driver**: verified on one device and selected by a user preference is
+/// not enough evidence to store distance (see the module docs' Units
+/// section); the constant stays as the documented finding for the capture
+/// that eventually wires distance up.
 pub const METERS_PER_RAW_DISTANCE_IMPERIAL: f64 = 1.609_344;
 
 /// Poll cadence. qdomyos polls at 200 ms, the vendor app at ~3 Hz,
@@ -502,10 +512,10 @@ pub fn wire_unit(display_unit: &str) -> WireUnit {
     }
 }
 
-/// A [`Status`] as a neutral SI sample. Speed scales by the console unit;
-/// distance is reported only where its scale is verified (imperial);
-/// calories are never reported (scale conflict) — all per the module docs.
-/// The state comes from the status byte alone, never from speed.
+/// A [`Status`] as a neutral SI sample. Speed scales by the console unit
+/// (a documented, recoverable heuristic — module docs); distance and
+/// calories are never reported (unresolved scales — module docs). The state
+/// comes from the status byte alone, never from speed.
 pub(crate) fn to_sample(s: &Status, unit: WireUnit) -> Sample {
     match &s.counters {
         Some(c) => Sample {
@@ -513,12 +523,16 @@ pub(crate) fn to_sample(s: &Status, unit: WireUnit) -> Sample {
                 WireUnit::Metric => c.speed_raw as f64 * KMH_PER_RAW_SPEED_METRIC,
                 WireUnit::Imperial => c.speed_raw as f64 * KMH_PER_RAW_SPEED_IMPERIAL,
             }),
-            distance_m: match unit {
-                WireUnit::Metric => None, // unverified scale — absent, not wrong
-                WireUnit::Imperial => {
-                    Some(c.distance_raw as f64 * METERS_PER_RAW_DISTANCE_IMPERIAL)
-                }
-            },
+            // Distance is absent on BOTH console units, deliberately.
+            // `unit` is inferred from the USER'S display preference, not
+            // from the wire — good enough for speed (an error is visible on
+            // screen, and recoverable by changing the setting), but distance
+            // is written into permanent history, and the one verified scale
+            // (milltender's 0.001 mile) is verified on exactly one device.
+            // A user preference must not determine a stored number. Absent
+            // until a capture pins the scale — same reasoning this module
+            // already applies to the metric scale and to calories.
+            distance_m: None,
             steps: Some(c.steps),
             duration_s: Some(c.duration_s),
             calories: None, // 1-vs-0.1 kcal source conflict — absent, not wrong
@@ -695,6 +709,17 @@ impl Driver for FitShow {
         };
 
         let unit = wire_unit(&host.display_unit);
+        // The wire speed unit is a heuristic, not a fact (module docs). Say
+        // so once per connection, with the recovery path in the message.
+        tracing::info!(
+            "fitshow: assuming {} wire units from display_unit={:?}; if the \
+             speed reads ~1.6x wrong, change the display unit",
+            match unit {
+                WireUnit::Metric => "metric (0.1 km/h)",
+                WireUnit::Imperial => "imperial (0.1 mph)",
+            },
+            host.display_unit
+        );
 
         // Subscribe first, then poll — the device answers the first query
         // immediately and the reply must not be missed. No init handshake:
@@ -1124,12 +1149,12 @@ mod tests {
 
     // ---- Units ---------------------------------------------------------------
 
-    /// The wire unit follows the console's display unit (the LifeSpan
-    /// precedent — see the module docs): metric consoles scale 0.1 km/h
-    /// and report no distance (unverified scale); imperial consoles scale
-    /// 0.1 mph and 0.001 mile. Steps and seconds are unit-free and
-    /// identical on both. Calories are absent on both — never scaled,
-    /// never guessed.
+    /// The console's display unit scales SPEED only (a live, visible,
+    /// recoverable reading — module docs); distance and calories are absent
+    /// on both units. `wire_unit` infers the device's wire scale from a user
+    /// preference, and a user preference must never determine a number
+    /// written into permanent history — distance is exactly such a number.
+    /// Steps and seconds are unit-free and identical on both.
     #[test]
     fn unit_scaling_follows_the_console_display_unit() {
         let approx = |a: f64, b: f64| (a - b).abs() < 1e-9;
@@ -1149,7 +1174,15 @@ mod tests {
 
         let imperial = to_sample(&s, WireUnit::Imperial);
         assert!(approx(imperial.speed_kmh.unwrap(), 1.4 * 1.609344));
-        assert!(approx(imperial.distance_m.unwrap(), 1136.0 * 1.609344));
+        assert_eq!(
+            imperial.distance_m, None,
+            "FitShow distance must stay absent on BOTH console units: the \
+             wire scale is inferred from the user's display preference, and \
+             a preference must not determine a stored cumulative counter \
+             (to_sample's comment and the module docs' Units section, \
+             fitshow.rs). Wire it up only with a capture pinning the scale \
+             against an advertised name"
+        );
         assert_eq!(imperial.steps, Some(363));
         assert_eq!(imperial.duration_s, Some(325));
         assert_eq!(imperial.calories, None);
@@ -1160,14 +1193,15 @@ mod tests {
     /// Fixture frame → Sample → Telemetry on an imperial console: the
     /// mph wire scaling and the presentation re-encoding, pinned end to
     /// end. The raw speed must round-trip exactly (1.4 wire units → 140
-    /// centi-mph), which is what keeps stored accounting stable.
+    /// centi-mph), which is what keeps stored accounting stable. Distance
+    /// stays absent on both units (unpinned wire scale — module docs).
     #[test]
     fn golden_fixture_to_telemetry() {
         let s = parse_status(&build_status_frame(STATUS_RUNNING, &running_counters())).unwrap();
 
         let t = Telemetry::from_sample(&to_sample(&s, WireUnit::Imperial), "mph");
         assert_eq!(t.speed_raw, Some(140), "1.40 mph in centi-units");
-        assert_eq!(t.distance_raw, Some(183), "1828.2 m → 183 decameters");
+        assert_eq!(t.distance_raw, None, "no capture-pinned scale — absent");
         assert_eq!(t.steps, Some(363));
         assert_eq!(t.duration_s, Some(325));
         assert_eq!(t.calories, None);

@@ -158,6 +158,17 @@ fn no_driver_turns_an_unreported_field_into_some_zero() {
         );
         assert_eq!(s.steps, Some(363));
         assert_absent("fitshow (metric counters)", &s, &[Distance, Calories]);
+
+        // Imperial consoles report no distance either: the wire scale is
+        // inferred from the USER'S display preference, and a preference must
+        // not determine a stored cumulative counter (fitshow.rs module docs,
+        // Units section). Only a capture pinning the scale to an advertised
+        // name may wire this up.
+        let s = super::fitshow::to_sample(
+            &super::fitshow::parse_status(&running).unwrap(),
+            super::fitshow::WireUnit::Imperial,
+        );
+        assert_absent("fitshow (imperial counters)", &s, &[Distance, Calories]);
     }
 
     // KingSmith props: the pad reports any subset of keys per line; keys

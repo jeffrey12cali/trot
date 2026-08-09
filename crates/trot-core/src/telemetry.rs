@@ -52,8 +52,16 @@ pub(crate) fn status_code(state: BeltState) -> u8 {
 pub const KMH_PER_MPH: f64 = 1.609344;
 
 /// Meters represented by a raw distance value (stored in decameters).
+///
+/// Saturating, not wrapping: a hostile or garbage raw value near `u32::MAX`
+/// (reachable via a PitPat distance frame of `0xFFFFFFFF`, or an absurd
+/// `props RunningDistance` string saturating the `from_sample` encoding)
+/// must not panic a debug build into the supervise restart loop or wrap a
+/// release build to ~4 metres. Saturation keeps the function total and
+/// monotone; `u32::MAX` decameters is already ~42.9 million km, so clamping
+/// the product at `u32::MAX` metres loses nothing a treadmill can report.
 pub fn distance_meters(raw: u32) -> u32 {
-    raw * 10
+    raw.saturating_mul(10)
 }
 
 /// km/h from a raw speed (hundredths of the displayed unit).
@@ -96,6 +104,16 @@ pub struct Telemetry {
     pub distance_m: Option<u32>,
     pub distance_km: Option<f64>,
     pub distance_mi: Option<f64>,
+    /// Whether the belt is running — this is what opens and closes sessions.
+    ///
+    /// **An input carried from the `Sample`'s `BeltState`, NOT a derivation
+    /// from this struct's other fields.** `from_sample` sets it from
+    /// `state == BeltState::Running`; it deliberately does not follow from
+    /// `status == 3`, because `BeltState::Other(v)` publishes the raw device
+    /// byte into `status` (frozen contract behaviour — see `status_code`),
+    /// and an unrecognised wire byte that happens to be `0x03` must not open
+    /// sessions. A path that builds a `Telemetry` without a `Sample` must set
+    /// this field itself or it stays `false`.
     pub is_running: bool,
 }
 
@@ -152,11 +170,24 @@ impl Telemetry {
             t.status = Some(code);
             t.status_name = Some(status_name(code));
         }
+        // `is_running` comes from the driver's OWN state judgement, not from
+        // the presentation byte: `Other(v)` puts the raw device byte into
+        // `status` (frozen contract behaviour), so an unknown wire byte that
+        // happens to be 0x03 would otherwise read as RUNNING and open/close
+        // sessions. `state == Running` always implies `status == 3`, so this
+        // strictly narrows what can start a session; it never widens it.
+        t.is_running = sample.state == Some(BeltState::Running);
         t.refresh_derived();
         t
     }
 
     /// Recompute the derived fields from the raw fields + display unit.
+    ///
+    /// `is_running` is NOT recomputed here — it is not derivable from this
+    /// struct's own fields (`status == 3` can also mean `Other(0x03)`, an
+    /// unrecognised device byte in the contract's presentation namespace).
+    /// It is an input set by `from_sample` from the `Sample`'s `BeltState`;
+    /// see the field's doc.
     pub(crate) fn refresh_derived(&mut self) {
         self.speed_kmh = self.speed_raw.map(|r| speed_kmh(r, &self.display_unit));
         self.speed_mph = self.speed_raw.map(|r| speed_mph(r, &self.display_unit));
@@ -167,7 +198,6 @@ impl Telemetry {
         self.distance_mi = self
             .distance_raw
             .map(|r| distance_meters(r) as f64 / 1000.0 / KMH_PER_MPH);
-        self.is_running = self.status == Some(STATUS_RUNNING);
     }
 }
 
@@ -233,6 +263,32 @@ mod tests {
         assert!(!t.is_running);
     }
 
+    /// The other end of hostile input: a distance raw near `u32::MAX` (a
+    /// PitPat frame of `0xFFFFFFFF`, or an absurd props string saturating the
+    /// `from_sample` cast) must saturate, never overflow — `raw * 10` used to
+    /// panic debug builds into the 5 s supervise restart loop and wrap
+    /// release builds to 4 metres.
+    #[test]
+    fn distance_meters_saturates_instead_of_overflowing() {
+        assert_eq!(
+            distance_meters(u32::MAX),
+            u32::MAX,
+            "distance_meters must saturate at u32::MAX — an overflowing \
+             `raw * 10` panics debug builds and silently wraps release \
+             builds (see distance_meters' rustdoc in telemetry.rs)"
+        );
+        assert_eq!(distance_meters(u32::MAX / 10), u32::MAX / 10 * 10);
+        // And the full Sample path: a hostile driver reporting an absurd
+        // distance must produce a saturated raw, not a panic.
+        let sample = Sample {
+            distance_m: Some(f64::MAX),
+            ..Default::default()
+        };
+        let t = Telemetry::from_sample(&sample, "km/h");
+        assert_eq!(t.distance_raw, Some(u32::MAX));
+        assert_eq!(t.distance_m, Some(u32::MAX));
+    }
+
     /// A hostile/buggy driver emitting negative SI values must clamp to 0, not
     /// wrap or panic (this mirrors the old FTMS path's `.max(0.0)`).
     #[test]
@@ -245,6 +301,31 @@ mod tests {
         let t = Telemetry::from_sample(&sample, "km/h");
         assert_eq!(t.speed_raw, Some(0));
         assert_eq!(t.distance_raw, Some(0));
+    }
+
+    /// The presentation byte is not the session signal. `Other(0x03)` puts
+    /// the raw device byte into `status`, where it collides with the
+    /// contract's RUNNING code — frozen behaviour, pinned by the LifeSpan
+    /// 256-byte identity test — but it must NEVER set `is_running`: only a
+    /// driver's own `BeltState::Running` opens or closes sessions.
+    #[test]
+    fn other_status_bytes_never_set_is_running_even_when_they_collide() {
+        for v in [0x01u8, 0x03, 0x04, 0x05, 0x7f] {
+            let sample = Sample {
+                state: Some(BeltState::Other(v)),
+                ..Default::default()
+            };
+            let t = Telemetry::from_sample(&sample, "km/h");
+            assert_eq!(t.status, Some(v), "raw passthrough is contract");
+            assert!(
+                !t.is_running,
+                "BeltState::Other(0x{v:02x}) set is_running — is_running must \
+                 derive from the Sample's BeltState, never from the status \
+                 byte (an unknown device byte of 0x03 would open sessions). \
+                 Rule documented on Telemetry::is_running and \
+                 BeltState::Other (drivers/mod.rs)"
+            );
+        }
     }
 
     #[test]
