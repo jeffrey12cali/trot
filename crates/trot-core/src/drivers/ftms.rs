@@ -541,7 +541,17 @@ impl Driver for Ftms {
     }
 
     fn supports(&self, _adv: &Advertisement, gatt: &BTreeSet<Characteristic>) -> bool {
-        gatt.iter().any(|c| c.uuid == super::sig_uuid(0x2acd))
+        // Role-verified, not UUID presence: this driver subscribes to
+        // Treadmill Data, so the characteristic must be subscribable
+        // (NOTIFY or INDICATE — `has_notify` accepts both flavours since
+        // btleplug's subscribe() handles either). A table that merely
+        // *mentions* 2ACD without the notify role is not an FTMS treadmill
+        // we can read; claiming it would subscribe to nothing and jam a
+        // device another driver (or the LifeSpan fallback) could serve.
+        // Every other driver in the tree verifies roles; this one is not
+        // the exception (docs/drivers/README.md, "A service UUID proves
+        // nothing").
+        super::util::has_notify(gatt, super::sig_uuid(0x2acd))
     }
 
     async fn run(&self, link: &Peripheral, host: &DriverHost<'_>, emit: Emit<'_>) -> Result<()> {
@@ -1114,6 +1124,43 @@ mod tests {
             name: String::new(),
             services: vec![crate::drivers::sig_uuid(0x1826)],
         }));
+    }
+
+    /// `supports()` verifies the notify ROLE on Treadmill Data, not merely
+    /// the UUID: this driver subscribes to 2ACD, so a read-only 2ACD is a
+    /// table we cannot read and must fall through to the next driver.
+    /// Both subscription flavours count (NOTIFY and INDICATE — see
+    /// util::has_notify), so the pre-83afe5b indicate-only regression cannot
+    /// recur through this check.
+    #[test]
+    fn supports_requires_the_notify_role_on_treadmill_data() {
+        use btleplug::api::CharPropFlags;
+        use std::collections::BTreeSet;
+        let table = |props: CharPropFlags| -> BTreeSet<btleplug::api::Characteristic> {
+            [btleplug::api::Characteristic {
+                uuid: crate::drivers::sig_uuid(0x2acd),
+                service_uuid: crate::drivers::sig_uuid(0x1826),
+                properties: props,
+                descriptors: BTreeSet::new(),
+            }]
+            .into()
+        };
+        let anon = adv("");
+        assert!(Ftms.supports(&anon, &table(CharPropFlags::NOTIFY)));
+        assert!(
+            Ftms.supports(&anon, &table(CharPropFlags::INDICATE)),
+            "indicate-only Treadmill Data must stay claimable — \
+             util::has_notify accepts both subscription flavours"
+        );
+        assert!(
+            !Ftms.supports(&anon, &table(CharPropFlags::READ)),
+            "a read-only 2ACD must NOT claim the device: FTMS was the only \
+             supports() in the tree matching on UUID presence alone, and a \
+             table without the notify role cannot be subscribed to \
+             (Ftms::supports in ftms.rs; the dispatch consequence is pinned \
+             in tests/driver_matrix.rs)"
+        );
+        assert!(!Ftms.supports(&anon, &table(CharPropFlags::empty())));
     }
 
     // ---- Golden pins: decoded record → Sample → Telemetry ------------------

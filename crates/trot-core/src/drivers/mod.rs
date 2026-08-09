@@ -9,12 +9,16 @@
 //!   reconnect/backoff, give-up-after-N-failures, cancellation (pause,
 //!   device switch, shutdown), session detection, persistence throttling and
 //!   the WebSocket broadcast. A driver never touches any of it, which is what
-//!   keeps a new driver to one file plus one registration line.
+//!   keeps everything protocol-shaped inside one driver file.
 //!
-//! Adding a driver: write `drivers/yourdevice.rs`, add it to [`DRIVERS`], done.
-//! The scan path and the connect path both consult the registry, so the one
-//! line makes the device discoverable *and* connectable. The full guide for
-//! contributors lives in `docs/drivers/README.md`.
+//! Adding a driver: write `drivers/yourdevice.rs` and register it in
+//! [`DRIVERS`] — the scan path and the connect path both consult the
+//! registry, so that makes the device discoverable *and* connectable. Then
+//! wire it into the layer's shared guarantees: the [`DRIVERS`] rationale
+//! bullet, the exact-ids registry test vector below, and — easiest to forget
+//! because nothing fails without it — a row in `cross_driver.rs`'s
+//! absent-vs-zero invariant table. The full list, with the why of each, is
+//! in `docs/drivers/README.md` ("Register it").
 
 #[cfg(test)]
 mod cross_driver;
@@ -81,8 +85,10 @@ use uuid::Uuid;
 ///   an already-paired console working when its advertised name isn't in our
 ///   prefix list. Every future driver goes **before** it.
 ///
-/// **This is the registration point.** One line here is the only edit outside
-/// your driver file.
+/// **This is the registration point.** The line here is what makes a driver
+/// live — and it comes with a rationale bullet above, the exact-ids test
+/// vector below, and a `cross_driver.rs` row (docs/drivers/README.md,
+/// "Register it", lists all five obligations).
 pub static DRIVERS: &[&dyn Driver] = &[
     &lifespan::LifeSpan,
     &kingsmith_wilink::KingSmithWiLink,
@@ -257,6 +263,21 @@ pub fn for_device(
     gatt: &BTreeSet<Characteristic>,
 ) -> Option<&'static dyn Driver> {
     DRIVERS.iter().copied().find(|d| d.supports(adv, gatt))
+}
+
+/// Every driver whose `supports()` accepts the device, in registry order —
+/// [`for_device`]'s winner is the first entry. Registry order is
+/// load-bearing and cannot be tested against real hardware, so the engine
+/// logs this whole set on connect (`ble.rs`'s dispatch line): with it, any
+/// future "wrong driver claimed my treadmill" dispute is a one-line bug
+/// report instead of a reconstruction. `tests/driver_matrix.rs` asserts
+/// exact supporter sets through this same function.
+pub fn supporters(adv: &Advertisement, gatt: &BTreeSet<Characteristic>) -> Vec<&'static str> {
+    DRIVERS
+        .iter()
+        .filter(|d| d.supports(adv, gatt))
+        .map(|d| d.id())
+        .collect()
 }
 
 /// Would any driver want this advertisement? The scan path uses this, so a

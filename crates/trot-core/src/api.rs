@@ -827,6 +827,11 @@ async fn api_diag(State(s): State<Arc<AppState>>, Query(p): Query<DiagParams>) -
             json!(chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string()),
         );
         m.insert("display_unit".into(), json!(s.display_unit()));
+        // Samples the plausibility gate stripped a field from since launch.
+        // Zero on a healthy decode; climbing during a hardware test means
+        // the active driver's unit scale is wrong (PLAUSIBILITY GATE in
+        // ble.rs; docs/drivers/README.md Step 4).
+        m.insert("rejected_samples".into(), json!(s.rejected_samples()));
         m.insert("recent_frames".into(), json!(s.frames_snapshot()));
         m.insert(
             "speed_marks".into(),

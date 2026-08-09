@@ -264,6 +264,10 @@ async fn connect_and_poll(state: &Arc<AppState>, device_id: &str) -> Result<bool
         _ => advertisement("", &[]),
     };
     let gatt = peripheral.characteristics();
+    // The full supporter set, not just the winner: registry order is
+    // load-bearing and untestable against real hardware, so the dispatch
+    // line below records every driver that would have claimed this device.
+    let supporters = drivers::supporters(&adv, &gatt);
     let driver = match drivers::for_device(&adv, &gatt) {
         Some(d) => d,
         None => {
@@ -275,7 +279,7 @@ async fn connect_and_poll(state: &Arc<AppState>, device_id: &str) -> Result<bool
         }
     };
 
-    announce_connected(state, device_id, driver.id());
+    announce_connected(state, device_id, driver.id(), &supporters);
 
     // The display unit is captured once per connection: the driver interprets
     // its wire format with it and `from_sample` re-encodes with it, and the two
@@ -284,19 +288,12 @@ async fn connect_and_poll(state: &Arc<AppState>, device_id: &str) -> Result<bool
     let recorder = |tag: u8, frame: &[u8]| state.record_frame(tag, frame);
     let host = DriverHost::new(unit.clone(), &recorder);
 
-    let mut last_status: Option<u8> = None;
-    let mut run_held: Option<(bool, f64)> = None;
-    let mut last_persist: f64 = 0.0;
+    let mut ing = IngestState::default();
     let mut emit = |sample: Sample| {
         let telem = Telemetry::from_sample(&sample, &unit);
-        ingest_sample(
-            state,
-            &telem,
-            unix_now(),
-            &mut last_status,
-            &mut run_held,
-            &mut last_persist,
-        );
+        // `ingest_sample` returns the GATED telemetry; broadcast that, so a
+        // field the plausibility gate stripped never reaches /ws either.
+        let telem = ingest_sample(state, &telem, unix_now(), &mut ing);
         broadcast_state(state, &telem);
     };
 
@@ -314,12 +311,23 @@ async fn connect_and_poll(state: &Arc<AppState>, device_id: &str) -> Result<bool
     Ok(true) // we did connect; a drop here is a normal reconnect
 }
 
-fn announce_connected(state: &Arc<AppState>, device_id: &str, kind: &str) {
+fn announce_connected(state: &Arc<AppState>, device_id: &str, kind: &str, supporters: &[&str]) {
     state.connected.store(true, Ordering::Relaxed);
+    state.set_driver(kind); // `/api/state`'s `driver` field
     state.broadcast(json!({
         "type": "status", "connected": true, "paired": true,
         "display_unit": state.display_unit(), "device_id": device_id,
     }));
+    // The dispatch record, one line, stable format — keep it greppable as
+    // "driver dispatch:". `accepted` is EVERY driver whose supports() took
+    // the device, in registry order (the winner is the first); when a future
+    // driver starts shadowing another on real hardware, this line is the
+    // whole bug report. WARN, deliberately, so it survives default log
+    // filtering — it prints once per connect.
+    tracing::warn!(
+        "driver dispatch: device={device_id} claimed={kind} accepted=[{}]",
+        supporters.join(", ")
+    );
     tracing::info!("connected ({kind})");
 }
 
@@ -341,21 +349,315 @@ fn broadcast_state(state: &Arc<AppState>, telem: &Telemetry) {
 /// samples back into seconds; the two MUST stay in step.
 const SAMPLE_MIN_INTERVAL_S: f64 = crate::db::SAMPLE_INTERVAL_S;
 
-/// Ingest one telemetry update: session detection, throttled persistence.
+// ---- PLAUSIBILITY GATE -------------------------------------------------------
+//
+// A rate-sanity gate on the counters a driver reports, applied at the very
+// top of `ingest_sample` — before `set_last_state`, deliberately:
+// `persist_close` reads `last_state()` on link loss to write the session's
+// closing values, so a gate any lower would still let a poisoned final frame
+// into the session row. Gating here covers the raw insert, the live session
+// update, the session close values, the broadcast (the caller broadcasts the
+// gated return value) and — because rollups derive from raw — the rollup.
+//
+// WHAT IT IS: a development tool and damage limiter for unit-scale errors.
+// A new driver decoding a field at 10–100× its true scale used to produce
+// *visibly wrong* numbers during hardware testing; this gate strips such a
+// field (sets it absent) instead of storing it, counts the strip
+// (`rejected_samples` in /api/diag) and WARNs with the field and the rate —
+// quietly-missing-but-loudly-counted, never silently wrong AND never
+// silently missing.
+//
+// WHAT IT IS NOT — read this before trusting it:
+// * NOT a security boundary. A mis-decode (or a hostile device) that lands
+//   in plausible range passes — and most mis-decodes on unverified hardware
+//   land in plausible range. SECURITY.md says the same.
+// * Sustained grinding just inside the ceilings passes by construction
+//   (~690k steps/day at 8 steps/s).
+// * RESET LAUNDERING passes: decreases must pass untouched (below), so a
+//   device cycling 0 → 700 → 0 → 700 stays inside every rate ceiling and
+//   banks each ramp — structurally indistinguishable from a real power
+//   cycle. Bounding how often a reset is HONOURED was considered and
+//   rejected: a causal gate cannot tell a reset from a one-frame stale-low
+//   read (db.rs's `deglitch_walk` distinguishes them using the FOLLOWING
+//   frame, which a streaming gate does not have), so a reset-frequency cap
+//   would misfire on the documented stale-frame behaviour of real consoles
+//   and start dropping good data. See the deferral note on `FieldGate`.
+//
+// DIVISION OF LABOUR with `db.rs`: this gate is per-connection rate sanity
+// on LIVE samples (units-scale errors, absurd single frames); `db.rs`'s
+// de-glitch accumulator is cross-frame glitch REPAIR on STORED ones
+// (isolated spikes, resets, stale reads). The gate must never intercept
+// what the de-glitcher can repair — that is why decreases always pass and
+// why the burst allowances below are generous: a value the gate strips is
+// invisible to the de-glitcher forever, so the gate only strips what no
+// treadmill can physically report.
+//
+// RULES:
+// * Rate-based, never absolute (except speed): the counters are cumulative,
+//   so absolute bounds are useless (a real 60k-step day is legitimate) and
+//   dangerous. What is gated is the INCREASE per elapsed second.
+// * Every decrease passes untouched, so `deglitch_walk`'s reset handling
+//   keeps working on exactly the stream it always saw.
+// * Driver-agnostic: one set of ceilings for every driver, named below with
+//   their rationale. No per-driver knobs — a knob here would be one more
+//   obligation for the next driver author.
+//
+// The ceilings bound what any treadmill can physically produce; the burst
+// allowances absorb quantisation, BLE notification coalescing and
+// subscribe-time replay (a stack can deliver a queued burst in one
+// instant). Sizing: each allowance is small enough that a 10× unit-scale
+// error at walking pace exceeds `ceiling × dt + allowance` within
+// [`GATE_ANCHOR_WINDOW_S`] (so it IS caught), and large enough that every
+// legitimate stream in the pipeline test corpus passes with margin. The
+// per-field envelope re-anchors at most once per window — per-frame
+// re-anchoring would let a modest sustained over-rate slip under the
+// allowance frame by frame.
+
+/// Steps ceiling: elite running cadence is ~5 steps/s; 8/s is beyond any
+/// treadmill gait.
+const GATE_MAX_STEPS_PER_S: f64 = 8.0;
+/// Steps burst allowance. Strictly above db.rs's step spike threshold (50),
+/// so any single-frame glitch small enough for the de-glitcher to judge is
+/// never intercepted here.
+const GATE_STEPS_BURST: f64 = 60.0;
+/// Distance ceiling, in raw decameters/s: 1 raw/s = 10 m/s = 36 km/h,
+/// faster than any treadmill sold.
+const GATE_MAX_DISTANCE_RAW_PER_S: f64 = 1.0;
+/// Distance burst allowance: 20 raw = 200 m, one decameter-quantised burst.
+const GATE_DISTANCE_RAW_BURST: f64 = 20.0;
+/// Duration ceiling: elapsed workout time cannot advance faster than the
+/// wall clock; 2× covers clock skew between console and host.
+const GATE_MAX_DURATION_PER_S: f64 = 2.0;
+/// Duration burst allowance: subscribe-time replay can deliver minutes of
+/// backlog at once, and duration is the least corruptible field (its
+/// long-run rate is wall-clock-bounded), so the allowance is generous —
+/// a 10× duration mis-scale still exceeds the envelope within ~20 s.
+const GATE_DURATION_BURST: f64 = 150.0;
+/// Calories ceiling: 1 kcal/s = 3600 kcal/h, several times any walking
+/// workload.
+const GATE_MAX_CALORIES_PER_S: f64 = 1.0;
+/// Calories burst allowance: 60 kcal ≈ an hour of walking delivered as one
+/// coalesced burst; a 10× kcal mis-scale still trips within ~10 s.
+const GATE_CALORIES_BURST: f64 = 60.0;
+/// Speed is a live reading, not a cumulative counter, so it takes the one
+/// absolute bound: 3000 centi-units = 30 km/h or 30 mph by console unit —
+/// beyond either interpretation of any under-desk belt.
+const GATE_MAX_SPEED_RAW: u32 = 3000;
+/// How long a field's envelope anchor holds before it may re-anchor to the
+/// current value. Long enough that a sustained over-rate must reveal itself
+/// against one anchor; short enough that the envelope tracks a real day.
+const GATE_ANCHOR_WINDOW_S: f64 = 60.0;
+/// Rate limit for the gate's WARN line (the counter in /api/diag is exact;
+/// the log is a hint, not a ledger).
+const GATE_WARN_INTERVAL_S: f64 = 30.0;
+
+/// Per-field envelope state for the plausibility gate.
+#[derive(Debug, Default, Clone)]
+struct FieldGate {
+    /// The envelope anchor: an accepted (value, ts). The allowed value at
+    /// `now` is `value + ceiling × (now − ts) + burst`.
+    anchor: Option<(u32, f64)>,
+    /// A deep decrease (value fell below half the anchor) seen on the
+    /// previous field-bearing sample: EITHER a genuine counter reset OR a
+    /// one-frame stale-low read — a causal gate cannot tell which, so the
+    /// judgement is DEFERRED one frame, mirroring `deglitch_walk`'s
+    /// lookahead: if the next value continues the low series, the drop was
+    /// a reset and the anchor adopts it; if the next value is back inside
+    /// the old envelope, the dip was a stale frame and the old anchor
+    /// stands. Without this, one stale-low read would wedge the anchor and
+    /// reject minutes of good samples — exactly the bad interaction with
+    /// the de-glitcher this comment exists to prevent.
+    pending_reset: Option<(u32, f64)>,
+}
+
+impl FieldGate {
+    /// Admit or refuse `v` at `now`. Refusal means "strip the field from
+    /// this sample"; the anchor is left untouched so a genuinely absurd
+    /// stream stays refused (and counted) instead of ratcheting the
+    /// envelope up.
+    fn admit(&mut self, v: u32, now: f64, ceiling: f64, burst: f64) -> bool {
+        let Some((mut av, mut ats)) = self.anchor else {
+            // First reading of this connection: the baseline. The stored
+            // layer judges stale-high openers (`deglitch_walk`); the gate
+            // has no context to.
+            self.anchor = Some((v, now));
+            return true;
+        };
+        if let Some((pv, pts)) = self.pending_reset.take() {
+            // One deferred frame after a deep drop (see the field's doc):
+            // does `v` continue the low series?
+            if (v as f64) <= pv as f64 + ceiling * (now - pts) + burst {
+                // Yes — the drop was a real reset. Adopt it as the anchor.
+                self.anchor = Some((pv, pts));
+                (av, ats) = (pv, pts);
+            }
+            // No — the dip was a one-frame stale read; the old anchor stands
+            // and `v` is judged against it below.
+        }
+        let allowed = av as f64 + ceiling * (now - ats) + burst;
+        if v as f64 > allowed {
+            return false;
+        }
+        if v < av {
+            // Decreases ALWAYS pass (resets are the storage layer's to
+            // judge); a deep one starts the one-frame reset deferral.
+            if (v as u64) * 2 < av as u64 {
+                self.pending_reset = Some((v, now));
+            }
+        } else if v == av {
+            // Idle counter: keep the envelope tight — without this, an idle
+            // hour would grow `allowed` by ceiling × 3600 and blind the gate.
+            self.anchor = Some((v, now));
+        } else if now - ats >= GATE_ANCHOR_WINDOW_S {
+            self.anchor = Some((v, now));
+        }
+        true
+    }
+}
+
+/// Per-connection plausibility-gate state, part of [`IngestState`].
+#[derive(Debug, Default)]
+pub(crate) struct GateState {
+    steps: FieldGate,
+    distance: FieldGate,
+    duration: FieldGate,
+    calories: FieldGate,
+    last_warn: f64,
+}
+
+/// Apply the plausibility gate: returns the (possibly field-stripped) copy
+/// of `telem` to ingest, plus a description of each stripped field for the
+/// WARN line. A stripped field becomes ABSENT — the same value it would
+/// have carried had the device not reported it — never zero.
+fn gate_telemetry(telem: &Telemetry, now: f64, gate: &mut GateState) -> (Telemetry, Vec<String>) {
+    let mut t = telem.clone();
+    let mut dropped: Vec<String> = Vec::new();
+
+    let mut counter =
+        |field: &mut FieldGate, name: &str, value: Option<u32>, ceiling: f64, burst: f64| -> bool {
+            let Some(v) = value else { return true };
+            let anchor = field.anchor;
+            if field.admit(v, now, ceiling, burst) {
+                return true;
+            }
+            let (av, ats) = anchor.expect("refusal implies an anchor");
+            dropped.push(format!(
+                "{name} +{} in {:.1}s (ceiling {ceiling}/s + {burst})",
+                v.saturating_sub(av),
+                now - ats
+            ));
+            false
+        };
+
+    if !counter(
+        &mut gate.steps,
+        "steps",
+        t.steps,
+        GATE_MAX_STEPS_PER_S,
+        GATE_STEPS_BURST,
+    ) {
+        t.steps = None;
+    }
+    if !counter(
+        &mut gate.distance,
+        "distance_raw",
+        t.distance_raw,
+        GATE_MAX_DISTANCE_RAW_PER_S,
+        GATE_DISTANCE_RAW_BURST,
+    ) {
+        t.distance_raw = None;
+        t.distance_m = None;
+        t.distance_km = None;
+        t.distance_mi = None;
+    }
+    if !counter(
+        &mut gate.duration,
+        "duration_s",
+        t.duration_s,
+        GATE_MAX_DURATION_PER_S,
+        GATE_DURATION_BURST,
+    ) {
+        t.duration_s = None;
+    }
+    if !counter(
+        &mut gate.calories,
+        "calories",
+        t.calories,
+        GATE_MAX_CALORIES_PER_S,
+        GATE_CALORIES_BURST,
+    ) {
+        t.calories = None;
+    }
+    if let Some(sr) = t.speed_raw {
+        if sr > GATE_MAX_SPEED_RAW {
+            dropped.push(format!(
+                "speed_raw {sr} (absolute cap {GATE_MAX_SPEED_RAW})"
+            ));
+            t.speed_raw = None;
+            t.speed_kmh = None;
+            t.speed_mph = None;
+        }
+    }
+    (t, dropped)
+}
+
+/// The per-connection loop state `ingest_sample` mutates: the plausibility
+/// gate, the session debounce and the persistence throttle. One instance per
+/// connection, created in `connect_and_poll` (and per test rig).
+#[derive(Debug, Default)]
+pub(crate) struct IngestState {
+    pub(crate) gate: GateState,
+    pub(crate) last_status: Option<u8>,
+    /// Session-debounce state: the `is_running` value the stream is
+    /// currently holding and when it started holding it — a session opens
+    /// (closes) only once `is_running` has held true (false) for
+    /// [`SESSION_DEBOUNCE`], regardless of how many frames arrived between.
+    pub(crate) run_held: Option<(bool, f64)>,
+    pub(crate) last_persist: f64,
+}
+
+/// Ingest one telemetry update: plausibility gate, session detection,
+/// throttled persistence. Returns the GATED telemetry — the caller must
+/// broadcast that, not its input, or a stripped field would still reach
+/// `/ws` clients.
 ///
-/// `now` is the wall clock, injected so the time-based session debounce is
-/// testable. `run_held` is the debounce state: the `is_running` value the
-/// stream is currently holding and when it started holding it — a session
-/// opens (closes) only once `is_running` has held true (false) for
-/// [`SESSION_DEBOUNCE`], regardless of how many frames arrived in between.
+/// `now` is the wall clock, injected so the time-based session debounce and
+/// the gate are testable.
 pub(crate) fn ingest_sample(
     state: &Arc<AppState>,
     telem: &Telemetry,
     now: f64,
-    last_status: &mut Option<u8>,
-    run_held: &mut Option<(bool, f64)>,
-    last_persist: &mut f64,
-) {
+    ing: &mut IngestState,
+) -> Telemetry {
+    // The gate runs FIRST — before `set_last_state` — because
+    // `persist_close` reads `last_state()` on link loss for the session's
+    // closing values (see the PLAUSIBILITY GATE comment above).
+    let (telem, dropped) = gate_telemetry(telem, now, &mut ing.gate);
+    if !dropped.is_empty() {
+        state.count_rejected_sample();
+        if now - ing.gate.last_warn >= GATE_WARN_INTERVAL_S {
+            ing.gate.last_warn = now;
+            tracing::warn!(
+                "plausibility gate: dropped {} — if this climbs during a \
+                 hardware test the driver's unit scale is wrong (constants \
+                 and rationale: PLAUSIBILITY GATE in ble.rs; running count \
+                 in /api/diag rejected_samples: {})",
+                dropped.join(", "),
+                state.rejected_samples()
+            );
+        }
+    }
+    // `steps_supported` is observed from the stream, post-gate: the first
+    // sample carrying steps concludes `true`, and nothing ever concludes
+    // `false` (see AppState::steps_supported_json).
+    if telem.steps.is_some() {
+        state.note_steps_seen();
+    }
+    let (last_status, run_held, last_persist) = (
+        &mut ing.last_status,
+        &mut ing.run_held,
+        &mut ing.last_persist,
+    );
     state.set_last_state(Some(telem.clone()));
 
     // The persistence throttle needs to know whether this telemetry
@@ -401,7 +703,7 @@ pub(crate) fn ingest_sample(
             .status_name
             .clone()
             .unwrap_or_else(|| "stopped".into());
-        persist_close(state, sid, Some(telem), &reason);
+        persist_close(state, sid, Some(&telem), &reason);
         state.invalidate_today();
         tracing::info!("session {sid} closed");
         state.broadcast(json!({"type": "session_end", "id": sid}));
@@ -413,7 +715,7 @@ pub(crate) fn ingest_sample(
     // throttle. Session detection above runs off live telemetry, not stored rows,
     // so throttling cannot affect it.
     if !status_changed && now - *last_persist < SAMPLE_MIN_INTERVAL_S {
-        return;
+        return telem;
     }
     *last_persist = now;
 
@@ -445,6 +747,7 @@ pub(crate) fn ingest_sample(
     ) {
         tracing::warn!("could not persist sample: {e}");
     }
+    telem
 }
 
 fn persist_close(state: &Arc<AppState>, sid: i64, telem: Option<&Telemetry>, reason: &str) {
@@ -487,18 +790,11 @@ mod tests {
     fn throttles_raw_writes_but_never_drops_a_transition() {
         let db = Arc::new(Db::open(":memory:").unwrap());
         let state = AppState::new(db.clone(), "km/h".into(), None, "tok".into());
-        let (mut last_status, mut run_held, mut last_persist) = (None, None, 0.0f64);
+        let mut ing = IngestState::default();
 
         // A burst of same-status telemetry, all well inside one interval.
         for i in 0..50 {
-            ingest_sample(
-                &state,
-                &running(i),
-                unix_now(),
-                &mut last_status,
-                &mut run_held,
-                &mut last_persist,
-            );
+            ingest_sample(&state, &running(i), unix_now(), &mut ing);
         }
         assert_eq!(
             raw_count(&db),
@@ -512,14 +808,7 @@ mod tests {
         stopped.status = Some(STATUS_STANDBY);
         stopped.status_name = Some("STANDBY".into());
         stopped.is_running = false;
-        ingest_sample(
-            &state,
-            &stopped,
-            unix_now(),
-            &mut last_status,
-            &mut run_held,
-            &mut last_persist,
-        );
+        ingest_sample(&state, &stopped, unix_now(), &mut ing);
         assert_eq!(
             raw_count(&db),
             2,
@@ -530,9 +819,7 @@ mod tests {
     /// The real ingest loop-state, driven on a synthetic clock.
     struct DebounceRig {
         state: Arc<AppState>,
-        last_status: Option<u8>,
-        run_held: Option<(bool, f64)>,
-        last_persist: f64,
+        ing: IngestState,
         base: f64,
     }
 
@@ -541,23 +828,14 @@ mod tests {
             let db = Arc::new(Db::open(":memory:").unwrap());
             DebounceRig {
                 state: AppState::new(db, "km/h".into(), None, "tok".into()),
-                last_status: None,
-                run_held: None,
-                last_persist: 0.0,
+                ing: IngestState::default(),
                 base: unix_now(),
             }
         }
 
-        fn push_at(&mut self, offset_s: f64, telem: &Telemetry) {
-            self.last_persist = 0.0; // the throttle is pinned elsewhere
-            ingest_sample(
-                &self.state,
-                telem,
-                self.base + offset_s,
-                &mut self.last_status,
-                &mut self.run_held,
-                &mut self.last_persist,
-            );
+        fn push_at(&mut self, offset_s: f64, telem: &Telemetry) -> Telemetry {
+            self.ing.last_persist = 0.0; // the throttle is pinned elsewhere
+            ingest_sample(&self.state, telem, self.base + offset_s, &mut self.ing)
         }
     }
 
@@ -610,6 +888,186 @@ mod tests {
             rig.state.active_session(),
             None,
             "not-running held past SESSION_DEBOUNCE must close the session"
+        );
+    }
+
+    // ---- Plausibility gate ---------------------------------------------------
+
+    /// An implausible step INCREASE is stripped (absent, not zero), counted,
+    /// and the rest of the sample survives — the gate is per field, not per
+    /// sample, so session detection and speed keep flowing.
+    #[test]
+    fn gate_strips_an_implausible_step_rate_and_counts_it() {
+        let mut rig = DebounceRig::new();
+        rig.push_at(0.0, &running(100)); // baseline: always accepted
+        let mut hostile = running(100_000); // +99 900 steps in one second
+        hostile.speed_raw = Some(300);
+        let got = rig.push_at(1.0, &hostile);
+        assert_eq!(
+            got.steps, None,
+            "+99900 steps/s must be stripped — the rate ceiling is \
+             GATE_MAX_STEPS_PER_S (PLAUSIBILITY GATE constants in ble.rs)"
+        );
+        assert_eq!(got.speed_raw, Some(300), "unrelated fields must survive");
+        assert!(got.is_running, "the gate must never touch session state");
+        assert_eq!(
+            rig.state.last_state().unwrap().steps,
+            None,
+            "the gate must run BEFORE set_last_state, or persist_close would \
+             write the poisoned value into the session row on link loss"
+        );
+        assert_eq!(
+            rig.state.rejected_samples(),
+            1,
+            "a stripped sample must be counted — /api/diag's \
+             rejected_samples is the loud half of the gate"
+        );
+    }
+
+    /// Every decrease passes untouched: resets are the STORAGE layer's to
+    /// judge (`deglitch_walk` in db.rs), and a gate that swallowed them
+    /// would break its reset handling. The post-reset climb passes too.
+    #[test]
+    fn gate_lets_every_decrease_pass_and_the_reset_climb_after_it() {
+        let mut rig = DebounceRig::new();
+        for (t, steps) in [(0.0, 500u32), (5.0, 3), (10.0, 20), (15.0, 60)] {
+            let got = rig.push_at(t, &running(steps));
+            assert_eq!(
+                got.steps,
+                Some(steps),
+                "t={t}: decreases and the climb after a counter reset must \
+                 pass the gate untouched (rate-based, increases only — \
+                 PLAUSIBILITY GATE in ble.rs; reset repair belongs to \
+                 db.rs's deglitch_walk)"
+            );
+        }
+        assert_eq!(rig.state.rejected_samples(), 0);
+    }
+
+    /// The one-frame deferral after a deep drop: a stale-low read (the
+    /// documented `…1800, 346, 1891…` console behaviour) must not wedge the
+    /// gate's envelope at the dip value and reject the recovery — that
+    /// would starve the de-glitcher of the very stream it repairs.
+    #[test]
+    fn gate_defers_reset_judgement_so_a_stale_low_dip_cannot_wedge_it() {
+        let mut rig = DebounceRig::new();
+        rig.push_at(0.0, &running(1800));
+        let dip = rig.push_at(5.0, &running(346)); // stale-low: passes (decrease)
+        assert_eq!(dip.steps, Some(346));
+        let recovery = rig.push_at(10.0, &running(1830));
+        assert_eq!(
+            recovery.steps,
+            Some(1830),
+            "the recovery after a one-frame stale-low dip was rejected — the \
+             gate must defer the reset-vs-stale judgement one frame \
+             (FieldGate::pending_reset in ble.rs); anchoring on the dip \
+             value rejects minutes of good samples and starves \
+             deglitch_walk of the stream it exists to repair"
+        );
+        assert_eq!(rig.state.rejected_samples(), 0);
+    }
+
+    /// A sustained unit-scale error (the 10–100× decode bug the gate exists
+    /// for) stays rejected: the envelope must NOT ratchet up on refused
+    /// values, so the counter keeps climbing and the tester sees it.
+    #[test]
+    fn gate_rejects_a_sustained_unit_scale_error_persistently() {
+        let mut rig = DebounceRig::new();
+        rig.push_at(0.0, &running(0));
+        // A driver decoding centi-steps as steps: ~200 "steps"/s.
+        for i in 1..=30u32 {
+            let got = rig.push_at(i as f64, &running(200 * i));
+            assert_eq!(
+                got.steps, None,
+                "second {i}: a 200/s stream must stay rejected — if this is \
+                 Some, the gate ratcheted its envelope up on refused values \
+                 and a unit-scale error is flowing into stored history \
+                 (FieldGate::admit in ble.rs leaves the anchor untouched on \
+                 refusal)"
+            );
+        }
+        assert_eq!(
+            rig.state.rejected_samples(),
+            30,
+            "every rejected sample must be counted: rejected_samples is how \
+             a contributor's hardware test surfaces a wrong unit scale \
+             (docs/drivers/README.md, Step 4)"
+        );
+    }
+
+    /// The other gated fields: speed takes the one ABSOLUTE cap (it is a
+    /// live reading, not cumulative), duration is wall-clock-bounded, and
+    /// distance/calories are rate-bounded like steps.
+    #[test]
+    fn gate_bounds_speed_absolutely_and_the_other_counters_by_rate() {
+        let mut rig = DebounceRig::new();
+        let telem = |speed: u32, dur: u32, dist: u32, cal: u32| {
+            let mut t = Telemetry::new("km/h");
+            t.speed_raw = Some(speed);
+            t.duration_s = Some(dur);
+            t.distance_raw = Some(dist);
+            t.calories = Some(cal);
+            t.refresh_derived();
+            t
+        };
+        // Baselines are always accepted.
+        rig.push_at(0.0, &telem(300, 10, 10, 5));
+        // One second later: everything implausible at once.
+        let got = rig.push_at(1.0, &telem(65_000, 800, 6_000, 600));
+        assert_eq!(
+            got.speed_raw, None,
+            "speed_raw above GATE_MAX_SPEED_RAW must be stripped (absolute \
+             cap — speed is not a cumulative counter; ble.rs)"
+        );
+        assert_eq!(got.speed_kmh, None, "derived speed must go with the raw");
+        assert_eq!(
+            got.duration_s, None,
+            "elapsed time cannot advance ~800 s in 1 s of wall clock \
+             (GATE_MAX_DURATION_PER_S in ble.rs)"
+        );
+        assert_eq!(
+            got.distance_raw, None,
+            "+59.9 km in one second exceeds GATE_MAX_DISTANCE_RAW_PER_S \
+             (ble.rs)"
+        );
+        assert_eq!(got.distance_m, None, "derived distance goes with the raw");
+        assert_eq!(
+            got.calories, None,
+            "+595 kcal in one second exceeds GATE_MAX_CALORIES_PER_S (ble.rs)"
+        );
+        // One sample, one count — the counter counts samples, not fields.
+        assert_eq!(rig.state.rejected_samples(), 1);
+        // Plausible values keep flowing afterwards.
+        let ok = rig.push_at(2.0, &telem(310, 12, 10, 5));
+        assert_eq!(ok.speed_raw, Some(310));
+        assert_eq!(ok.duration_s, Some(12));
+    }
+
+    /// `steps_supported` is observed from the ingested stream: null until a
+    /// sample carries steps, true from then on, and NEVER false — a
+    /// steps-None sample later (an accumulating driver's first poll cycle
+    /// after reconnect, a gated frame) must not un-conclude it.
+    #[test]
+    fn steps_supported_is_observed_from_the_stream_and_never_false() {
+        let mut rig = DebounceRig::new();
+        let mut stepless = Telemetry::new("km/h");
+        stepless.speed_raw = Some(300);
+        rig.push_at(0.0, &stepless);
+        assert_eq!(
+            rig.state.snapshot()["steps_supported"],
+            serde_json::Value::Null,
+            "no steps seen yet: steps_supported must be null, not false \
+             (tri-state rule on AppState::steps_supported_json)"
+        );
+        rig.push_at(1.0, &running(10));
+        assert_eq!(rig.state.snapshot()["steps_supported"], json!(true));
+        rig.push_at(2.0, &stepless);
+        assert_eq!(
+            rig.state.snapshot()["steps_supported"],
+            json!(true),
+            "a later steps-None sample must not flip steps_supported back — \
+             None is 'not reported this frame', not 'cannot report' \
+             (AppState::steps_supported_json)"
         );
     }
 

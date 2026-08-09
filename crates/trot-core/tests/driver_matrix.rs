@@ -48,13 +48,11 @@ fn gatt(chars: &[(u16, u16, CharPropFlags)]) -> BTreeSet<Characteristic> {
 
 /// Every driver whose `supports()` accepts the device, in registry order.
 /// `for_device` picks the first of these — asserting the whole set is what
-/// catches shadowing.
+/// catches shadowing. This is the PRODUCTION `drivers::supporters` — the
+/// same function the engine logs on connect ("driver dispatch:" in
+/// `ble.rs`), so these rows also pin what that log line will say.
 fn supporters(a: &Advertisement, g: &BTreeSet<Characteristic>) -> Vec<&'static str> {
-    DRIVERS
-        .iter()
-        .filter(|d| d.supports(a, g))
-        .map(|d| d.id())
-        .collect()
+    drivers::supporters(a, g)
 }
 
 // ---- Canonical GATT tables ---------------------------------------------------
@@ -158,6 +156,32 @@ fn matrix() -> Vec<Row> {
             "nameless FFF1/FFF2 device",
             "",
             lifespan_shape(),
+            &["lifespan-fallback"],
+        ),
+        // A table that *mentions* Treadmill Data but without the notify role
+        // (read-only 2ACD): FTMS subscribes to that characteristic, so it
+        // must NOT claim the device on UUID presence alone — the LifeSpan
+        // roles are the only working transport here and the fallback is the
+        // right owner (Ftms::supports in ftms.rs verifies the role; it used
+        // to be the one supports() in the tree that didn't).
+        row(
+            "read-only 2ACD next to LifeSpan roles (broken FTMS table)",
+            "LifeSpan-TM",
+            {
+                let mut g = lifespan_shape();
+                g.insert(chr(sig_uuid(0x1826), sig_uuid(0x2acd), CharPropFlags::READ));
+                g
+            },
+            &["lifespan", "lifespan-fallback"],
+        ),
+        row(
+            "nameless read-only 2ACD next to LifeSpan roles",
+            "",
+            {
+                let mut g = lifespan_shape();
+                g.insert(chr(sig_uuid(0x1826), sig_uuid(0x2acd), CharPropFlags::READ));
+                g
+            },
             &["lifespan-fallback"],
         ),
         row(

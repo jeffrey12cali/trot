@@ -47,6 +47,18 @@ token.
   upgrade, which CORS does not.
 - Responses carry `X-Content-Type-Options: nosniff`.
 
+One deliberate non-boundary, stated plainly so it isn't mistaken for one:
+the engine rate-gates the counters a treadmill reports (the plausibility
+gate in `ble.rs`) and counts what it strips in `/api/diag`. That is **damage
+limitation for driver unit-scale bugs, not a defence against a hostile or
+malfunctioning device**: sustained values just inside the ceilings pass,
+counter-reset cycling passes (decreases must pass for legitimate reset
+handling), and above all **a mis-decode that lands in plausible range —
+which is most mis-decodes on unverified hardware — passes entirely.** Treat
+device input as untrusted regardless of the gate; the crash-safety
+guarantees above are what actually stand between a hostile peripheral and
+the daemon.
+
 **Deliberately not enforced — please don't report these as vulnerabilities:**
 
 - **Read-only endpoints don't require the token.** A process running as your user

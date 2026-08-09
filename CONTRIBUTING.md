@@ -18,11 +18,14 @@ If your treadmill doesn't work, a bug report with a `trot scan --all` listing an
 a `GET /api/diag` dump is genuinely valuable even if you never write a line of
 code. It's the part nobody else can do for us.
 
-Want to write the adapter yourself? A driver is one self-contained file plus
-one registration line, and you don't need to touch the engine, storage, or the
-API to add one. **[docs/drivers/README.md](docs/drivers/README.md)** walks
-through the whole thing — identifying your device, capturing raw frames, the
-driver trait, testing without hardware, and a complete worked example.
+Want to write the adapter yourself? All the protocol work is one
+self-contained file, plus a handful of small registration edits that wire it
+into the driver layer's shared guarantees — you don't need to touch the
+engine, storage, or the API to add one.
+**[docs/drivers/README.md](docs/drivers/README.md)** walks through the whole
+thing — identifying your device, capturing raw frames, the driver trait, the
+full registration list ("Register it"), testing without hardware, and a
+complete worked example.
 
 ## Getting set up
 

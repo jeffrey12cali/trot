@@ -4,11 +4,14 @@ This is the guide for adding support for a treadmill Trot can't read yet. It
 assumes you've never seen this codebase; it does not assume you've written
 Bluetooth code before, though it helps.
 
-The short version: a driver is **one file** in `crates/trot-core/src/drivers/`
-plus **one line** in the registry. It recognises its device, speaks its
-protocol, and emits neutral SI-unit samples. Everything else — connecting,
-reconnecting, sessions, storage, the API — already exists and you must not
-touch it.
+The short version: a driver is **one self-contained file** in
+`crates/trot-core/src/drivers/` that recognises its device, speaks its
+protocol, and emits neutral SI-unit samples — plus **four small edits that
+wire it into the layer's shared guarantees** (the registry line, the
+registry's rationale bullet, the registry-order test vector, and a row in
+the cross-driver invariant table; the "Register it" section lists all of
+them). Everything else — connecting, reconnecting, sessions, storage, the
+API — already exists and you must not touch it.
 
 ## Trot observes — it never controls
 
@@ -114,13 +117,10 @@ use, so your driver states intent and the timing lore stays in one place.
    them). Declare the sequence as `util::InitStep`s and run it once at the
    top of `run()` with `util::run_init_sequence`, then fall into a
    subscribe-and-push loop. Beware upstream init sequences that are longer
-   than the protocol needs: qdomyos-zwift "initialises" PitPat pads with
-   four frames of which one is a query, one an unlock, one nobody has
-   characterised and one *starts the belt* — while the hardware
-   demonstrably streams after a bare subscribe (`drivers/pitpat.rs` sends
-   only the query, and only pacekeeper's zero-write capture proved that
-   safe). Characterise each init frame before you port it; drop what you
-   can't.
+   than the protocol needs — characterise each init frame before you port
+   it and drop what you can't; `drivers/pitpat.rs`'s "What we send, and why
+   only that" section is the worked example, dissecting an upstream init
+   whose frames range from a harmless query to one that starts the belt.
 4. **Obfuscated transport.** The nastiest real-world case: a text protocol,
    base64'd, run through a substitution cipher, split into 16-byte GATT chunks,
    terminated by a marker byte — the app-cipher KingSmith generation, and
@@ -131,16 +131,12 @@ use, so your driver states intent and the timing lore stays in one place.
    chunk), decode the transport behind the `util::TransportCodec` seam,
    then parse the payload. The cipher tables themselves belong in your
    driver file — the seam exists so the reassembly and parsing layers
-   never have to know about them. Two lessons from building the real one:
-   the terminator trick is only sound because the payload is base64 text
-   (the marker byte cannot occur inside a frame — check that before you
-   reuse the pattern), and when the cipher is per-model with no on-wire
-   discriminator, don't ship a user setting — a substitution cipher over
-   text can be *detected from the traffic*, provided you treat detection
-   as elimination across frames rather than a per-frame guess (short
-   frames decode plausibly under several tables; kingsmith_props.rs
-   documents which frames discriminate and which genuinely cannot, and
-   refuses to emit from a frame its surviving candidates disagree on).
+   never have to know about them. Two hard-won lessons live with the code
+   that earned them, not here: the terminator-reassembly caveat is in the
+   "Frame reassembly" section below, and when a cipher is per-model with
+   no on-wire discriminator, detect the table from the traffic rather than
+   shipping a user setting — `kingsmith_props.rs`'s "seven cipher tables"
+   section documents how (and when detection genuinely cannot decide).
 
 Five hard-won warnings:
 
@@ -432,30 +428,57 @@ not just its UUID, which is what keeps your driver off a lookalike device.
 
 ### Register it
 
-Two edits in `drivers/mod.rs`:
+Registration is more than one line, honestly counted. **Five files change
+when a driver lands** — the first two make it work, the last three keep the
+layer's guarantees true for it:
 
-```rust
-pub mod yourdevice;
+1. **Your driver file** — everything protocol-shaped lives here.
+2. **The `DRIVERS` line in `drivers/mod.rs`** — this is what makes the
+   device discoverable in `trot scan` and connectable by the daemon:
 
-pub static DRIVERS: &[&dyn Driver] = &[
-    &lifespan::LifeSpan,
-    &yourdevice::YourDevice,
-    &ftms::Ftms,
-    &lifespan::LifeSpanFallback,
-];
-```
+   ```rust
+   pub mod yourdevice;
 
-Order matters, twice over: the first driver whose `supports()` accepts a
-device wins, so **strict drivers go before permissive ones**. Put a native
-protocol *before* FTMS if your device exposes both (native protocols usually
-report more — steps, most importantly). And nothing goes after
-`lifespan-fallback`: it deliberately claims any device with LifeSpan-shaped
-`FFF1`/`FFF2` roles that no other driver wanted (that's what keeps a paired
-LifeSpan console with an unrecognised advertised name connectable), so a
-driver registered behind it would never see one of those devices. A test pins
-the ordering; it will fail if you get this wrong. That registration makes the
-device discoverable in `trot scan` and connectable by the daemon; there is no
-second place to edit.
+   pub static DRIVERS: &[&dyn Driver] = &[
+       &lifespan::LifeSpan,
+       &yourdevice::YourDevice,
+       &ftms::Ftms,
+       &lifespan::LifeSpanFallback,
+   ];
+   ```
+
+3. **The `DRIVERS` doc-comment rationale bullet** (same file, just above):
+   every entry documents *why it sits where it sits* — what it matches, what
+   it must outrank and why. Registry order is load-bearing and untestable
+   against real hardware; the bullets are the record a future reader
+   adjudicates disputes with (the daemon also logs the full accepted-driver
+   set on every connect — the `driver dispatch:` line — for the same
+   reason).
+4. **The registry-order test vector** (same file, `registry_ids_are_unique_
+   and_the_fallback_stays_last`): the expected id list is exact, so it fails
+   until you add your id — in the right position. If it fails because you
+   added a driver, add it BEFORE `lifespan-fallback`. Also add your device's
+   rows to `tests/driver_matrix.rs`, which pins the *whole supporter set*
+   for representative devices — that is what catches your driver shadowing
+   another (or being shadowed) on a contested block.
+5. **`drivers/cross_driver.rs` — the absent-vs-zero invariant table.** The
+   most important obligation, and the easiest to forget because *nothing
+   fails if you skip it*: the table asserts, for every driver, that a field
+   the device did not report reaches the `Sample` as `None` — absent, never
+   `Some(0)` — because a fabricated zero flows into stored day totals. A new
+   driver silently omitted from that table silently loses the guarantee.
+   Add one entry: your most field-sparse real frame, with the absent fields
+   listed.
+
+Order in the registry matters, twice over: the first driver whose
+`supports()` accepts a device wins, so **strict drivers go before permissive
+ones**. Put a native protocol *before* FTMS if your device exposes both
+(native protocols usually report more — steps, most importantly). And
+nothing goes after `lifespan-fallback`: it deliberately claims any device
+with LifeSpan-shaped `FFF1`/`FFF2` roles that no other driver wanted (that's
+what keeps a paired LifeSpan console with an unrecognised advertised name
+connectable), so a driver registered behind it would never see one of those
+devices.
 
 ## Step 4: test it without the hardware
 
@@ -479,6 +502,32 @@ fn decodes_a_real_frame() {
 Also test the ugly cases — truncated frames, bad checksums, an unknown status
 byte — they must return `Err` (or pass the raw value through), never panic:
 one malformed frame from a sleepy treadmill must not take the daemon down.
+
+**Pin your write set.** If your driver writes anything at all, add a test
+named `the_driver_only_ever_writes_*` that asserts the exact frames **and
+the exact count** — every driver that writes has one (grep the name across
+`drivers/`; six converged on it independently). This is the real guarantee
+behind the observe-only policy: the UUID tripwire in `drivers/mod.rs` can
+only catch known control-path UUIDs, but vendor actuation frames are plain
+bytes a scan can't recognise — a test that says "these N byte-exact frames
+and nothing else" is what a reviewer (and the next refactorer) actually
+verifies against. The count matters as much as the bytes: upstream
+references interleave settings and control writes with the queries you're
+porting, and "one more frame slipped in" is precisely the regression this
+test shape exists to catch (see `sperax.rs`'s deliberately dropped cmd
+`0x13` frame for the pattern).
+
+**Expect the engine's sanity gate during hardware testing.** The engine
+rate-gates the counters every driver reports (steps, distance, duration,
+calories — the constants and rationale live under `PLAUSIBILITY GATE` in
+`ble.rs`). If your decode is right you will never see it. If
+`rejected_samples` in `/api/diag` climbs while you walk on the belt, your
+unit scale is wrong — a field decoded at 10–100× its true rate is being
+stripped instead of stored, and the daemon log names the field and the
+offending rate. Fix the scale; do not try to tune the gate around it. And
+don't lean on it either: a mis-decode that lands in plausible range — which
+is most mis-decodes — passes straight through, which is why the fixture
+tests above, not the gate, are what verifies your decode.
 
 Then run what CI runs:
 
