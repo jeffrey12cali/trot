@@ -98,7 +98,58 @@ that isn't obvious from the code.
 
 ## Licensing
 
-Trot is **GPLv3**. By contributing you agree your contribution ships under it.
+Trot is **GPLv3**. Everything published here stays GPLv3, and any fork of it
+stays GPLv3 — that is the point of the licence and it will not change.
+
+### Contributor Licence Agreement
+
+By opening a pull request you agree to the following. It is short on purpose,
+and the reasoning is below it — please read that too rather than just accepting.
+
+> 1. You certify that you wrote the contribution yourself, or otherwise have
+>    the right to submit it under these terms, and that you are not knowingly
+>    including anyone else's copyrighted code.
+> 2. You retain copyright in your contribution. You are not signing it away.
+> 3. You grant Marcus Puchalla a perpetual, worldwide, irrevocable,
+>    royalty-free licence to use, modify and distribute your contribution,
+>    **including under licences other than the GPL**.
+> 4. You grant every recipient of Trot the same rights the GPLv3 gives them.
+>    Your contribution ships under GPLv3 like the rest of the project.
+
+**Why point 3 exists, plainly.** Trot is the engine inside
+[Nowhere](https://nowhere.fitness), a desktop app that may one day be sold.
+Trot and Nowhere are separate programs that talk over a local HTTP API, and
+that boundary is deliberate — but keeping the option to license the engine
+differently requires that one person can license all of it. Today that is true,
+because every line has one author. The first contribution accepted without
+point 3 would end it permanently, for everyone, forever.
+
+**What point 3 does not do.** It does not let anyone take your work proprietary
+and close the door behind them: point 4 is unconditional, so your contribution
+is GPLv3 to every user of Trot, on the same terms as the rest of the code, and
+that cannot be revoked. Trot itself will not stop being open source.
+
+If you are not comfortable with this — that is a completely reasonable position
+and plenty of people hold it. Open an issue instead. A protocol capture, a
+`trot scan --all` listing or a `/api/diag` dump from an unsupported treadmill is
+genuinely the most valuable thing anyone can contribute, and none of it needs a
+CLA.
+
+### Third-party code
+
+**Do not paste code from another project into Trot**, whatever its licence.
+Every driver here is an independent implementation written against protocol
+*facts* — byte offsets, checksums, framing rules — established by reading other
+people's reverse engineering. That distinction is what keeps the project's
+licensing clean; see [`docs/licensing-audit.md`](docs/licensing-audit.md) for
+the full reasoning, and `docs/drivers/README.md` for how to do it properly.
+
+If you learned something from another project, credit it in your module header
+and add it to [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) — with its
+licence, and a note saying exactly what you learned. Over-crediting is fine.
+Silently copying is not.
+
+### Trademarks
 
 The name "Trot" and the runner mark are reserved and are *not* covered by the
 GPL (see the Trademarks section of the README). Fork the code freely — just give
