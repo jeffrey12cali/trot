@@ -686,7 +686,7 @@ copying of expression:
 | Copied identifier and variable names | **No** — Trot's naming is its own (`Sample`, `select_transport`, `CommandSpacer`, `belt_state`); it *cites* upstream names (`noOpData`, `minimal_cmd_space`, `TreadmillData.__init__`) as references, which is attribution, not copying |
 | Same structure, sequence and organisation | **No** — Trot's architecture (a `Driver` trait, a registry, a neutral `Sample`, engine/driver separation) has no upstream counterpart; qdomyos-zwift is a Qt device-class hierarchy, pacekeeper is Arduino, ph4 is asyncio |
 | Copied code layout / formatting | **No** — `rustfmt` |
-| Idiosyncratic errors reproduced | **No — and this is the strongest single fact in Trot's favour.** Trot *corrects* upstream errors: treadspan's "0.1 miles" comment (`urevo.rs`), the "0.006225680934 conversion factor" claim, qdomyos' inbound checksum variant and its `(value[9] << 8) & 0xff` bug (`pitpat.rs`), a third-party parser's u16-instead-of-u24 distance read (`ftms.rs`) |
+| Idiosyncratic errors reproduced | **Mostly no, with one disclosed exception.** Trot corrects four documented upstream errors (treadspan's "0.1 miles", the 0.006225680934 claim, qdomyos' inbound checksum variant, and its `(value[9] << 8) & 0xff` expression, provably always zero). Exception: `sperax.rs` deliberately keeps upstream's raw-wire-offset reader although it documents the wire as escaped, because no inbound capture exists and upstream is the only implementation verified on hardware. Disclosed in the module header and `provenance.md`. |
 
 The last row is worth dwelling on, because in a copying dispute it is the kind of
 evidence that ends the argument. Copied code carries the original's mistakes.

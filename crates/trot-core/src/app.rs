@@ -1,6 +1,9 @@
 //! Shared application state: DB handle, the live broadcast hub, and the
 //! worker's current view (connected / device / active session / last telemetry).
-//! Mirrors the responsibilities split across backend/app.py + worker.py + hub.py.
+//! Mirrors the responsibilities split across `backend/app.py`, `worker.py`
+//! and `hub.py` in the author's own earlier proprietary project (Lifespan
+//! SC110 / Treadmill Dashboard, © Marcus Puchalla), relicensed here under
+//! GPLv3 by its sole copyright holder. Not third-party work.
 
 use crate::db::{now_ts, Db};
 use crate::telemetry::{speed_kmh, speed_mph, Telemetry};

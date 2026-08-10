@@ -21,7 +21,10 @@ anyhow = "1"
 directories = "5"
 serde_json = "1"
 clap = { version = "4", features = ["derive"] }
-ureq = { version = "2", features = ["json"] }
+# Loopback-only: the CLI talks to its own daemon on 127.0.0.1, so the default
+# rustls + ring + webpki-roots stack is pure dead weight. Dropping defaults
+# removes ~20 crates and the tree's only CDLA-licensed dependency.
+ureq = { version = "2", default-features = false, features = ["json"] }
 dialoguer = "0.11"
 clap_complete = "4.6"
 

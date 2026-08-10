@@ -1,5 +1,8 @@
 //! SQLite storage — sessions, raw samples, per-minute rollups, daily totals.
-//! Ported from backend/db.py. Single connection guarded by a Mutex (our write
+//! Ported from `backend/db.py` in the author's own earlier proprietary
+//! project (Lifespan SC110 / Treadmill Dashboard, © Marcus Puchalla),
+//! relicensed here under GPLv3 by its sole copyright holder. Not
+//! third-party work, hence no THIRD-PARTY-NOTICES.md entry. Single connection guarded by a Mutex (our write
 //! rate is ~3 Hz, reads are light), WAL mode, foreign keys on.
 
 use anyhow::Result;

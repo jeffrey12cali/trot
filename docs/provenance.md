@@ -85,6 +85,8 @@ upstream-authored expression only.
 | Name prefixes `LifeSpan`, `ESP32` | Own hardware observation | Literal device identifiers | Yes | — | Source | |
 | **Cross-cutting** | | | | | | |
 | 16-bit GATT service/characteristic UUIDs (`FFF0`, `FE00`, `FBA0`, `AE00`, `FFE0`, `1826`, `2ACD`, `2ADA`, …) | Device firmware, via all sources | Literal UUIDs | Yes | Facts about the hardware / Bluetooth SIG assignments | Source | |
+| Sperax inbound field geometry (steps at 15, speed at `len-7`) | qdomyos-zwift | Derived — behavioural | Yes, for parity with the only hardware-verified reader | GPL-3.0 | Source | Deliberately follows upstream's raw-wire offsets although this module documents the wire as escaped. **Not protocol-mandated** — disclosed in the module header and in licensing-analysis.md §8.2 |
+| Three quoted upstream comment/expression fragments | qdomyos-zwift | Literal (prose) | No — quoted for criticism | GPL-3.0 | Source comments | Never executed; each quoted to explain a deliberate divergence |
 
 ## What is deliberately absent
 
@@ -100,4 +102,10 @@ For completeness, upstream material that is **not** in this tree, by policy:
   tests on 2026-08-10 and replaced with synthetic vectors).
 - Anything from the unlicensed Kotlin KingSmith client and from
   `duhow/ftms-bridge` (never consulted / verified unused).
-- Upstream comments, prose and implementation structure, throughout.
+- Upstream implementation structure, throughout — and upstream prose, with
+  three disclosed exceptions. Three short fragments are quoted *critically* in
+  code comments, each in order to explain why Trot does something different:
+  qdomyos-zwift's "the treadmill send the speed in miles always" and its `SW`
+  name-matching expression (both `fitshow.rs`), and an "update each 10 m /
+  0.01 mile" comment (`kingsmith_props.rs`). All GPL-3.0 into
+  GPL-3.0-or-later, de minimis, quoted with attribution, never executed.
