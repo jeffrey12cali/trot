@@ -109,3 +109,5 @@ For completeness, upstream material that is **not** in this tree, by policy:
   name-matching expression (both `fitshow.rs`), and an "update each 10 m /
   0.01 mile" comment (`kingsmith_props.rs`). All GPL-3.0 into
   GPL-3.0-or-later, de minimis, quoted with attribution, never executed.
+
+> **FTMS name-list ordering check (2026-08-11):** 0/18 positional matches against qdomyos-zwift `bluetooth.cpp`, LCS 7/18. Arrangement independent; membership functionally determined.
