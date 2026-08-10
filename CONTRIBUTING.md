@@ -137,17 +137,23 @@ CLA.
 
 ### Third-party code
 
-**Do not paste code from another project into Trot**, whatever its licence.
-Every driver here is an independent implementation written against protocol
-*facts* — byte offsets, checksums, framing rules — established by reading other
-people's reverse engineering. That distinction is what keeps the project's
-licensing clean; see [`docs/licensing-audit.md`](docs/licensing-audit.md) for
-the full reasoning, and `docs/drivers/README.md` for how to do it properly.
+**Independent implementation is the rule.** Every driver here is written
+against protocol *facts* — byte offsets, checksums, framing rules —
+established by reading other people's reverse engineering. Functional
+protocol literals — UUIDs, opcodes, magic command frames, cipher tables,
+captured frames used as test fixtures — are acceptable *when they are needed
+for interoperability or testing and are credited*. Upstream implementation
+logic, comments and prose are not acceptable, whatever the licence — do not
+paste them into Trot. See
+[`docs/licensing-analysis.md`](docs/licensing-analysis.md) for the project's
+reasoning, and `docs/drivers/README.md` for how to do it properly.
 
 If you learned something from another project, credit it in your module header
 and add it to [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) — with its
-licence, and a note saying exactly what you learned. Over-crediting is fine.
-Silently copying is not.
+licence, and a note saying exactly what you learned. If you add a literal
+third-party-derived item (a frame, a table, a capture, a name list), record it
+as a row in [`docs/provenance.md`](docs/provenance.md), which explains the
+format. Over-crediting is fine. Silently copying is not.
 
 ### Trademarks
 

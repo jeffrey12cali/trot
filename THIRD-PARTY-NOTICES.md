@@ -2,18 +2,24 @@
 
 Trot is licensed under **GPL-3.0-or-later**.
 
-Trot contains **no third-party source code**. Each driver is an independent
-implementation written against protocol facts — byte offsets, checksums, frame
-layouts — established by studying the projects below. Under EU software
-copyright law those facts are not protected subject matter (Directive
-2009/24/EC Art. 1(2); CJEU C-406/10 *SAS v World Programming*), and studying a
-program to extract them is expressly lawful.
+**Trot is an independent Rust implementation of the cited treadmill
+protocols. It reproduces functional protocol data where necessary for
+interoperability and testing — UUIDs, opcodes, device identifiers, cipher and
+lookup tables, command bytes, and selected packet captures or test vectors.
+The provenance of those items is recorded below, and item by item in
+[`docs/provenance.md`](docs/provenance.md). No upstream implementation
+routines or prose are intended to be incorporated. To the extent any
+reproduced material is copyrightable, Trot relies on and complies with the
+applicable licence; otherwise these notices are retained as attribution and
+provenance.**
 
-The notices below therefore reproduce copyright and licence text as a matter of
+The notices below reproduce copyright and licence text as a matter of
 **credit to the people whose reverse engineering made this possible**, and to
-record precisely what was learned from whom. Several go beyond what the licences
-require. Where a licence does impose conditions on the knowledge we took, those
-conditions are met. See `docs/licensing-audit.md` for the full analysis.
+record precisely what was learned from whom. Several go beyond what the
+licences require. To the extent Trot reproduces copyrightable material, the
+applicable licence terms are followed; if a provenance review identifies
+protected material, its exact licence obligations will be applied source by
+source. See `docs/licensing-analysis.md` for the project's internal analysis.
 
 ## TreadSpan — `blak3r/treadspan`
 
@@ -24,12 +30,13 @@ open-source project that reverse-engineered the LifeSpan Omni console protocol.
 TreadSpan's documented opcode map and field encodings informed Trot's
 independent reimplementation in Rust.
 
-Trot's Urevo (E1L) driver additionally ports from TreadSpan: the proprietary
-status-stream protocol on the same `FFF0`/`FFF1`/`FFF2` block — the wake write
-and status-frame field map (`arduino/src/TreadmillDeviceUrevoProtocol.h`) and
-the annotated raw captures of a real E1L
-(`protocol-analysis/urevo-E1L/`), which are the fixture frames in Trot's
-tests and against which every field was re-verified (Trot's checksum rule and
+Trot's Urevo (E1L) driver additionally builds on TreadSpan: it independently
+implements the proprietary status-stream protocol on the same
+`FFF0`/`FFF1`/`FFF2` block using the wake write and status-frame field map
+documented by `arduino/src/TreadmillDeviceUrevoProtocol.h`, and it reproduces
+frames from TreadSpan's annotated raw captures of a real E1L
+(`protocol-analysis/urevo-E1L/`) as the fixture frames in Trot's tests,
+against which every field was re-verified (Trot's checksum rule and
 0.01-mile distance unit are derived from those captures). TreadSpan's Sperax
 RM-01 service dump and app capture (`protocol-analysis/sperax-rm-01/`) also
 serve as the cross-check that the hyphenated RM-01 speaks FTMS rather than
@@ -98,7 +105,8 @@ SOFTWARE.
 
 ## QZ (qdomyos-zwift) — `cagnulein/qdomyos-zwift`
 
-Trot's KingSmith WiLink driver **ports protocol knowledge from
+Trot's KingSmith WiLink driver **independently implements protocol behaviour
+using interface facts documented by
 [QZ (qdomyos-zwift)](https://github.com/cagnulein/qdomyos-zwift)** by Roberto
 Viola: the five-frame init handshake including its two `F7 A5 61 …` magic
 variants and their model-name routing
@@ -106,13 +114,14 @@ variants and their model-name routing
 20-byte status-frame length requirement, and the advertised-name device list
 with its `KS-HD-Z1D` FTMS carve-out (`src/devices/bluetooth.cpp`).
 
-Trot's FTMS driver additionally ports from qdomyos-zwift: the verified
+Trot's FTMS driver additionally reproduces, from qdomyos-zwift, the verified
 advertised-name list of real-world FTMS walking pads (Urevo, Merach, Sunny
 Health & Fitness, CitySports, WellFit, Mobvoi, Sportstech, YPOO, TheRun,
 Anplus, Focus, KingSmith, Sperax — `src/devices/bluetooth.cpp`, including the
 `SPERAX_RM-01`-is-FTMS / `SPERAX_RM01`-is-proprietary carve-out).
 
-Trot's Sperax driver **ports protocol knowledge from qdomyos-zwift's**
+Trot's Sperax driver **independently implements protocol behaviour using
+interface facts learned from and cross-checked against qdomyos-zwift's**
 `src/devices/speraxtreadmill/speraxtreadmill.cpp`, the only known
 implementation of the proprietary `F5 … FA` protocol: the init and poll
 frames (sent byte-identically), the ≥24-byte packet length requirement, the
@@ -122,7 +131,8 @@ big-endian step-count offset and the end-anchored speed offset, plus the
 `F0`-escape rule were derived by Trot from the captured frames embedded in
 that source and verify against all 64 of them.
 
-Trot's FitShow driver **ports protocol knowledge from qdomyos-zwift's**
+Trot's FitShow driver **independently implements protocol behaviour using
+interface facts learned from and cross-checked against qdomyos-zwift's**
 `src/devices/fitshowtreadmill/fitshowtreadmill.{cpp,h}`, the most widely
 deployed implementation of the FitShow `02 … 03` protocol: the frame
 envelope and XOR trailer, the status-response field map in both its byte
@@ -135,21 +145,24 @@ advertised-name matcher with its carve-outs (`FS-YK-`, the
 NoblePro/`SW`-rule FTMS routing, the Tunturi T80/T60/T90 split —
 `src/devices/bluetooth.cpp`). qdomyos-zwift's belt-control paths (its
 `0x53` control-family frames, the user-data login among them) are
-deliberately not ported; two of those frames appear in Trot's tests solely
-as checksum vectors.
+deliberately not implemented, and none of their bytes appear in this tree —
+Trot's checksum tests use synthetic control-family vectors.
 
-Trot's PitPat/Deerrun/SupeRun driver **ports protocol knowledge from
+Trot's PitPat/Deerrun/SupeRun driver **independently implements protocol
+behaviour using interface facts learned from
 qdomyos-zwift's** `src/devices/deerruntreadmill/deerruntreadmill.cpp` and
 its `PITPAT-T*` device matcher (`src/devices/bluetooth.cpp`): the Deerrun
 transport variant on service `0xFFF0` with the notify/write roles swapped
 relative to LifeSpan, and the status-query frame `6A 05 FD F8 43` with its
 `4D 00 <seq> <len>` transport envelope. qdomyos-zwift's belt-control paths
 (its speed/start/stop frames and its unlock preamble) are deliberately not
-ported; two of its captured control frames appear in Trot's tests solely as
-checksum vectors.
+implemented; four of its captured frames (the unlock preamble, an
+uncharacterised init frame, and two actuation-family frames) appear in
+Trot's tests solely as checksum vectors, never transmitted (each is recorded
+in `docs/provenance.md`).
 
-Trot's KingSmith app-cipher (R2/X21) driver **ports protocol knowledge
-from qdomyos-zwift's**
+Trot's KingSmith app-cipher (R2/X21) driver **independently implements
+protocol behaviour using interface facts learned from qdomyos-zwift's**
 `src/devices/kingsmithr2treadmill/kingsmithr2treadmill.{cpp,h}`, the most
 widely deployed implementation of the obfuscated `props` text protocol:
 the seven substitution-cipher tables and the transport pipeline (UTF-8 →
@@ -162,7 +175,7 @@ with its `Error`/`mcu_version`/`goal` special cases, the telemetry key
 list, and the advertised-name matcher (`src/devices/bluetooth.cpp`).
 qdomyos-zwift's belt-control paths — its `props CurrentSpeed`/`runState`/
 `ControlMode` setter writes — and its clock-setting `time_posix` init
-write are deliberately not ported. Where qdomyos-zwift exposes the
+write are deliberately not implemented. Where qdomyos-zwift exposes the
 cipher-table choice as a user setting, Trot detects the table from the
 traffic instead — an independent design, documented in the driver.
 
@@ -172,14 +185,15 @@ text.
 
 ## PaceKeeper — `peteh/pacekeeper`
 
-Trot's PitPat/Deerrun/SupeRun driver **ports protocol knowledge from
+Trot's PitPat/Deerrun/SupeRun driver **independently implements protocol
+behaviour using interface facts documented by
 [PaceKeeper](https://github.com/peteh/pacekeeper)** by peteh, the primary
 open-source implementation of the PitPat OEM treadmill protocol, verified on
 real hardware (a PitPat-T01 / SupeRun BA06-B1): the `FBA0`/`FBA1`/`FBA2`
 service layout (`src/platform.h`), the full status-frame field map including
 the step counter (`src/TreadmillHandler.cpp`), and the subscribe-and-push
 interaction model (PaceKeeper reads the telemetry stream without writing a
-single frame). PaceKeeper's belt-control functions are not ported.
+single frame). PaceKeeper's belt-control functions are not implemented.
 
 PaceKeeper is distributed under the **GNU General Public License,
 version 3** — the same license as Trot; see [LICENSE](LICENSE) for the full
@@ -187,8 +201,9 @@ text.
 
 ## pitpat-treadmill-control — `azmke/pitpat-treadmill-control`
 
-Trot's PitPat/Deerrun/SupeRun driver additionally **ports protocol knowledge
-from [pitpat-treadmill-control](https://github.com/azmke/pitpat-treadmill-control)**
+Trot's PitPat/Deerrun/SupeRun driver additionally **implements protocol
+behaviour using interface facts learned from
+[pitpat-treadmill-control](https://github.com/azmke/pitpat-treadmill-control)**
 by azmke (Alexander), whose decoder (`src/treadmill_data.py`) carries
 vendor-app-level detail: the inbound XOR checksum rule (validated by no
 other implementation), the `FFFF`/`FF01`/`FF02` transport variant with its
@@ -244,7 +259,8 @@ license as Trot; see [LICENSE](LICENSE) for the full text.
 
 ## milltender — `sstjohn/milltender`
 
-Trot's FitShow driver **ports protocol knowledge (no code) from
+Trot's FitShow driver **independently implements protocol behaviour using
+interface facts (no code) established on real hardware by
 [milltender](https://github.com/sstjohn/milltender)** by sstjohn
 (`milltender.py`, `phase0/fitshow_probe.py`), the only FitShow telemetry
 implementation verified on real hardware (a TX6 Glow-Up walking pad on a
@@ -296,7 +312,8 @@ SOFTWARE.
 
 ## walkingpad-controller — `mcdax/walkingpad-controller`
 
-Trot's FTMS driver hardening **ports protocol knowledge from
+Trot's FTMS driver hardening **implements protocol behaviour using interface
+facts documented by
 [walkingpad-controller](https://github.com/mcdax/walkingpad-controller)** by
 mcdax — specifically its derived documentation
 (`docs/ftms-protocol-reference.md`), produced from vendor-app analysis plus
@@ -362,7 +379,7 @@ and the G1C's default v6 cipher table — and it is the source that
 establishes the poll-driven steady state: its monitor loop re-sends
 `servers getProp …` at 1 Hz and reads the full telemetry from the `props`
 replies. Its belt-control writes and its clock-setting `time_posix` init
-frame are not ported. walkingpad-ble-footpod is distributed under the
+frame are not implemented. walkingpad-ble-footpod is distributed under the
 **GNU General Public License, version 3** — the same license as Trot; see
 [LICENSE](LICENSE) for the full text.
 

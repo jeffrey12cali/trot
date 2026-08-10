@@ -1,26 +1,77 @@
-# Trot — licence-compatibility audit
+# Trot — licensing analysis
 
-**Status:** internal review draft · prepared 2026-08-08 · covers the tree at
-branch `docs/licensing-audit` (parent commit `bdfcb9c`).
+**Status:** internal analysis · prepared 2026-08-08 as `licensing-audit.md` ·
+covers the tree at parent commit `bdfcb9c`. Renamed to `licensing-analysis.md`
+on 2026-08-10: "audit" overstated what an AI-written internal document is, and
+nothing in this file is an audit in the professional sense.
+
+> **This is not legal advice, and it was not written by a lawyer.** It was
+> written by an AI assistant for a project owner who is also not a lawyer. It
+> is a structured summary of what the sources say and where the genuine
+> uncertainty sits.
+
+> **Corrections after external legal review (2026-08-10).** A lawyer reviewed
+> the project's licensing position. The verdict: the core approach is probably
+> lawful under EU/German law and the attribution is unusually conscientious —
+> but this document and the notices were more confident than the evidence
+> supports, and one factual claim was wrong. The corrections, which qualify
+> everything below:
+>
+> 1. **Trot does contain literal upstream-derived protocol material.** The
+>    former claim that Trot contains "no third-party source code" was wrong as
+>    stated: the source contains cipher tables, device-name lists, command
+>    frames, packet captures and test vectors that appear literally and derive
+>    from upstream projects or from device manufacturers. These are very
+>    likely functional protocol data rather than protectable expression, but
+>    they exist, and the documentation now says so.
+>    [`docs/provenance.md`](provenance.md) records each one.
+> 2. **Article 5(3) of Directive 2009/24/EC is narrower than this document
+>    implies.** It is not a general licence to study any program in any
+>    circumstance — it applies to a person entitled to use a copy of the
+>    program. Trot's actual basis is simpler and does not need Art. 5(3):
+>    every source consulted was published under a licence permitting reading.
+> 3. **The correct statement of the copyright position** is that functional
+>    interface information is *generally* outside software-copyright
+>    protection — not that every item this document classified as "protocol
+>    knowledge" is conclusively unprotected. Material that could potentially
+>    be protected includes upstream comments and prose, implementation control
+>    flow not dictated by the protocol, distinctive error handling, and
+>    creative selection or arrangement of a dataset.
+> 4. **Licence compatibility does not resolve a hypothetical finding of
+>    copying.** GPL, AGPL, Apache and MIT impose *different* conditions, and
+>    some are not satisfied merely by listing the source in the notices. If a
+>    provenance review identifies protected material, its exact licence
+>    obligations will be applied source by source.
+> 5. **"Non-commercial" plays no role in the legal analysis.** It is relevant
+>    to practical enforcement risk, never to whether reproduction requires
+>    authorisation, and it is not part of any justification below.
+> 6. **Recommended next step (not yet done).** A targeted provenance and
+>    non-literal-similarity review of `fitshow.rs`, `kingsmith_props.rs`,
+>    `sperax.rs` and `urevo.rs`, classifying each significant similarity to
+>    its upstream as (1) protocol-mandated, (2) independently derived,
+>    (3) licensed literal material, or (4) potentially copied expression
+>    needing remediation. **This review has not been performed.** This
+>    document's "knowledge only" characterisations rest on reading Trot's
+>    code and headers, not on a line-by-line similarity analysis (see the
+>    caveat at the end of §10).
 
 > **Addendum 2026-08-08:** the KingSmith app-cipher (R2/X21) driver
-> (`kingsmith_props.rs`) was added after this audit's snapshot. Its two
+> (`kingsmith_props.rs`) was added after this analysis's snapshot. Its two
 > sources are covered by the inventory below: the `cagnulein/qdomyos-zwift`
 > row now includes it, and `LucasFrendorf/walkingpad-ble-footpod` (GPL-3.0,
 > verified via the GitHub Licenses API on 2026-08-08) has its own row. The
-> pattern is the one this audit already analyses — knowledge only, no code,
+> pattern is the one this analysis already covers — knowledge only, no code,
 > control paths deliberately not ported, notices kept — with one addition in
 > Trot's favour: where the upstream ships the cipher-table choice as a user
 > setting, Trot's traffic-based table detection is an independent design with
 > no upstream counterpart. A third public implementation (Kotlin, unlicensed)
 > was identified and deliberately not consulted, per §6's guardrails.
 
-> **This is not legal advice.** It was written by an AI assistant, not a
-> lawyer, for a project owner who is also not a lawyer. It is a structured
-> summary of what the sources say and where the genuine uncertainty sits. Every
-> conclusion below is marked with a confidence level. Where something is
+> Every conclusion below is marked with a confidence level. Where something is
 > unsettled, it says so. Points that warrant a real lawyer are collected in
-> [§8](#8-what-i-could-not-determine--ask-a-lawyer-about-this).
+> [§10](#10-what-i-could-not-determine--ask-a-lawyer-about-this). Read the
+> body of this document through the corrections block above: where the two
+> disagree, the corrections govern.
 
 ---
 
@@ -69,7 +120,7 @@ already carries would satisfy the obligation. For the permissive and GPL sources
 the answer is "the notices already do". For the one AGPL source it would matter
 more, which is why the AGPL source gets its own treatment in [§5](#5-agpl-30-the-one-that-needs-care).
 
-**Nothing in this audit blocks publication.** There are four wording fixes worth
+**Nothing in this analysis blocks publication.** There are four wording fixes worth
 making first, listed in [§7](#7-fix-before-publishing-ordered-by-priority). The
 most important one is a single line in `lifespan.rs` that cites a source not in
 the notices file — it turns out to be the owner's own earlier Python project,
@@ -458,7 +509,7 @@ unprotected fact by asserting it in a `LICENSE` file. *(Confidence: high.)*
    does that, the argument gets much harder. This is exactly the kind of question
    that should go to a lawyer *if* it ever becomes live.
 
-**It is not live today.** Nothing to do. But this is the single item in the audit
+**It is not live today.** Nothing to do. But this is the single item in this analysis
 where I would want the "knowledge only, no code" claim to be true in fact and not
 merely in the header comment — and, having read `fitshow.rs`, I believe it is:
 milltender is Python, the Rust implementation shares no structure with it, and
@@ -839,7 +890,7 @@ Ordered by how much it would matter if it went the wrong way.
 2. **Whether the curated advertised-name lists could attract sui generis database
    right protection under Art. 7 of Directive 96/9/EC.** My analysis says no
    (functional selection; not exploited as a database; *Football Dataco*
-   creativity threshold not met), but this is the weakest link in the audit and
+   creativity threshold not met), but this is the weakest link in this analysis and
    I mark it **medium** confidence rather than high. Mooted in practice by the
    GPL-3.0 source licence, which is why it sits at #2 rather than #1.
 3. **The *SAS* para. 45 residue** — whether a wire format could ever be protected
@@ -875,12 +926,12 @@ Ordered by how much it would matter if it went the wrong way.
    probably right. But "arm's-length process communicating over a documented
    protocol" is the classic GPL grey zone, and the analysis turns on facts I did
    not review (does Nowhere bundle the Trot binary? does it ship it? is the
-   coupling intimate?). **This is outside the scope of this audit and is the item
+   coupling intimate?). **This is outside the scope of this analysis and is the item
    I would most recommend putting in front of a lawyer**, not because it is
    likely to be a problem, but because it is the one with money attached.
 7. **Product liability / CE-marking questions** arising from software that reads
    fitness equipment, and any consumer-protection duties attaching once a
-   Kleingewerbe exists. Entirely outside this audit's scope; noted only so it is
+   Kleingewerbe exists. Entirely outside this analysis's scope; noted only so it is
    not assumed to have been covered.
 
 **A general caveat on the whole document:** I verified every licence claim

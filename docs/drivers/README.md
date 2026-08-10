@@ -219,8 +219,8 @@ already. Check licenses before you take more than knowledge:
   checksum rule and distance unit both came from re-analysing treadspan's
   raw capture log, which contradicted its own code comments.
 - Anything **without a license file is not usable** — don't copy from it, even
-  a little. (This is why Trot's FTMS parser is a clean-room implementation from
-  the Bluetooth SIG spec.)
+  a little. (This is why Trot's FTMS parser is implemented directly from the
+  Bluetooth SIG specification.)
 
 All of these references *control* their treadmills as well as read them.
 Trot doesn't — see "Trot observes — it never controls" above — so take the
@@ -233,6 +233,26 @@ driver's comments which source established which field.
 
 When you reuse decoded protocol knowledge, say so in your driver's module
 comment the way `lifespan.rs` credits treadspan.
+
+### Write the protocol note first
+
+Before you implement, write a **neutral protocol note** — the frame layouts,
+offsets, checksum rules and magic values as plain facts, each with a citation
+to the source that established it — and **commit it before the driver code**.
+Then implement from that note. This costs almost nothing and produces a
+genuine evidentiary trail in git history: a timestamped record that the
+protocol facts were extracted and written down first, and the implementation
+followed from them. The existing drivers' module headers show the shape such
+a note ends up in; for a new driver, start it as the module header of an
+otherwise empty file, or as a note under `docs/drivers/`, and commit it.
+
+**Do not call this a clean room — it isn't one.** A clean room separates the
+person who reads the upstream from the person who implements; here the same
+contributor does both. The note is a documented record of independent
+derivation, nothing more, and describing it as more than that would be worse
+than not writing it at all. If you add any literal third-party-derived item
+(a frame, a table, a capture), record it in
+[`../provenance.md`](../provenance.md) as well.
 
 ### Capturing raw frames
 

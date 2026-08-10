@@ -33,12 +33,15 @@
 //!   Chinese; publicly mirrored at `limdongkyu/fitshow-device-protocol`,
 //!   no license) — used to *verify* the envelope, the little-endian rule,
 //!   the field order and the status-code table against the implementations
-//!   above. No text or code was taken from it; every ported byte comes from
+//!   above. No text or code was taken from it, nothing from it is
+//!   reproduced in this tree, and every byte this driver handles comes from
 //!   the licensed sources. It settles two things the implementations alone
-//!   could not: the spec's example frames pin the XOR trailer on multi-byte
-//!   payloads, and the spec declares little-endian as the protocol-wide
-//!   rule (which is what makes the big-endian "anyrun" variant a
-//!   non-conforming offshoot rather than an equally-supported dialect).
+//!   could not: its worked examples confirm the XOR trailer on multi-byte
+//!   payloads (the checksum tests use synthetic vectors, verified against
+//!   that finding but not copied from the document), and the spec declares
+//!   little-endian as the protocol-wide rule (which is what makes the
+//!   big-endian "anyrun" variant a non-conforming offshoot rather than an
+//!   equally-supported dialect).
 //!
 //! ## The transport is not one thing
 //!
@@ -110,7 +113,8 @@
 //! dropped: its `50 00 <current date+time>` "model query" smuggles a
 //! clock-set payload the spec's own model query does not have, and its
 //! range/date/odometer queries (`50 01..04`) feed values this driver never
-//! uses. The login frame's bytes survive below only as checksum vectors.
+//! uses. The login frame's bytes are not reproduced anywhere in this tree;
+//! the checksum tests pin the control-family shape with synthetic vectors.
 //!
 //! ## Status frame (little-endian; payload offsets after the 0x02 header)
 //!
@@ -825,27 +829,32 @@ mod tests {
 
     // ---- Checksum / framing vectors ------------------------------------------
 
-    /// The XOR trailer must reproduce every published frame of this
-    /// protocol: the query we send, the OEM spec's own worked examples
-    /// (the only multi-byte vectors with a published trailer), and — as
-    /// decode-direction vectors only, the Sperax/PitPat precedent — the
-    /// control-family frames upstream builds, which are NEVER sent.
+    /// The XOR trailer rule, pinned over the query we send plus synthetic
+    /// frames spanning the shapes the protocol uses: a bare single-byte
+    /// echo, a multi-byte payload, and control-family shapes (family 0x53,
+    /// which this driver NEVER writes — the write-set test proves it).
+    /// All vectors except the status query are synthetic, with trailers
+    /// computed independently by hand — no upstream or OEM-spec frame is
+    /// reproduced here; the XOR rule is tested just as well without them.
     #[test]
     fn checksum_reproduces_every_published_trailer() {
         for (raw, why) in [
             ("02 51 51 03", "the status query — the frame we send"),
             (
-                "02 7f 01 02 7c 03",
-                "OEM spec worked example (unknown command)",
-            ),
-            ("02 7f 7f 03", "OEM spec worked example (bare echo)"),
-            (
-                "02 53 03 50 03",
-                "milltender's stop command — NEVER SENT, vector only",
+                "02 5a 0f 33 66 03",
+                "synthetic multi-byte payload (0x5A^0x0F^0x33 = 0x66)",
             ),
             (
-                "02 53 00 01 00 6e 28 50 aa ee 03",
-                "the user-data login — NEVER SENT, vector only",
+                "02 42 42 03",
+                "synthetic bare echo (XOR of one byte is itself)",
+            ),
+            (
+                "02 53 7e 2d 03",
+                "synthetic control-family shape — NEVER SENT, vector only",
+            ),
+            (
+                "02 53 00 10 20 30 40 50 60 23 03",
+                "synthetic login-length control shape — NEVER SENT, vector only",
             ),
         ] {
             let frame = hx(raw);
@@ -1115,8 +1124,9 @@ mod tests {
         let data = build_frame(&[MSG_DATA, 0x00, 0, 0, 0, 0, 0, 0, 0, 0]);
         assert_eq!(parse_status(&data), Err(ProtocolError::NotStatus(0x52)));
         // A control ack — traffic we never solicit, still identified.
+        // (A synthetic control-family frame; see the checksum-vector test.)
         assert_eq!(
-            parse_status(&hx("02 53 03 50 03")),
+            parse_status(&hx("02 53 7e 2d 03")),
             Err(ProtocolError::NotStatus(0x53))
         );
     }

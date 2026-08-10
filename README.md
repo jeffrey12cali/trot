@@ -333,7 +333,8 @@ WinFita, Anplus, Focus Fitness, VirtuFit, Woodway, NordicTrack, ProForm, Peloton
 Echelon are trademarks or registered trademarks of their respective owners. The **Bluetooth®** word mark and logos are registered
 trademarks owned by Bluetooth SIG, Inc. All other product and company names are the
 property of their respective holders; their use here is for identification and
-compatibility purposes only.
+compatibility purposes only — referential use under Article 14 EUTMR and
+§ 23 MarkenG, in accordance with honest practices.
 
 Trot's own name and the runner mark are reserved and are **not** covered by the
 GPLv3 that covers the code — GPLv3 §7(e) expressly allows this. Fork the code
