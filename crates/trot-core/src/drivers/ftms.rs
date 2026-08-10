@@ -6,12 +6,12 @@
 //! where the device exposes it — on some hardware it is the only reliable
 //! signal for state transitions (see "Hardening" below).
 //!
-//! The standard-frame parser is a clean-room implementation of the Treadmill
-//! Data characteristic (0x2ACD) byte layout, written from the official FTMS
-//! v1.0.1 service specification and the Bluetooth SIG Assigned Numbers / GATT
-//! Specification Supplement field definitions. No third-party source was
-//! consulted for the standard byte unpacking; it is implemented directly from
-//! the published field order, sizes, signedness, and resolutions.
+//! The standard-frame parser implements the Treadmill Data characteristic
+//! (0x2ACD) byte layout directly from the official FTMS v1.0.1 service
+//! specification and the Bluetooth SIG Assigned Numbers / GATT Specification
+//! Supplement field definitions — the published field order, sizes,
+//! signedness, and resolutions. (Not a formal clean room: the same author
+//! also read the implementations credited below, for the hardening.)
 //!
 //! **Hardening beyond the spec** — real walking-pad firmware deviates from
 //! the paper in verified, recurring ways. This knowledge is ported from and
