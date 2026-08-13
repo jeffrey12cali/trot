@@ -86,7 +86,7 @@ upstream-authored expression only.
 | **Cross-cutting** | | | | | | |
 | 16-bit GATT service/characteristic UUIDs (`FFF0`, `FE00`, `FBA0`, `AE00`, `FFE0`, `1826`, `2ACD`, `2ADA`, …) | Device firmware, via all sources | Literal UUIDs | Yes | Facts about the hardware / Bluetooth SIG assignments | Source | |
 | Sperax inbound field geometry (steps at 15, speed at `len-7`) | qdomyos-zwift | Derived — behavioural | Yes, for parity with the only hardware-verified reader | GPL-3.0 | Source | Deliberately follows upstream's raw-wire offsets although this module documents the wire as escaped. **Not protocol-mandated** — disclosed in the module header and in licensing-analysis.md §8.2 |
-| Three quoted upstream comment/expression fragments | qdomyos-zwift | Literal (prose) | No — quoted for criticism | GPL-3.0 | Source comments | Never executed; each quoted to explain a deliberate divergence |
+| Four quoted upstream comment/expression fragments | qdomyos-zwift | Literal (prose) | No — quoted for criticism | GPL-3.0 | Source comments | Never executed; each quoted to explain a deliberate divergence |
 
 ## What is deliberately absent
 
@@ -103,11 +103,38 @@ For completeness, upstream material that is **not** in this tree, by policy:
 - Anything from the unlicensed Kotlin KingSmith client and from
   `duhow/ftms-bridge` (never consulted / verified unused).
 - Upstream implementation structure, throughout — and upstream prose, with
-  three disclosed exceptions. Three short fragments are quoted *critically* in
+  three disclosed exceptions. Four short fragments are quoted *critically* in
   code comments, each in order to explain why Trot does something different:
   qdomyos-zwift's "the treadmill send the speed in miles always" and its `SW`
-  name-matching expression (both `fitshow.rs`), and an "update each 10 m /
-  0.01 mile" comment (`kingsmith_props.rs`). All GPL-3.0 into
+  name-matching expression (both `fitshow.rs`), an "update each 10 m /
+  0.01 mile" comment (`kingsmith_props.rs`), and its speed-offset expression
+  `17 + (len - 24)` (`sperax.rs`, quoted to explain why our constant is 7). All GPL-3.0 into
   GPL-3.0-or-later, de minimis, quoted with attribution, never executed.
 
 > **FTMS name-list ordering check (2026-08-11):** 0/18 positional matches against qdomyos-zwift `bluetooth.cpp`, LCS 7/18. Arrangement independent; membership functionally determined.
+
+## Review log
+
+- **2026-08-11 — FTMS advertised-name list, ordering.** Diffed against upstream
+  `bluetooth.cpp` (4813 lines): 0/18 positional matches, longest common
+  subsequence 7/18. Membership identical (it is the set of devices known to
+  speak FTMS, and the names originate with their manufacturers); arrangement
+  independent. Upstream's order falls out of an if-else dispatch chain; ours
+  groups by vendor with a per-entry rationale.
+- **2026-08-13 — non-literal similarity review** of `sperax.rs`, `fitshow.rs`,
+  `kingsmith_props.rs` and `urevo.rs` against the upstream sources, function by
+  function. Three of four clean. In each, the largest block of the module has no
+  upstream counterpart at all: Sperax's CRC-16 and escape handling, KingSmith's
+  cipher-table detection, Urevo's checksum derivation and 15-byte counter floor.
+  The disclosed Sperax offset carryover was measured and is exactly two integers
+  plus a length gate — the surrounding parser shares no structure with upstream.
+  One finding in `fitshow.rs`: a test-only fixture builder followed milltender's
+  `tests/conftest.py` layout (AGPL-3.0) in its payload width, its choice of
+  which fields to parameterise, and its parameter order. Rewritten the same day
+  to build from an offset table at a parameterised length, with the previously
+  hard-zeroed fields parameterised; the layout is now attributed to
+  qdomyos-zwift's field map and the OEM spec's little-endian rule, which is
+  where it actually comes from.
+- **Not yet reviewed:** `pitpat.rs` (four upstreams — the obvious next
+  candidate), `kingsmith_wilink.rs`, `ftms.rs`, `lifespan.rs`, `util.rs`, and
+  `walkingpad-ble-footpod` as a second KingSmith source.

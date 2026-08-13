@@ -252,13 +252,13 @@ pub const TERMINATOR: u8 = 0x0D;
 pub const CHUNK_LEN: usize = 16;
 
 /// The substitution alphabet: base64 plus the `=` pad, in base64 order.
-pub const PLAINTEXT_TABLE: &[u8; 65] =
+pub const BASE64_ALPHABET: &[u8; 65] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=";
 
 pub const TABLE_COUNT: usize = 7;
 
 /// The seven per-model cipher tables (qdomyos' `ENCRYPT_TABLE`[_v2..v7]),
-/// each a permutation of [`PLAINTEXT_TABLE`] (verified in tests) applied
+/// each a permutation of [`BASE64_ALPHABET`] (verified in tests) applied
 /// character-wise to the base64 text. Index 0 = v1 (the default), …,
 /// index 6 = v7 (`KS-NACH-MXG`).
 pub const CIPHER_TABLES: [&[u8; 65]; TABLE_COUNT] = [
@@ -305,7 +305,7 @@ pub fn base64_encode(data: &[u8]) -> Vec<u8> {
         let chars = 1 + group.len(); // 2, 3 or 4 significant output chars
         for (i, q) in quad.iter().enumerate() {
             out.push(if i < chars {
-                PLAINTEXT_TABLE[*q as usize]
+                BASE64_ALPHABET[*q as usize]
             } else {
                 b'='
             });
@@ -364,7 +364,7 @@ pub fn cipher_encode(table: usize, plain: &[u8]) -> Vec<u8> {
         .map(|c| {
             // base64_encode only emits alphabet characters, so the lookup
             // cannot fail.
-            let idx = PLAINTEXT_TABLE
+            let idx = BASE64_ALPHABET
                 .iter()
                 .position(|p| p == c)
                 .expect("base64 output");
@@ -382,7 +382,7 @@ pub fn cipher_decode(table: usize, wire: &[u8]) -> Result<Vec<u8>, ProtocolError
         .map(|c| {
             enc.iter()
                 .position(|e| e == c)
-                .map(|idx| PLAINTEXT_TABLE[idx])
+                .map(|idx| BASE64_ALPHABET[idx])
                 .ok_or(ProtocolError::BadCipherByte(*c))
         })
         .collect::<Result<_, _>>()?;
@@ -1136,7 +1136,7 @@ mod tests {
         for (i, table) in CIPHER_TABLES.iter().enumerate() {
             let mut sorted: Vec<u8> = table.to_vec();
             sorted.sort_unstable();
-            let mut plain: Vec<u8> = PLAINTEXT_TABLE.to_vec();
+            let mut plain: Vec<u8> = BASE64_ALPHABET.to_vec();
             plain.sort_unstable();
             assert_eq!(sorted, plain, "v{} must permute the alphabet", i + 1);
             assert_eq!(table[64], b'=', "v{} must keep '=' fixed", i + 1);

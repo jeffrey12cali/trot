@@ -876,25 +876,61 @@ mod tests {
     // agree on, to pin OUR reader against THAT map. Labelled accordingly.
 
     /// Encode a status frame in the standard (little-endian) order —
-    /// milltender's test-fixture layout: 14-byte payload through the
-    /// heart-rate and segment bytes.
-    fn build_status_frame(state: u8, c: &Counters) -> Vec<u8> {
-        build_frame(&[
-            MSG_STATUS,
-            state,
-            c.speed_raw,
-            0x00, // incline — unparsed
-            (c.duration_s & 0xFF) as u8,
-            (c.duration_s >> 8) as u8,
-            (c.distance_raw & 0xFF) as u8,
-            (c.distance_raw >> 8) as u8,
-            (c.calories_raw & 0xFF) as u8,
-            (c.calories_raw >> 8) as u8,
-            (c.steps & 0xFF) as u8,
-            (c.steps >> 8) as u8,
-            0x00, // heart rate — unparsed
-            0x00, // program segment — unparsed
-        ])
+    #[derive(Clone, Copy, Default)]
+    struct Unparsed {
+        incline: u8,
+        heart_rate: u8,
+        segment: u8,
+    }
+
+    /// Synthesise a SYS_STATUS payload from the documented field map —
+    /// qdomyos-zwift's `checkIncomingPacket` offsets, corroborated by the OEM
+    /// spec's protocol-wide little-endian rule.
+    ///
+    /// Written offset-by-offset from a table, and length-parameterised,
+    /// because the parser is length-tolerant: it requires
+    /// `COUNTER_PAYLOAD_MIN_LEN` and ignores any tail. Tests exercise more
+    /// than one width so that tolerance is actually covered rather than
+    /// assumed.
+    fn synthetic_status_frame_ext(
+        state: u8,
+        c: &Counters,
+        extra: Unparsed,
+        payload_len: usize,
+    ) -> Vec<u8> {
+        let mut payload = vec![0u8; payload_len.max(COUNTER_PAYLOAD_MIN_LEN)];
+        payload[0] = MSG_STATUS;
+        payload[1] = state;
+
+        // (offset, byte) — single-byte fields.
+        for (off, v) in [(2usize, c.speed_raw), (3, extra.incline)] {
+            if off < payload.len() {
+                payload[off] = v;
+            }
+        }
+        // (offset, value) — u16 little-endian fields.
+        for (off, v) in [
+            (4usize, c.duration_s as u16),
+            (6, c.distance_raw as u16),
+            (8, c.calories_raw as u16),
+            (10, c.steps as u16),
+        ] {
+            if off + 1 < payload.len() {
+                payload[off..off + 2].copy_from_slice(&v.to_le_bytes());
+            }
+        }
+        for (off, v) in [(12usize, extra.heart_rate), (13, extra.segment)] {
+            if off < payload.len() {
+                payload[off] = v;
+            }
+        }
+        build_frame(&payload)
+    }
+
+    /// The common case: counters only, at the shortest payload the parser
+    /// accepts.
+    fn synthetic_status_frame(state: u8, c: &Counters) -> Vec<u8> {
+        synthetic_status_frame_ext(state, c, Unparsed::default(), COUNTER_PAYLOAD_MIN_LEN)
     }
 
     fn running_counters() -> Counters {
@@ -912,14 +948,35 @@ mod tests {
     #[test]
     fn the_synthetic_builder_matches_the_hand_computed_frame() {
         assert_eq!(
-            build_status_frame(STATUS_RUNNING, &running_counters()),
-            hx("02 51 03 0e 00 45 01 70 04 fd 00 6b 01 00 00 fb 03")
+            synthetic_status_frame(STATUS_RUNNING, &running_counters()),
+            hx("02 51 03 0e 00 45 01 70 04 fd 00 6b 01 fb 03")
+        );
+
+        // The parser is length-tolerant, so the builder must be too: a wider
+        // payload carrying the fields Trot never reads must still parse to the
+        // same counters, and those fields must be ignored whatever they hold.
+        let wide = synthetic_status_frame_ext(
+            STATUS_RUNNING,
+            &running_counters(),
+            Unparsed {
+                incline: 0x07,
+                heart_rate: 0x8C,
+                segment: 0x02,
+            },
+            14,
+        );
+        assert_eq!(
+            parse_status(&wide).unwrap().counters,
+            parse_status(&synthetic_status_frame(STATUS_RUNNING, &running_counters()))
+                .unwrap()
+                .counters,
+            "unparsed fields must not change what the parser reports"
         );
     }
 
     #[test]
     fn decodes_a_running_frame() {
-        let s = parse_status(&build_status_frame(STATUS_RUNNING, &running_counters())).unwrap();
+        let s = parse_status(&synthetic_status_frame(STATUS_RUNNING, &running_counters())).unwrap();
         assert_eq!(s.state, STATUS_RUNNING);
         assert_eq!(s.counters, Some(running_counters()));
     }
@@ -932,7 +989,7 @@ mod tests {
     fn counter_statuses_carry_counters_and_the_rest_are_state_only() {
         let c = running_counters();
         for state in COUNTER_STATUSES {
-            let s = parse_status(&build_status_frame(state, &c)).unwrap();
+            let s = parse_status(&synthetic_status_frame(state, &c)).unwrap();
             assert_eq!(s.counters, Some(c.clone()), "status 0x{state:02x}");
         }
         for state in [
@@ -943,7 +1000,7 @@ mod tests {
             STATUS_STUDY,
             STATUS_READY,
         ] {
-            let s = parse_status(&build_status_frame(state, &c)).unwrap();
+            let s = parse_status(&synthetic_status_frame(state, &c)).unwrap();
             assert_eq!(s.counters, None, "status 0x{state:02x} is state-only");
         }
 
@@ -965,7 +1022,7 @@ mod tests {
 
         // A counter status whose payload is one byte short of the counter
         // block degrades to state-only rather than misreading.
-        let full = build_status_frame(STATUS_RUNNING, &c);
+        let full = synthetic_status_frame(STATUS_RUNNING, &c);
         let payload = &full[1..full.len() - 2];
         let truncated = build_frame(&payload[..COUNTER_PAYLOAD_MIN_LEN - 1]);
         assert_eq!(parse_status(&truncated).unwrap().counters, None);
@@ -982,7 +1039,7 @@ mod tests {
             calories_raw: 0x5678,
             steps: 0xFEDC,
         };
-        let s = parse_status(&build_status_frame(STATUS_RUNNING, &wide)).unwrap();
+        let s = parse_status(&synthetic_status_frame(STATUS_RUNNING, &wide)).unwrap();
         assert_eq!(s.counters, Some(wide));
     }
 
@@ -1080,13 +1137,14 @@ mod tests {
             Err(ProtocolError::BadPrefix(0xA1))
         );
         // Right envelope, missing terminator.
-        let mut no_term = build_status_frame(STATUS_RUNNING, &running_counters());
+        let mut no_term = synthetic_status_frame(STATUS_RUNNING, &running_counters());
         let n = no_term.len();
         no_term[n - 1] = 0x00;
         assert_eq!(parse_status(&no_term), Err(ProtocolError::BadTerminator));
         // Truncated mid-frame: the footer lands elsewhere.
         assert!(
-            parse_status(&build_status_frame(STATUS_RUNNING, &running_counters())[..9]).is_err()
+            parse_status(&synthetic_status_frame(STATUS_RUNNING, &running_counters())[..9])
+                .is_err()
         );
         // A valid envelope whose status payload lacks the state byte.
         assert_eq!(
@@ -1101,7 +1159,7 @@ mod tests {
     /// bytes parse again (proof the rejection was the checksum's).
     #[test]
     fn corruption_is_rejected_and_a_fixed_trailer_parses_again() {
-        let mut corrupt = build_status_frame(STATUS_RUNNING, &running_counters());
+        let mut corrupt = synthetic_status_frame(STATUS_RUNNING, &running_counters());
         corrupt[11] ^= 0x01; // flip one steps byte: 363 → 362
         assert!(matches!(
             parse_status(&corrupt),
@@ -1168,7 +1226,7 @@ mod tests {
     #[test]
     fn unit_scaling_follows_the_console_display_unit() {
         let approx = |a: f64, b: f64| (a - b).abs() < 1e-9;
-        let s = parse_status(&build_status_frame(STATUS_RUNNING, &running_counters())).unwrap();
+        let s = parse_status(&synthetic_status_frame(STATUS_RUNNING, &running_counters())).unwrap();
 
         assert_eq!(wire_unit("km/h"), WireUnit::Metric);
         assert_eq!(wire_unit("mph"), WireUnit::Imperial);
@@ -1207,7 +1265,7 @@ mod tests {
     /// stays absent on both units (unpinned wire scale — module docs).
     #[test]
     fn golden_fixture_to_telemetry() {
-        let s = parse_status(&build_status_frame(STATUS_RUNNING, &running_counters())).unwrap();
+        let s = parse_status(&synthetic_status_frame(STATUS_RUNNING, &running_counters())).unwrap();
 
         let t = Telemetry::from_sample(&to_sample(&s, WireUnit::Imperial), "mph");
         assert_eq!(t.speed_raw, Some(140), "1.40 mph in centi-units");
@@ -1232,7 +1290,7 @@ mod tests {
     #[test]
     fn statuses_present_as_the_contract_codes() {
         let telem = |state: u8| {
-            let s = parse_status(&build_status_frame(state, &running_counters())).unwrap();
+            let s = parse_status(&synthetic_status_frame(state, &running_counters())).unwrap();
             Telemetry::from_sample(&to_sample(&s, WireUnit::Metric), "km/h")
         };
 
