@@ -50,9 +50,13 @@
 //! *roles* (`util::has_notify`/`has_write`), a Deerrun can never be claimed
 //! by a LifeSpan entry (it fails their role check) and a LifeSpan can never
 //! be claimed by this driver (it fails ours) — `drivers/mod.rs` pins the
-//! whole adjudication. The `1910` layout appears alongside `FBA0` on the
-//! pacekeeper hardware's own GATT dump and is listed by qdomyos; it is
-//! probed last, and a device exposing both lands on the verified `FBA0`.
+//! whole adjudication. The `1910` layout comes from the GATT dump in
+//! pacekeeper's `src/platform.h`, where `2B10` is annotated `[read,notify]`
+//! and `2B11` `[read,write…]` — that annotation is where our role
+//! assignment comes from. No implementation drives the protocol over it, so
+//! it is unverified and probed last; a device exposing both it and `FBA0`
+//! lands on the verified `FBA0`. (qdomyos knows `1910` only as a fallback
+//! *unlock* service and never mentions `2B10` at all.)
 //!
 //! ## Interaction model
 //!
@@ -137,12 +141,13 @@
 //!
 //! * **The wire is metric even when flags bit 7 is set.** pacekeeper and
 //!   KeiranY *label* the values "mph"/"mi" when the bit is set but never
-//!   rescale them (pacekeeper's field is literally named `distanceKm`);
-//!   sirfergy's tested finding states it outright: the treadmill reports
-//!   km/h and km over BLE even when its panel displays miles — the flag
-//!   describes the *panel*, and a decoder must not rescale. No
-//!   implementation converts, so neither do we; a test pins that an
-//!   imperial-flagged frame decodes to identical SI values.
+//!   rescale them — pacekeeper's field is literally named `distanceKm` and
+//!   is consumed as km unconditionally. azmke records the bit as
+//!   `unit_mode` and never reads it again. sirfergy asserts the invariant
+//!   in a test. So all four decoders agree in behaviour, whatever their
+//!   labels say: nothing converts. We read the bit as a property of the
+//!   console's display, not of the wire, and a test pins that a frame
+//!   differing only in this bit decodes to identical SI values.
 //! * **qdomyos' non-PitPat inbound decode is not portable.** It reads speed
 //!   at bytes 9..11 in units of 0.01 km/h — inconsistent with the envelope
 //!   plus the field map above, and its own expression
@@ -237,9 +242,10 @@ pub const ENVELOPE_PREFIX: u8 = 0x4D;
 /// notifications on the enveloped transport.
 pub const ENVELOPE_LEN: usize = 4;
 
-/// A status frame is at least 31 bytes before anyone trusts it (pacekeeper,
-/// azmke, KeiranY and sirfergy all use this bound; every parsed field sits
-/// below offset 29).
+/// 31 bytes — the bound every published decoder applies (pacekeeper
+/// `length < 31`, azmke `len(payload) < 31`, KeiranY `byteLength < 31`,
+/// sirfergy `MIN_STATE_PACKET_LENGTH`). Every field this driver parses sits
+/// below offset 29, so the bound is comfortable rather than tight.
 pub const MIN_STATUS_FRAME_LEN: usize = 31;
 
 /// Flags byte, bits 3..4: the belt state (values below). The other bits
@@ -403,14 +409,11 @@ pub struct Status {
 }
 
 fn u16_be(frame: &[u8], at: usize) -> u32 {
-    ((frame[at] as u32) << 8) | frame[at + 1] as u32
+    u16::from_be_bytes([frame[at], frame[at + 1]]) as u32
 }
 
 fn u32_be(frame: &[u8], at: usize) -> u32 {
-    ((frame[at] as u32) << 24)
-        | ((frame[at + 1] as u32) << 16)
-        | ((frame[at + 2] as u32) << 8)
-        | frame[at + 3] as u32
+    u32::from_be_bytes([frame[at], frame[at + 1], frame[at + 2], frame[at + 3]])
 }
 
 /// Parse a bare (envelope-free) status frame. Pure function of the bytes;

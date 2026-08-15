@@ -87,6 +87,7 @@ upstream-authored expression only.
 | 16-bit GATT service/characteristic UUIDs (`FFF0`, `FE00`, `FBA0`, `AE00`, `FFE0`, `1826`, `2ACD`, `2ADA`, …) | Device firmware, via all sources | Literal UUIDs | Yes | Facts about the hardware / Bluetooth SIG assignments | Source | |
 | Sperax inbound field geometry (steps at 15, speed at `len-7`) | qdomyos-zwift | Derived — behavioural | Yes, for parity with the only hardware-verified reader | GPL-3.0 | Source | Deliberately follows upstream's raw-wire offsets although this module documents the wire as escaped. **Not protocol-mandated** — disclosed in the module header and in licensing-analysis.md §8.2 |
 | Four quoted upstream comment/expression fragments | qdomyos-zwift | Literal (prose) | No — quoted for criticism | GPL-3.0 | Source comments | Never executed; each quoted to explain a deliberate divergence |
+| `1910` / `2B10` / `2B11` transport triple, with roles | pacekeeper `src/platform.h` GATT-dump comment | Literal UUIDs + role assignment read off the dump's `[read,notify]` / `[read,write…]` annotations | Speculative — no implementation drives the protocol over it | GPL-3.0 (dump); UUIDs originate with the device firmware | Source | Probed last as unverified. qdomyos knows `1910` only as a fallback *unlock* service and never mentions `2B10` |
 
 ## What is deliberately absent
 
@@ -138,3 +139,39 @@ For completeness, upstream material that is **not** in this tree, by policy:
 - **Not yet reviewed:** `pitpat.rs` (four upstreams — the obvious next
   candidate), `kingsmith_wilink.rs`, `ftms.rs`, `lifespan.rs`, `util.rs`, and
   `walkingpad-ble-footpod` as a second KingSmith source.
+- **2026-08-15 — `pitpat.rs`**, against all five upstreams (pacekeeper GPL-3.0,
+  azmke MIT, KeiranY Unlicense, sirfergy GPL-3.0, qdomyos `deeruntreadmill`
+  GPL-3.0). **Clean with two exceptions, both prose, both remediated the same
+  day**: a passage on the imperial flag that preserved the clause order and most
+  of the wording of sirfergy's `protocol.py` comment (rewritten from our own
+  observation of all four decoders' behaviour), and a minimum-length doc comment
+  that borrowed sirfergy's unusual "…before we trust it" idiom (rewritten to
+  cite each decoder's actual bound). No code-expression carryover in any of the
+  five pairings.
+
+  Affirmative evidence: our read order is ascending where pacekeeper's is
+  non-monotonic (a quirk KeiranY inherited); our state map differs from all four
+  in structure and order and adds an `Other(u8)` arm none of them has; we did
+  **not** inherit the `COUNTDOWN=0 … DISCONNECTED=100` enum that sirfergy copies
+  verbatim from pacekeeper, though two of our five sources carry it; and the
+  module's largest blocks — `select_transport`, `decode_notification`'s
+  dual-interpretation arbitration, the error taxonomy, and 14 of 21 tests — have
+  no upstream counterpart at all.
+
+  Two things checked because they looked alarming and turned out not to be. The
+  transport probe order matches qdomyos 3/3 (FBA0 → FFFF → FFF0), but is
+  independently determined by our stated verification-strength rationale, arises
+  in qdomyos from an unrelated cause (its driver began as FFF0 and had the others
+  bolted on later), and selects on characteristic **roles** where qdomyos selects
+  on **services** — which is what makes the swapped-FFF0 adjudication possible at
+  all. And sirfergy's test-suite frame builder assigns the same fields at the
+  same offsets as ours; rejected as a finding because the offsets are facts, the
+  field *set* is determined by our own parser rather than theirs, and ours
+  computes a checksum trailer sirfergy's cannot (its parser validates none),
+  which is what lets our builder be a true round-trip inverse.
+
+- **Methodology note.** Check upstream repositories for test directories via the
+  GitHub tree API, not by inspecting whatever files happen to have been fetched.
+  Two rounds, two test suites found that way (milltender, sirfergy), neither
+  visible in the vendored file set, and one of them held the only real finding of
+  its round.
