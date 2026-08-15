@@ -104,11 +104,10 @@ use, so your driver states intent and the timing lore stays in one place.
 2. **Request/response polling.** The device answers one value per request: you
    write an opcode, it notifies the reply. LifeSpan works this way — see
    `drivers/lifespan.rs`, which rotates through its opcodes ~50 ms apart.
-   Others in this family (KingSmith WiLink — `drivers/kingsmith_wilink.rs`;
-   FitShow — `drivers/fitshow.rs`) add checksums (`util::checksum_sum`,
-   `util::checksum_xor`) and sometimes enforce minimum spacing between
-   commands — WiLink drops writes closer than 690 ms
-   (`util::CommandSpacer`).
+   Others in this family (KingSmith WiLink — `drivers/kingsmith_wilink.rs`)
+   add checksums (`util::checksum_sum`, `util::checksum_xor`) and sometimes
+   enforce minimum spacing between commands — WiLink drops writes closer
+   than 690 ms (`util::CommandSpacer`).
 3. **Init handshake, then push.** The device is silent until you write one or
    more magic frames (Urevo needs a single wake write — see
    `drivers/urevo.rs`, the in-tree example of this shape; Sperax
@@ -123,20 +122,23 @@ use, so your driver states intent and the timing lore stays in one place.
    whose frames range from a harmless query to one that starts the belt.
 4. **Obfuscated transport.** The nastiest real-world case: a text protocol,
    base64'd, run through a substitution cipher, split into 16-byte GATT chunks,
-   terminated by a marker byte — the app-cipher KingSmith generation, and
-   now an in-tree reality: see `drivers/kingsmith_props.rs`. Your `run()`
-   loop then has three layers: reassemble notifications into complete
-   messages with `util::FrameAssembler` (buffer until the terminator — a
+   terminated by a marker byte — the app-cipher KingSmith generation.
+   **There is deliberately no in-tree example of this shape.** Trot shipped
+   one briefly (`kingsmith_props.rs`) and removed it, together with its
+   shared plumbing (`util::FrameAssembler` and the `util::TransportCodec`
+   seam), because reproducing a manufacturer's cipher tables — however
+   functional and however necessary for interoperability — is the most
+   contestable artifact a driver can carry; `docs/provenance.md` records
+   the decision. The shape stays in this taxonomy because the hardware is
+   real. If you meet it, the loop has three layers — reassemble
+   notifications into complete messages (buffer until the terminator; a
    frame can be split across chunks AND several frames can share one
-   chunk), decode the transport behind the `util::TransportCodec` seam,
-   then parse the payload. The cipher tables themselves belong in your
-   driver file — the seam exists so the reassembly and parsing layers
-   never have to know about them. Two hard-won lessons live with the code
-   that earned them, not here: the terminator-reassembly caveat is in the
-   "Frame reassembly" section below, and when a cipher is per-model with
-   no on-wire discriminator, detect the table from the traffic rather than
-   shipping a user setting — `kingsmith_props.rs`'s "seven cipher tables"
-   section documents how (and when detection genuinely cannot decide).
+   chunk, and terminator-scanning is only safe when the terminator byte
+   cannot occur inside the payload, which is true for text/base64
+   transports and false for raw binary ones), decode the transport, then
+   parse the payload — and the removed helpers live in git history. Raise
+   the licensing question with the maintainer **before** porting any
+   cipher table.
 
 Five hard-won warnings:
 
@@ -150,18 +152,20 @@ Five hard-won warnings:
   LifeSpan driver requires both, and why a role-verified-but-unnamed
   `FFF1`/`FFF2` device is only claimed by the deliberate `lifespan-fallback`
   entry at the very end of the registry, after every stricter driver has
-  passed on it. Five in-tree drivers now share that exact block — LifeSpan,
-  Urevo (`drivers/urevo.rs`), Sperax (`drivers/sperax.rs`) and FitShow
-  (`drivers/fitshow.rs`) on the notify-FFF1/write-FFF2 arrangement, kept
-  apart purely by their advertised-name gates, plus PitPat
+  passed on it. Four in-tree drivers now share that exact block — LifeSpan,
+  Urevo (`drivers/urevo.rs`) and Sperax (`drivers/sperax.rs`) on the
+  notify-FFF1/write-FFF2 arrangement, kept apart purely by their
+  advertised-name gates, plus PitPat
   (`drivers/pitpat.rs`), whose Deerrun transport variant is the *swapped*
   arrangement the role checks exist for; `drivers/mod.rs` has a test
-  adjudicating every combination, and your driver joins it. A protocol can
+  adjudicating every combination, and your driver joins it. (FitShow
+  hardware squats on the same block with LifeSpan's exact arrangement —
+  its driver was deliberately removed, so its names now reach the
+  fallback.) A protocol can
   also ship behind **several** service layouts at once — the PitPat family
-  uses at least four, FitShow three — in which case `supports()` probes
+  uses at least four — in which case `supports()` probes
   them in order of how well each is verified rather than assuming one (see
-  `pitpat.rs`'s `select_transport`, or `fitshow.rs`'s for the
-  deployed-preference variant). Names can be
+  `pitpat.rs`'s `select_transport`). Names can be
   treacherous on their own, too: Sperax ships two revisions distinguished
   only by a hyphen (`SPERAX_RM01` speaks the proprietary protocol,
   `SPERAX_RM-01` speaks FTMS), and only one Urevo model (`URTM041`) is
@@ -208,10 +212,6 @@ already. Check licenses before you take more than knowledge:
   transport envelope from **azmke/pitpat-treadmill-control**, MIT).
 - **DorianRudolph/QWalkingPad** (GPL-3.0) — a further independent KingSmith
   WiLink implementation, useful as a cross-check.
-- **LucasFrendorf/walkingpad-ble-footpod** (GPL-3.0) — the app-cipher
-  KingSmith generation (KS-NGCH-G1C): both GATT address spaces on real
-  hardware and the poll-driven steady state — the cross-check for
-  `drivers/kingsmith_props.rs`.
 - **ph4-walkingpad** and **blak3r/treadspan** (both MIT) — clean references
   with raw captures for KingSmith, and for LifeSpan, Urevo and Sperax,
   respectively. Published captures make excellent test fixtures even for
@@ -343,14 +343,14 @@ FTMS driver does (moving ⇒ `Running`).
 
 `host.display_unit` is the unit the user's console displays (`"km/h"` or
 `"mph"`). Ignore it unless your wire format itself depends on the console's
-display setting. Two drivers currently do: LifeSpan, whose console genuinely
-encodes speed in hundredths of the *displayed* unit, and FitShow, which uses
-it as a documented **heuristic** for an undeclared device-dependent wire
-scale — acceptable there only because speed is a live, visible, recoverable
-reading (the driver logs the assumption at INFO). Never let `display_unit`
+display setting. One driver currently does: LifeSpan, whose console genuinely
+encodes speed in hundredths of the *displayed* unit. A documented
+display-unit **heuristic** for an undeclared device-dependent wire scale is
+acceptable only for a live, visible, recoverable reading such as speed (log
+the assumption at INFO). Never let `display_unit`
 decide a stored cumulative counter such as distance: a user preference must
-not determine a number written into permanent history (that is why the
-FitShow driver reports no distance at all).
+not determine a number written into permanent history — report no value at
+all rather than one scaled by a guess.
 
 ### Shared plumbing: `drivers/util.rs`
 
@@ -406,41 +406,21 @@ subscribe_staggered(link, &[
 ]).await?;
 ```
 
-**Frame reassembly + codec seam** (shape 4) — notifications are transport
-chunks, not messages. Feed every chunk to the assembler; it yields each
-complete frame exactly once (terminator stripped), no matter how the radio
-split or coalesced them. One caveat: reassembling on a terminator byte only
+**Frame reassembly** (shape 4) — `util.rs` used to carry a `FrameAssembler`
+and a `TransportCodec` seam for terminator-delimited, obfuscated transports;
+both were removed along with the tree's only driver of that shape (see the
+shape-4 note above) and live in git history. The hard-won caveat outlives
+the helper: reassembling on a terminator byte only
 works when that byte **cannot occur inside the payload** — true for text and
 base64-encoded transports, false for raw binary protocols (WiLink frames end
 in `0xFD`, but `0xFD` is also a perfectly possible counter or checksum byte).
 For binary protocols where every known implementation treats one notification
 as one message, do the same: validate each notification whole (length, prefix,
-checksum) instead of splitting the byte stream. Put your transport decode
-behind `TransportCodec` —
-`IdentityCodec` for plain protocols, your cipher for the obfuscated ones —
-and the layers stay separable and testable:
-
-```rust
-use super::util::{FrameAssembler, IdentityCodec, TransportCodec};
-
-let codec = IdentityCodec; // or your driver's cipher-table codec
-let mut assembler = FrameAssembler::new(0x0D);
-while let Some(n) = notifications.next().await {
-    host.record_frame(0x00, &n.value);
-    for frame in assembler.push(&n.value) {
-        let payload = codec.decode(&frame)?;
-        // parse `payload` with your pure functions, emit the Sample
-    }
-}
-```
-
-Outbound on an obfuscated transport: `encode` the whole message first, then
-split it into MTU-sized writes (`wire.chunks(16)`) — the cipher runs over the
-message, not the chunks.
+checksum) instead of splitting the byte stream.
 
 **Checksums** — the two trailer bytes that actually occur in the wild:
-`checksum_sum(&frame)` (additive, mod 256 — FitShow, KingSmith
-request/response) and `checksum_xor(&frame)`.
+`checksum_sum(&frame)` (additive, mod 256 — the KingSmith request/response
+family) and `checksum_xor(&frame)` (the PitPat family).
 
 **Property checks** — `has_notify(gatt, uuid)` and `has_write(gatt, uuid)`
 are the `supports()` building blocks: they verify a characteristic's *role*,
@@ -526,7 +506,7 @@ one malformed frame from a sleepy treadmill must not take the daemon down.
 **Pin your write set.** If your driver writes anything at all, add a test
 named `the_driver_only_ever_writes_*` that asserts the exact frames **and
 the exact count** — every driver that writes has one (grep the name across
-`drivers/`; six converged on it independently). This is the real guarantee
+`drivers/`; four converged on it independently). This is the real guarantee
 behind the observe-only policy: the UUID tripwire in `drivers/mod.rs` can
 only catch known control-path UUIDs, but vendor actuation frames are plain
 bytes a scan can't recognise — a test that says "these N byte-exact frames

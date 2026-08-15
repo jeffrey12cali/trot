@@ -6,13 +6,15 @@ that make it do that better are very welcome.
 
 ## The most useful thing you can contribute
 
-**An adapter for a treadmill we can't read yet.** Trot currently ships eight
-drivers: native adapters for LifeSpan/Omni, KingSmith WalkingPad (both the
-WiLink and app-cipher generations), Urevo, Sperax, PitPat/Deerrun/SupeRun and
-the FitShow OEM family, plus generic FTMS for everything else. Only LifeSpan
-is tested by us on real hardware — the rest are ports of open-source reverse
-engineering pinned against published captures, so hardware reports (even "it
-works") are valuable on their own.
+**An adapter for a treadmill we can't read yet.** Trot currently ships six
+drivers: native adapters for LifeSpan/Omni, KingSmith WalkingPad (the WiLink
+generation), Urevo, Sperax and PitPat/Deerrun/SupeRun, plus generic FTMS for
+everything else. Only LifeSpan is tested by us on real hardware — the rest
+are ports of open-source reverse engineering pinned against published
+captures, so hardware reports (even "it works") are valuable on their own.
+(Two further families — the app-cipher KingSmith generation and the FitShow
+OEM platform — had drivers that were deliberately removed for licensing
+prudence; see `docs/provenance.md` before proposing to re-add either.)
 
 If your treadmill doesn't work, a bug report with a `trot scan --all` listing and
 a `GET /api/diag` dump is genuinely valuable even if you never write a line of

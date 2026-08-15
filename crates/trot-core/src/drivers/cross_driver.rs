@@ -135,59 +135,6 @@ fn no_driver_turns_an_unreported_field_into_some_zero() {
         assert_absent("sperax", &s, &[Distance, Duration, Calories]);
     }
 
-    // FitShow: state-only statuses (NORMAL here) carry no counters; and on
-    // a metric console even a counter frame reports no distance (scale
-    // unverified) and never calories (scale conflict).
-    {
-        let normal = super::fitshow::build_frame(&[super::fitshow::MSG_STATUS, 0x00]);
-        let s = super::fitshow::to_sample(
-            &super::fitshow::parse_status(&normal).unwrap(),
-            super::fitshow::WireUnit::Metric,
-        );
-        assert_eq!(s.state, Some(BeltState::Standby));
-        assert_absent(
-            "fitshow (state-only)",
-            &s,
-            &[Speed, Distance, Steps, Duration, Calories],
-        );
-
-        let running = hx("02 51 03 0e 00 45 01 70 04 fd 00 6b 01 00 00 fb 03");
-        let s = super::fitshow::to_sample(
-            &super::fitshow::parse_status(&running).unwrap(),
-            super::fitshow::WireUnit::Metric,
-        );
-        assert_eq!(s.steps, Some(363));
-        assert_absent("fitshow (metric counters)", &s, &[Distance, Calories]);
-
-        // Imperial consoles report no distance either: the wire scale is
-        // inferred from the USER'S display preference, and a preference must
-        // not determine a stored cumulative counter (fitshow.rs module docs,
-        // Units section). Only a capture pinning the scale to an advertised
-        // name may wire this up.
-        let s = super::fitshow::to_sample(
-            &super::fitshow::parse_status(&running).unwrap(),
-            super::fitshow::WireUnit::Imperial,
-        );
-        assert_absent("fitshow (imperial counters)", &s, &[Distance, Calories]);
-    }
-
-    // KingSmith props: the pad reports any subset of keys per line; keys
-    // never seen stay absent.
-    {
-        let mut state = super::kingsmith_props::PadState::default();
-        for (k, v) in super::kingsmith_props::parse_props("props CurrentSpeed 2.0 spm 96").unwrap()
-        {
-            state.apply(k, v);
-        }
-        let s = state.to_sample();
-        assert_eq!(s.speed_kmh, Some(2.0));
-        assert_absent(
-            "kingsmith-props",
-            &s,
-            &[Distance, Steps, Duration, Calories, State],
-        );
-    }
-
     // PitPat is the one driver with no absent fields: its ≥31-byte status
     // frame genuinely reports every counter, so zeros there are REPORTED
     // values (the real idle capture reads all-zero counters on a pad that

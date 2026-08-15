@@ -8,11 +8,14 @@
 //! onto the contested `0xFFF0` block) fails here, loudly, with the full
 //! supporter list in the message.
 //!
-//! `0xFFF0` with `FFF1`/`FFF2` is squatted by six mutually incompatible
-//! protocols (LifeSpan, Urevo, Sperax, FitShow, Deerrun-via-PitPat, and the
-//! deliberate fallback); the advertised name is the whole adjudication for
-//! four of them and the swapped roles for the fifth. Rows below cover every
-//! claimant on both role arrangements.
+//! `0xFFF0` with `FFF1`/`FFF2` is squatted by several mutually incompatible
+//! protocols (LifeSpan, Urevo, Sperax, Deerrun-via-PitPat, the deliberate
+//! fallback — and, in the wild, FitShow, whose driver Trot deliberately does
+//! not ship); the advertised name is the whole adjudication for the named
+//! claimants and the swapped roles for Deerrun. Rows below cover every
+//! claimant on both role arrangements, plus the fall-through behaviour of
+//! the two deliberately removed families (FitShow and app-cipher KingSmith —
+//! see docs/provenance.md).
 
 use btleplug::api::{CharPropFlags, Characteristic};
 use std::collections::BTreeSet;
@@ -57,7 +60,7 @@ fn supporters(a: &Advertisement, g: &BTreeSet<Characteristic>) -> Vec<&'static s
 
 // ---- Canonical GATT tables ---------------------------------------------------
 
-/// The LifeSpan/Urevo/Sperax/FitShow arrangement on the contested block:
+/// The LifeSpan/Urevo/Sperax arrangement on the contested block:
 /// notify FFF1, write FFF2.
 fn lifespan_shape() -> BTreeSet<Characteristic> {
     gatt(&[(0xfff0, 0xfff1, N), (0xfff0, 0xfff2, W)])
@@ -226,23 +229,28 @@ fn matrix() -> Vec<Row> {
             with_ftms(lifespan_shape()),
             &["ftms", "lifespan-fallback"],
         ),
+        // FitShow support was deliberately removed (docs/provenance.md), so
+        // its names take the unrecognised-name path: on LifeSpan-shaped
+        // FFF0 that is the benign fallback (unanswered polls, no
+        // mis-decode); with real FTMS present, FTMS wins — native steps no
+        // longer outrank it because there is no native driver.
         row(
-            "FitShow FS module on FFF0",
+            "FitShow FS module on FFF0 (removed family → benign fallback)",
             "FS-3D6CD7",
             lifespan_shape(),
-            &["fitshow", "lifespan-fallback"],
+            &["lifespan-fallback"],
         ),
         row(
-            "FitShow FS module on FFF0 alongside FTMS (steps beat FTMS)",
+            "FitShow FS module on FFF0 alongside FTMS (removed family → FTMS)",
             "FS-3D6CD7",
             with_ftms(lifespan_shape()),
-            &["fitshow", "ftms", "lifespan-fallback"],
+            &["ftms", "lifespan-fallback"],
         ),
         row(
-            "Tunturi T80 alongside FTMS",
+            "Tunturi T80 alongside FTMS (removed family → FTMS)",
             "TUNTURI T80-1",
             with_ftms(lifespan_shape()),
-            &["fitshow", "ftms", "lifespan-fallback"],
+            &["ftms", "lifespan-fallback"],
         ),
         row(
             "PitPat name on LifeSpan roles (unknown table → benign fallback)",
@@ -276,7 +284,7 @@ fn matrix() -> Vec<Row> {
             &[],
         ),
         row(
-            "FitShow name cannot claim swapped roles",
+            "FitShow name on swapped roles stays unclaimed",
             "FS-3D6CD7",
             deerrun_shape(),
             &[],
@@ -333,20 +341,25 @@ fn matrix() -> Vec<Row> {
             wilink_shape(),
             &["kingsmith-wilink"],
         ),
+        // The app-cipher generation was deliberately removed
+        // (docs/provenance.md): its distinctive transport is unclaimed —
+        // polling any surviving protocol at it would garble — and WiLink's
+        // carve-outs still refuse its names, which therefore fall to no
+        // driver rather than to a sibling.
         row(
-            "app-cipher pad on the props layout",
+            "app-cipher pad on the props layout (removed family)",
             "KS-NGCH-G1C",
             props_shape(),
-            &["kingsmith-props"],
+            &[],
         ),
         row(
-            "nameless props layout (distinctive)",
+            "nameless props layout (removed family)",
             "",
             props_shape(),
-            &["kingsmith-props"],
+            &[],
         ),
         row(
-            "app-cipher name on a WiLink table: carved out of both",
+            "app-cipher name on a WiLink table: still carved out of WiLink",
             "KS-HDSY-X21C",
             wilink_shape(),
             &[],
@@ -363,22 +376,28 @@ fn matrix() -> Vec<Row> {
             ftms_only(),
             &["ftms"],
         ),
-        // -- FitShow's other transports and its FTMS split.
-        row("FitShow on AE00", "FS-3D6CD7", fitshow_ae00(), &["fitshow"]),
+        // -- The removed FitShow family's vendor-only transports: unclaimed.
+        //    Units that also expose real FTMS keep working, via FTMS.
         row(
-            "FitShow on FFE0 (notify FFE4)",
+            "FitShow on AE00 (removed family → nothing)",
+            "FS-3D6CD7",
+            fitshow_ae00(),
+            &[],
+        ),
+        row(
+            "FitShow on FFE0, notify FFE4 (removed family → nothing)",
             "FS-3D6CD7",
             fitshow_ffe0(),
-            &["fitshow"],
+            &[],
         ),
         row(
-            "NoblePro without FTMS keeps the native protocol",
+            "NoblePro without FTMS (removed family → nothing)",
             "NOBLEPRO CONNECT 1",
             fitshow_ae00(),
-            &["fitshow"],
+            &[],
         ),
         row(
-            "NoblePro with FTMS yields to FTMS",
+            "NoblePro with FTMS lands on FTMS",
             "NOBLEPRO CONNECT 1",
             with_ftms(fitshow_ae00()),
             &["ftms"],
@@ -512,7 +531,7 @@ fn name_claimants(name: &str) -> Vec<&'static str> {
 /// the registry order resolves that pair deliberately (native outranks FTMS).
 #[test]
 fn name_lists_are_disjoint_across_drivers() {
-    use trot_core::drivers::{fitshow, ftms, kingsmith_props, kingsmith_wilink, lifespan};
+    use trot_core::drivers::{ftms, kingsmith_wilink, lifespan};
     use trot_core::drivers::{pitpat, sperax, urevo};
 
     // (owner id, names instantiated from that driver's own pub name lists)
@@ -530,16 +549,9 @@ fn name_lists_are_disjoint_across_drivers() {
             .map(|s| s.to_string()),
     );
     claims.push(("kingsmith-wilink", wilink));
-    claims.push((
-        "kingsmith-props",
-        expand(kingsmith_props::ADV_NAME_PREFIXES),
-    ));
     claims.push(("urevo", expand(urevo::ADV_NAME_PREFIXES)));
     claims.push(("sperax", expand(sperax::ADV_NAME_PREFIXES)));
     claims.push(("pitpat", expand(pitpat::ADV_NAME_PREFIXES)));
-    let mut fs = expand(fitshow::ADV_NAME_PREFIXES_NATIVE);
-    fs.extend(expand(fitshow::ADV_NAME_PREFIXES_FTMS_PREFERRED));
-    claims.push(("fitshow", fs));
     claims.push(("ftms", expand(ftms::ADV_NAME_PREFIXES)));
 
     for (owner, names) in &claims {
@@ -558,18 +570,17 @@ fn name_lists_are_disjoint_across_drivers() {
     }
 }
 
-/// The KingSmith three-way split (WiLink / app-cipher props / FTMS) orphans
-/// nothing: every KingSmith-family name in any driver's list is claimed by
-/// exactly one of the three, and the FTMS Z1 carve-out reaches FTMS only.
+/// The KingSmith generation split (WiLink / FTMS, with the app-cipher
+/// generation deliberately unsupported): every name in a surviving driver's
+/// list is claimed by exactly that driver, the FTMS Z1 carve-out reaches
+/// FTMS only, and WiLink's app-cipher carve-outs are claimed by NOBODY —
+/// with that driver removed they must fall to no driver, never to a sibling.
 #[test]
-fn the_kingsmith_split_covers_every_name_exactly_once() {
-    use trot_core::drivers::{ftms, kingsmith_props, kingsmith_wilink};
+fn the_kingsmith_split_claims_survivors_once_and_orphans_the_removed_names() {
+    use trot_core::drivers::{ftms, kingsmith_wilink};
 
     let mut ks_names: Vec<String> = Vec::new();
     for p in kingsmith_wilink::ADV_NAME_PREFIXES {
-        ks_names.extend(instantiations(p));
-    }
-    for p in kingsmith_props::ADV_NAME_PREFIXES {
         ks_names.extend(instantiations(p));
     }
     // The KingSmith-named FTMS models from the FTMS list.
@@ -586,20 +597,25 @@ fn the_kingsmith_split_covers_every_name_exactly_once() {
             claimants.len(),
             1,
             "KingSmith name {name:?} claimed by {claimants:?} — the generation \
-             split must assign every name to exactly one driver"
+             split must assign every surviving name to exactly one driver"
         );
     }
-    // The carve-out lists agree in both directions (also pinned inside the
-    // props driver; restated here as the system-level statement).
+    // The carve-outs, both kinds: the FTMS Z1 goes to FTMS alone; the
+    // app-cipher generation's names (the removed family) go nowhere.
     for excl in kingsmith_wilink::ADV_NAME_EXCLUDE_PREFIXES {
         let claimants = name_claimants(excl);
         assert!(
             !claimants.contains(&"kingsmith-wilink"),
             "WiLink still claims its own carve-out {excl:?}"
         );
-        assert!(
-            claimants.len() <= 1,
-            "carved-out name {excl:?} claimed by {claimants:?}"
-        );
+        if excl.starts_with("KS-HD-Z1D") {
+            assert_eq!(claimants, vec!["ftms"], "the Z1 is FTMS hardware");
+        } else {
+            assert!(
+                claimants.is_empty(),
+                "app-cipher carve-out {excl:?} claimed by {claimants:?} — the \
+                 removed generation must fall to no driver"
+            );
+        }
     }
 }

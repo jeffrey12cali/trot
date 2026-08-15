@@ -19,13 +19,13 @@
 - **Website:** [trot.puchalla.dev](https://trot.puchalla.dev)
 - **License:** GPLv3.
 - **Status:** early days — `v0.3` is a working CLI + daemon with native
-  adapters for LifeSpan, KingSmith WalkingPad (two generations), Urevo,
-  Sperax, PitPat/Deerrun and FitShow, plus generic FTMS for everything else
+  adapters for LifeSpan, KingSmith WalkingPad (WiLink), Urevo, Sperax and
+  PitPat/Deerrun, plus generic FTMS for everything else
   (see [Supported treadmills](#supported-treadmills)), with signed macOS
   builds and shell completions. Interfaces may still shift before 1.0.
 
 ## What it does
-- Device connectivity for under-desk treadmills — seven native protocol
+- Device connectivity for under-desk treadmills — five native protocol
   adapters plus generic FTMS, one self-contained file each (see
   [Supported treadmills](#supported-treadmills)).
 - Automatic session detection (starts when the belt moves, closes when it stops),
@@ -171,17 +171,10 @@ full-size treadmills alike. Three ways in:
   too, ported from the open-source reverse engineering (see
   [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)) and tested against
   published frame captures — not yet against real hardware, so reports welcome.
-  Newer WalkingPads that broadcast FTMS (e.g. the Z1) use the FTMS path below.
-- **WalkingPad\* / KingSmith (R2 / X21 / X23 / G1 / K12 Pro)** — the
-  app-cipher generation (`KS-X21…`, `KS-R1AC`, `KS-HC-R1A…`, `KS-NACH-…`,
-  `KS-NGCH-…`, and the Xiaomi\*-branded `KS-ST-K12PRO`) speaks an obfuscated
-  text protocol with a per-model transport cipher, and it reports steps, so
-  it gets a **native adapter** too, ported from open-source reverse
-  engineering (see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)) —
-  untested on real hardware. The cipher table is detected automatically
-  from the traffic (no setting to pick). One honest limit: the calorie
-  scale is documented but unverified, so if your console's calories
-  disagree with Trot's, send a capture.
+  Newer WalkingPads that broadcast FTMS (e.g. the Z1) use the FTMS path
+  below. The app-cipher generation (R2 / X21 / X23 / G1 / K12 Pro) is
+  **not supported** — a driver for it existed briefly and was deliberately
+  removed for licensing prudence.
 - **Urevo\* (E1L)** — the E1L broadcasts FTMS *and* a proprietary protocol, and
   only the proprietary one reports steps, so it gets a **native adapter**
   (ported from open-source reverse engineering, tested against published frame
@@ -199,19 +192,6 @@ full-size treadmills alike. Three ways in:
   open-source reverse engineering (see
   [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)) and tested against a
   published frame capture — not yet against real hardware, so reports welcome.
-- **FitShow\* (FS-…) / NoblePro\* / Tunturi\* T80** — the white-label FitShow
-  BLE module sits inside many rebadged treadmills (`FS-…` walking pads and
-  full-size units, NoblePro Connect, Tunturi T80, WinFita\* and others), and
-  its native protocol reports steps where FTMS cannot, so it gets a **native
-  adapter**, ported from open-source reverse engineering (see
-  [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)) — not tested by us on real
-  hardware. Two honest limits until someone sends a capture: the wire speed
-  unit is device-dependent and undeclared, so Trot assumes it from your
-  configured display unit (it logs the assumption when it connects — if speed
-  reads about 1.6× wrong, change the display unit); and distance and calories
-  are not reported at all, because no capture has pinned their wire scales
-  and a guess would be written into your permanent history. Newer FitShow
-  modules that broadcast FTMS use the FTMS path below.
 - **Standard FTMS\*** — any treadmill that broadcasts the standard Bluetooth
   **Fitness Machine Service** (FTMS, `0x1826`). Models *documented* to broadcast
   FTMS include Horizon\* AT-series, Technogym MyRun\*, BowFlex\* T9, 3G Cardio\*,
@@ -224,7 +204,11 @@ full-size treadmills alike. Three ways in:
   there too. (Only LifeSpan is tested by us on real hardware.)
 
 FTMS is per-model: if your treadmill has an "FTMS" or "broadcast to Zwift/Kinomap"
-mode, `trot scan` will find it. Closed ecosystems — **iFit** (NordicTrack\* /
+mode, `trot scan` will find it. The **FitShow\*** OEM family (the `FS-…` BLE
+module inside many rebadged treadmills) is **not supported natively** — a
+driver for it existed briefly and was deliberately removed for licensing
+prudence; FitShow-based units that broadcast FTMS still work via the FTMS
+path. Closed ecosystems — **iFit** (NordicTrack\* /
 ProForm\*), **Peloton\*** and **Echelon\*** — don't broadcast their data, so no
 third-party tool can read them.
 
@@ -258,8 +242,8 @@ on stop** (Ctrl-C or SIGTERM), so the belt's Bluetooth link isn't left open.
 Cargo.toml               # workspace
 crates/
   trot-core/             # engine library: ble · drivers (lifespan · kingsmith_wilink
-                         # · kingsmith_props · urevo · sperax · pitpat · fitshow
-                         # · ftms) · telemetry · db · state · api · config
+                         # · urevo · sperax · pitpat · ftms) · telemetry · db
+                         # · state · api · config
   trot-daemon/           # the `trot` binary: `daemon` serves /api + /ws; the other
                          # subcommands (scan/pair/today/…) drive it over that API
 ```
@@ -327,9 +311,9 @@ with, endorsed by, or sponsored by** any treadmill manufacturer, and it only rea
 data your treadmill already broadcasts over Bluetooth.
 
 LifeSpan, Horizon, BowFlex, Technogym, Matrix, 3G Cardio, WalkingPad / KingSmith,
-Xiaomi, Urevo, Merach, Sunny Health & Fitness, CitySports, WellFit, Mobvoi, Sportstech,
-YPOO, TheRun, Sperax, PitPat, Deerrun, SupeRun, FitShow, NoblePro, Tunturi,
-WinFita, Anplus, Focus Fitness, VirtuFit, Woodway, NordicTrack, ProForm, Peloton and
+Urevo, Merach, Sunny Health & Fitness, CitySports, WellFit, Mobvoi, Sportstech,
+YPOO, TheRun, Sperax, PitPat, Deerrun, SupeRun, FitShow, Anplus, Focus Fitness,
+Woodway, NordicTrack, ProForm, Peloton and
 Echelon are trademarks or registered trademarks of their respective owners. The **Bluetooth®** word mark and logos are registered
 trademarks owned by Bluetooth SIG, Inc. All other product and company names are the
 property of their respective holders; their use here is for identification and

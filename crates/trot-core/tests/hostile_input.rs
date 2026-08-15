@@ -12,8 +12,7 @@
 //! assertion is that every call returns (Ok or Err, never a panic), which
 //! the test harness enforces by completing.
 
-use trot_core::drivers::util::FrameAssembler;
-use trot_core::drivers::{fitshow, ftms, kingsmith_props, kingsmith_wilink, lifespan};
+use trot_core::drivers::{ftms, kingsmith_wilink, lifespan};
 use trot_core::drivers::{pitpat, sperax, urevo};
 
 fn hx(s: &str) -> Vec<u8> {
@@ -54,12 +53,8 @@ fn valid_fixtures() -> Vec<Vec<u8>> {
             f[23] = 0xFA;
             f
         },
-        // FitShow: the hand-computed running status frame.
-        hx("02 51 03 0e 00 45 01 70 04 fd 00 6b 01 00 00 fb 03"),
         // FTMS machine status: target speed change.
         hx("05 90 01"),
-        // KingSmith props: an enciphered telemetry line (v1 table).
-        kingsmith_props::cipher_encode(0, b"props CurrentSpeed 3.5 RunningSteps 2211 runState 1"),
     ];
 
     // An FTMS Treadmill Data frame with the KingSmith extension (0x2484).
@@ -182,45 +177,6 @@ fn no_inbound_parser_panics_on_hostile_input() {
         let _ = pitpat::decode_notification(input, true);
         let _ = pitpat::decode_notification(input, false);
     }
-
-    // FitShow: envelope, and the status parse in both byte orders.
-    for input in &inputs {
-        let _ = fitshow::frame_payload(input);
-        let _ = fitshow::parse_status(input);
-        let _ = fitshow::parse_status_with_order(input, fitshow::ByteOrder::AnyRun);
-    }
-
-    // KingSmith props: the cipher across all seven tables, the base64 layer,
-    // and the cross-frame table detector — one persistent detector fed the
-    // whole corpus (state carries across frames, so a hostile stream must
-    // not wedge it), plus a fresh one per input (first-contact corruption).
-    let mut persistent = kingsmith_props::TableDetector::new();
-    for input in &inputs {
-        for table in 0..kingsmith_props::TABLE_COUNT {
-            let _ = kingsmith_props::cipher_decode(table, input);
-        }
-        let _ = kingsmith_props::base64_decode(input);
-        let _ = persistent.observe(input);
-        let _ = kingsmith_props::TableDetector::new().observe(input);
-        // The text layer: whatever the bytes decode to must parse safely.
-        let text = String::from_utf8_lossy(input);
-        let _ = kingsmith_props::parse_props(&text);
-    }
-    assert!(
-        persistent.alive_count() >= 1,
-        "a hostile stream must never eliminate every cipher-table candidate"
-    );
-
-    // Frame reassembly: the shared assembler must bound its buffer whatever
-    // arrives (a stream with no terminator must not grow memory forever).
-    let mut asm = FrameAssembler::new(0x0D);
-    for input in &inputs {
-        let _ = asm.push(input);
-        assert!(
-            asm.pending() <= 1024,
-            "assembler buffer exceeded its cap on hostile input"
-        );
-    }
 }
 
 /// A valid frame with exactly one byte flipped must never decode as if it
@@ -267,17 +223,6 @@ fn single_byte_corruption_never_yields_the_original_values() {
         assert!(
             pitpat::parse_status(&m).is_err(),
             "pitpat accepted a corrupted frame (flip at {i})"
-        );
-    }
-
-    // FitShow: XOR trailer between header and footer.
-    let fs = hx("02 51 03 0e 00 45 01 70 04 fd 00 6b 01 00 00 fb 03");
-    for i in 0..fs.len() {
-        let mut m = fs.clone();
-        m[i] ^= 0x01;
-        assert!(
-            fitshow::parse_status(&m).is_err(),
-            "fitshow accepted a corrupted frame (flip at {i})"
         );
     }
 }

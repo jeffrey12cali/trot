@@ -67,6 +67,37 @@ nothing in this file is an audit in the professional sense.
 > no upstream counterpart. A third public implementation (Kotlin, unlicensed)
 > was identified and deliberately not consulted, per §6's guardrails.
 
+> **Addendum 2026-08-15 — the two highest-risk families were removed.**
+> `fitshow.rs` and `kingsmith_props.rs` were deleted from the tree entirely
+> (drivers, registry entries, tests, fixtures, dedicated `util.rs` plumbing,
+> notices and provenance rows), as a prudence decision ahead of publication —
+> not because any review found infringement (four similarity rounds were
+> clean; see `docs/provenance.md`). What this eliminates, plainly:
+>
+> 1. **The unlicensed-OEM-document exposure is gone.** The FitShow family
+>    was the only place in the tree whose protocol record partly traced to
+>    the unlicensed, apparently leaked FitShow OEM specification — the one
+>    item carrying both §6's all-rights-reserved question and the
+>    GeschGehG § 4(3) third-party trade-secret question flagged in §10.5.
+>    Nothing derived from that document remains anywhere in the tree.
+> 2. **The AGPL-3.0 source is gone.** milltender was the tree's sole AGPL
+>    input; §5's analysis and §10.1's localhost-network question are now
+>    moot not merely because "no code was taken" but because nothing taken
+>    from it remains at all.
+> 3. **The KingSmith cipher tables are gone.** They were very likely
+>    unprotectable functional data (§3), but they were the most
+>    creative-looking, manufacturer-originated artifact in the tree — the
+>    item a manufacturer's counsel would reach for first — and their removal
+>    also retires the compilation-argument residue their name list carried.
+>
+> Everything that survives is backed exclusively by GPL / MIT / Unlicense /
+> Apache-2.0 sources plus the Bluetooth SIG specification, all
+> licence-compatible with GPL-3.0-or-later, and was cleared by the four
+> similarity-review rounds recorded in `docs/provenance.md`. Sections below
+> that discuss FitShow, the app-cipher driver, milltender or the OEM
+> document describe the tree as it stood when this analysis was written;
+> they are retained as the record of the reasoning.
+
 > Every conclusion below is marked with a confidence level. Where something is
 > unsettled, it says so. Points that warrant a real lawyer are collected in
 > [§10](#10-what-i-could-not-determine--ask-a-lawyer-about-this). Read the
