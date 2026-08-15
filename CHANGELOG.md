@@ -2,6 +2,65 @@
 
 All notable changes to `trot` are documented here.
 
+## 0.3.5
+
+Four more treadmill protocols, a lot of correctness work behind them, and two
+protocols deliberately left out.
+
+### Added
+- **Native adapters for four more protocol families**, joining LifeSpan and
+  generic FTMS:
+  - **WalkingPad\* / KingSmith (WiLink)** — A1, A1 Pro, C2, R1 Pro, P1.
+  - **Urevo\* E1L** — the pad broadcasts FTMS too, but only its own protocol
+    reports steps.
+  - **Sperax\* RM01 / RM-02** — speed and steps; the protocol carries no
+    distance and Trot does not invent one.
+  - **PitPat\* / Deerrun\* / SupeRun\*** — the OEM protocol behind a long tail
+    of budget pads, across four different service layouts.
+  Only LifeSpan is tested on real hardware. The rest are written from published
+  reverse engineering and pinned against captured frames, so a report from a
+  real machine is the most useful thing you can send.
+- **Adding a treadmill is now one file plus a registration.** Device support is
+  a registry of drivers behind a trait; the engine, storage and API are
+  untouched by a new one. [docs/drivers/README.md](docs/drivers/README.md) is a
+  full guide for contributors.
+- `/api/state` gains `driver` (which adapter claimed your treadmill) and
+  `steps_supported` (`null` until step data is seen, then `true` — never
+  asserted false, because some devices legitimately report no steps for their
+  first poll cycles). `/api/diag` gains `rejected_samples`.
+- `trot --help` and the CLI are unchanged.
+
+### Fixed
+- **A device whose reported state alternated could open and close a session
+  every few frames**, each one forcing a full recompute of the day under the
+  database lock, and leaving session rows that survived restart and retention.
+  Session detection now debounces by *time* rather than by frame count, which is
+  correct across the ~20× spread in how often different protocols report.
+- **`0xFFF0` is not one protocol.** At least five vendors squat that service,
+  and one swaps the notify and write roles. Driver selection now verifies
+  characteristic roles and the advertised name, so a Urevo or Deerrun pad can no
+  longer be driven with LifeSpan opcodes. A role-checked fallback keeps working
+  for consoles whose name we don't recognise.
+- **Devices that report indications rather than notifications** are no longer
+  refused. This could have stopped a working treadmill from connecting after an
+  upgrade, with no way to tell it apart from a switched-off machine.
+- A malformed frame can no longer overflow the distance conversion, and counter
+  values are rate-gated before they reach storage.
+- The FTMS adapter was written from the specification and never tested against
+  hardware; it now handles the things real devices actually do — staggered
+  subscription, status notifications, and the KingSmith step extension behind a
+  device check.
+
+### Removed
+- **The FitShow and KingSmith app-cipher adapters**, deliberately, before their
+  first release. Both worked. Both rested on material this project would rather
+  not build on: FitShow's protocol partly traced to an unlicensed vendor
+  document, and the app-cipher adapter reproduced KingSmith's own obfuscation
+  tables. Every remaining adapter is built on openly licensed reverse
+  engineering, credited in
+  [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) and itemised in
+  [docs/provenance.md](docs/provenance.md).
+
 ## 0.3.4
 
 Documentation-only release: the engine is byte-for-byte the behaviour of 0.3.3.
