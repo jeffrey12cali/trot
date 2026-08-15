@@ -26,10 +26,10 @@ Four kinds of item are distinguished, because they are not the same thing:
   third-party vector, so the replacement is on record.
 
 A recurring pattern worth stating once: many items below **originate with the
-device manufacturer, not with the upstream project that published them**. The
-KingSmith cipher tables are KingSmith's, extracted from KingSmith's app;
-advertised names are chosen by manufacturers and broadcast by their firmware;
-captured frames are what a machine emitted. An upstream open-source licence
+device manufacturer, not with the upstream project that published them**.
+Advertised names are chosen by manufacturers and broadcast by their firmware;
+captured frames are what a machine emitted; UUIDs live in the device's
+firmware. An upstream open-source licence
 cannot grant rights in material its author did not create — which is why the
 primary basis for reproducing these items is their functional, interface
 nature, with the upstream licences as an additional basis for
@@ -37,15 +37,25 @@ upstream-authored expression only.
 
 ## The matrix
 
+> **Removed families (2026-08-15).** This matrix formerly carried two further
+> sections: **KingSmith app-cipher — `kingsmith_props.rs`** (the seven
+> KingSmith substitution-cipher tables, the `props` init/poll messages, the
+> `0x1234`/`FED7`/`FED8` address spaces and a 10-name advertised-name list)
+> and **FitShow — `fitshow.rs`** (the `02 51 51 03` poll, the
+> advertised-name matcher, the status-code table and synthetic
+> checksum/status fixtures). Both drivers were **removed deliberately**, not
+> for any established infringement but as a prudence decision ahead of
+> publication: the cipher tables are the most creative-looking third-party
+> artifact the tree carried and originate with the manufacturer, and part of
+> the FitShow protocol record traces to an unlicensed, apparently leaked OEM
+> specification — the one place in the tree with a colourable trade-secret
+> question (GeschGehG §4(3)) and the tree's sole AGPL-3.0 source. Removing
+> the two families removes every one of those items from the tree entirely;
+> the retired rows and their sources' notices remain in git history. See
+> also `docs/licensing-analysis.md` (2026-08-15 addendum).
+
 | Item | Source | Literal or derived | Functionally necessary? | Licence | Appears in source/tests | Notes |
 |---|---|---|---|---|---|---|
-| **KingSmith app-cipher — `kingsmith_props.rs`** | | | | | | |
-| Seven substitution-cipher tables v1–v7 (`CIPHER_TABLES`) | qdomyos-zwift `kingsmithr2treadmill.h` | Literal lookup tables | Yes — traffic cannot be decoded without them | GPL-3.0 (upstream); tables originate with **KingSmith** (extracted from KingSmith's app) | Source | qdomyos could not license these even if they were copyrightable; the basis for carrying them is their functional nature. Trot's table *detection* is an independent design with no upstream counterpart |
-| Base64 alphabet + `=` (`PLAINTEXT_TABLE`) | RFC 4648 standard order | Literal | Yes | Public standard | Source | Not upstream-authored |
-| Advertised-name list (10 `KS-…` prefixes) | qdomyos-zwift `bluetooth.cpp` | Literal device identifiers | Yes — the name gate is the device adjudication | GPL-3.0 (upstream); names originate with KingSmith/Xiaomi firmware | Source | |
-| Init/poll messages (`""`, `shake`, `net`, `get_dn`, `get_pk`, `version`, `servers getProp 1 2 7 12 23 24 31`) | qdomyos-zwift + walkingpad-ble-footpod | Literal frames | Yes — the device answers only these | GPL-3.0 (both) | Source + tests | Protocol-mandated commands; `time_posix` and all `props …` setters deliberately not implemented |
-| GATT address spaces (`0x1234`/`FED7`/`FED8` + two 128-bit variants) | qdomyos-zwift | Literal UUIDs | Yes | GPL-3.0 (upstream); UUIDs originate with KingSmith firmware | Source | |
-| All test fixtures in `kingsmith_props.rs` | Trot | **Synthetic** | — | — | Tests | No public capture of this protocol exists; every fixture is generated from the two licensed sources' shared facts and labelled synthetic |
 | **KingSmith WiLink — `kingsmith_wilink.rs`** | | | | | | |
 | Status query `F7 A2 00 00 A2 FD` | ph4-walkingpad (`ask_stats`), qdomyos-zwift, QWalkingPad | Literal frame (sent) | Yes — the poll the protocol answers | MIT / GPL-3.0 / GPL-3.0-or-later | Source + tests | Protocol-mandated |
 | Params query `F7 A6 00 00 00 00 00 A6 FD` | qdomyos-zwift (`initData3`), QWalkingPad (`queryParams`) | Literal frame (sent) | Yes | GPL-3.0 / GPL-3.0-or-later | Source + tests | One of two init frames provably queries; the `F7 A5 61 …` frames are deliberately absent from this tree |
@@ -69,12 +79,6 @@ upstream-authored expression only.
 | Two 23-byte actuation frames (upstream's stop and start) | qdomyos-zwift | Literal frames (checksum vectors only) | Test value — pin the XOR rule across the 23-byte family | GPL-3.0 | Tests only | **Never built into traffic**; the write-set test proves it |
 | 52-byte idle frame (`IDLE_CAPTURE`) | pitpat-treadmill-control (`treadmill_data.py` example payload) | Literal frame (device output) | Yes — the only published real capture of this protocol; the inbound-checksum decision rests on it | MIT | Tests | Machine output originates with the device |
 | Name prefix `PITPAT-T` | qdomyos-zwift matcher | Literal device identifier | Yes | GPL-3.0 (upstream); name originates with the OEM | Source | `PITPAT-S*` (the bike) deliberately excluded |
-| **FitShow — `fitshow.rs`** | | | | | | |
-| Status query `02 51 51 03` | qdomyos-zwift; verified on hardware by milltender | Literal frame (sent) | Yes — the only frame this driver writes | GPL-3.0 / AGPL-3.0 (as sources of the *finding*; the frame is dictated by the device) | Source + tests | Protocol-mandated: one byte of command, checksum forced by the rule |
-| Advertised-name matcher (`FS-`, `TR510-T`, `TUNTURI T80-`; `NOBLEPRO CONNECT`, `WINFITA`, `SW-BLE`, `BF70`; `FS-YK-` exclude; the 14-char `SW` rule) | qdomyos-zwift `bluetooth.cpp` | Literal device identifiers + a matching rule | Yes — the name gate is the whole adjudication on the contested `FFF0` block | GPL-3.0 (upstream); names originate with manufacturers | Source | |
-| Status-code table (`0x00`–`0x0A` constants) | qdomyos-zwift; confirmed against the OEM spec | Literal opcodes | Yes | GPL-3.0 (upstream); codes originate with FitShow firmware | Source | |
-| Checksum/framing vectors (5 frames incl. two control-family shapes) | Trot (2026-08-10) | **Synthetic** — trailers hand-computed | — | — | Tests | Replaced former third-party vectors: two OEM-spec worked examples (unlicensed document), milltender's stop command (AGPL-3.0) and qdomyos' user-data login (GPL-3.0). None of those four frames appears anywhere in this tree any more |
-| Status fixtures (`build_status_frame` + hand-computed pin) | Trot | **Synthetic** | — | — | Tests | No public real capture of an inbound FitShow status frame exists; fixtures are built to the field map the three sources agree on, and labelled synthetic |
 | **FTMS — `ftms.rs`** | | | | | | |
 | Advertised-name list (18 prefixes: `URTM`, `MRK-T`, `SF-T`, `CITYSPORTS-LINKER`, `WELLFIT TM`, `MOBVOI …`, `SWALK LITE-`, `ANPLUS-`/`ANPIUS-`, `YPOO-MINI PRO-`, `THERUN  T15`, `FOCUS M3`, `KS-…`, `SPERAX_RM-01`) | qdomyos-zwift `bluetooth.cpp` | Literal device identifiers | Yes — routes real hardware to the right driver | GPL-3.0 (upstream); names originate with ~15 manufacturers | Source | The *selection* is the one item in Trot with a colourable compilation argument — see `licensing-analysis.md` §3.5. Selection criterion is purely functional (does the device speak FTMS?) |
 | KingSmith family gate (`is_kingsmith_name` list) | qdomyos-zwift + walkingpad-controller captures | Literal device identifiers | Yes — gates the non-SIG bit-13 step extension | GPL-3.0 / MIT | Source | |
@@ -84,9 +88,9 @@ upstream-authored expression only.
 | A1 opcode map (`0x82`–`0x91`), frame format | The author's own `lifespan_sc110` (relicensed by its sole copyright holder); bootstrapped from and cross-checked against treadspan | Literal opcodes | Yes | Owner's own work under GPL-3.0-or-later; treadspan MIT | Source + tests | Not a third-party dependency — see the module header |
 | Name prefixes `LifeSpan`, `ESP32` | Own hardware observation | Literal device identifiers | Yes | — | Source | |
 | **Cross-cutting** | | | | | | |
-| 16-bit GATT service/characteristic UUIDs (`FFF0`, `FE00`, `FBA0`, `AE00`, `FFE0`, `1826`, `2ACD`, `2ADA`, …) | Device firmware, via all sources | Literal UUIDs | Yes | Facts about the hardware / Bluetooth SIG assignments | Source | |
+| 16-bit GATT service/characteristic UUIDs (`FFF0`, `FE00`, `FBA0`, `1826`, `2ACD`, `2ADA`, …) | Device firmware, via all sources | Literal UUIDs | Yes | Facts about the hardware / Bluetooth SIG assignments | Source | |
 | Sperax inbound field geometry (steps at 15, speed at `len-7`) | qdomyos-zwift | Derived — behavioural | Yes, for parity with the only hardware-verified reader | GPL-3.0 | Source | Deliberately follows upstream's raw-wire offsets although this module documents the wire as escaped. **Not protocol-mandated** — disclosed in the module header and in licensing-analysis.md §8.2 |
-| Six quoted upstream comment/expression fragments | qdomyos-zwift (4) · ph4-walkingpad (1) · QWalkingPad (1) | Literal (prose) | No — quoted for criticism | GPL-3.0 | Source comments | Never executed; each quoted to explain a deliberate divergence |
+| Three quoted upstream comment/expression fragments | qdomyos-zwift (1) · ph4-walkingpad (1) · QWalkingPad (1) | Literal (prose) | No — quoted for criticism | GPL-3.0 / MIT | Source comments | Never executed; each quoted to explain a deliberate divergence. (Three further quotes left the tree with the removed drivers, 2026-08-15) |
 | `1910` / `2B10` / `2B11` transport triple, with roles | pacekeeper `src/platform.h` GATT-dump comment | Literal UUIDs + role assignment read off the dump's `[read,notify]` / `[read,write…]` annotations | Speculative — no implementation drives the protocol over it | GPL-3.0 (dump); UUIDs originate with the device firmware | Source | Probed last as unverified. qdomyos knows `1910` only as a fallback *unlock* service and never mentions `2B10` |
 
 ## What is deliberately absent
@@ -95,25 +99,29 @@ For completeness, upstream material that is **not** in this tree, by policy:
 
 - Every upstream belt-control path (speed/start/stop/incline frames, Control
   Point writes, unlock preambles beyond the checksum vectors listed above).
-- qdomyos-zwift's WiLink `F7 A5 61 …` init frames, its FitShow login and
-  clock-carrying queries, its Sperax cmd 0x13 as *traffic* (vector only), the
-  KingSmith `time_posix` clock write.
-- The FitShow OEM protocol document (unlicensed): not vendored, no text or
-  frame from it reproduced (its two worked examples were removed from the
-  tests on 2026-08-10 and replaced with synthetic vectors).
+- qdomyos-zwift's WiLink `F7 A5 61 …` init frames and its Sperax cmd 0x13 as
+  *traffic* (vector only).
+- **The entire FitShow protocol family and the entire KingSmith app-cipher
+  family** — drivers, name lists, cipher tables, fixtures and all — removed
+  deliberately on 2026-08-15 (see the note above the matrix). In
+  particular, nothing whose knowledge traces to the unlicensed FitShow OEM
+  protocol document remains anywhere in the tree (the document itself was
+  never vendored, and its two worked examples had already been replaced
+  with synthetic vectors on 2026-08-10 before the family was removed
+  outright).
 - Anything from the unlicensed Kotlin KingSmith client and from
   `duhow/ftms-bridge` (never consulted / verified unused).
 - Upstream implementation structure, throughout — and upstream prose, with
-  three disclosed exceptions. Six short fragments are quoted *critically* in
+  three disclosed exceptions, quoted *critically* in
   code comments, each in order to explain why Trot does something different:
-  qdomyos-zwift's "the treadmill send the speed in miles always" and its `SW`
-  name-matching expression (both `fitshow.rs`), an "update each 10 m /
-  0.01 mile" comment (`kingsmith_props.rs`), and its speed-offset expression
+  qdomyos-zwift's speed-offset expression
   `17 + (len - 24)` (`sperax.rs`, quoted to explain why our constant is 7);
   ph4-walkingpad's `fix_crc` body `cmd[-2] = sum(cmd[1:-2]) % 256` (MIT,
   `kingsmith_wilink.rs`); and QWalkingPad's `padRunning = s != 0 && s != 5`
   (GPL-3.0, `kingsmith_wilink.rs`, quoted because we adopt the predicate whole). All GPL-3.0 into
-  GPL-3.0-or-later, de minimis, quoted with attribution, never executed.
+  GPL-3.0-or-later (ph4's MIT likewise), de minimis, quoted with
+  attribution, never executed. (Three further quoted fragments left the
+  tree with the removed drivers.)
 
 > **FTMS name-list ordering check (2026-08-11):** 0/18 positional matches against qdomyos-zwift `bluetooth.cpp`, LCS 7/18. Arrangement independent; membership functionally determined.
 
@@ -213,3 +221,22 @@ never fetched, so `kingsmith_props.rs`'s attributions to qdomyos for the
 than on a reading (footpod independently corroborates the `Error` rule); and the
 FTMS spec itself is not in the file set, so spec-mandate claims rest on internal
 consistency plus pyftms's independent agreement.
+
+- **2026-08-15 — the two highest-risk families removed.** `fitshow.rs` and
+  `kingsmith_props.rs` were deleted outright, with their registry entries,
+  tests, fixtures, `util.rs` plumbing (`FrameAssembler`, `TransportCodec` /
+  `IdentityCodec` — no surviving consumer) and their matrix rows above. Not
+  a remediation of any finding — all four review rounds stand, and the
+  similarity record above was clean at removal time — but a prudence
+  decision ahead of publication: it takes the KingSmith cipher tables (the
+  most creative-looking manufacturer-originated artifact in the tree), the
+  unlicensed-OEM-document lineage with its GeschGehG §4(3) trade-secret
+  question, and the tree's only AGPL-3.0 source out of the tree entirely.
+  The notices for `sstjohn/milltender`, `aradix85/fitshow-treadmill-accessible`
+  and `LucasFrendorf/walkingpad-ble-footpod` were retired with them
+  (verified: no other driver uses those sources); qdomyos-zwift's notice
+  lost its FitShow and app-cipher paragraphs but remains for the four
+  surviving consumers (WiLink, FTMS, Sperax, PitPat). `kingsmith_wilink.rs` **keeps** its app-cipher
+  name carve-outs — a WiLink driver must still never poll an app-cipher
+  pad — so those devices now fall to no driver at all, which
+  `tests/driver_matrix.rs` pins.

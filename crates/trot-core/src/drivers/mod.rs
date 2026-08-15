@@ -22,9 +22,7 @@
 
 #[cfg(test)]
 mod cross_driver;
-pub mod fitshow;
 pub mod ftms;
-pub mod kingsmith_props;
 pub mod kingsmith_wilink;
 pub mod lifespan;
 pub mod pitpat;
@@ -48,15 +46,10 @@ use uuid::Uuid;
 ///   consoles expose their native service alongside whatever else they
 ///   advertise, and the native protocol reports steps where FTMS cannot.
 /// * `KingSmithWiLink` matches strictly too (recognised or absent name AND
-///   the FE01-notify/FE02-write roles, with the known FTMS/app-cipher
-///   KingSmith models carved out by name) and outranks FTMS for the same
-///   reason: the native protocol reports steps.
-/// * `KingSmithProps` is the app-cipher KingSmith generation (R2/X21/X23/
-///   G1/K12 Pro) on its own obfuscated text transport — service x1234 with
-///   FED8-notify/FED7-write in one of three UUID address spaces. Its name
-///   list is the exact complement of WiLink's carve-outs (a test in the
-///   driver pins the boundary both ways), and its transport collides with
-///   nothing else in the tree.
+///   the FE01-notify/FE02-write roles, with the known FTMS and app-cipher
+///   KingSmith models carved out by name — the app-cipher generation is
+///   deliberately unsupported, so its carve-outs fall to no driver) and
+///   outranks FTMS for the same reason: the native protocol reports steps.
 /// * `Urevo` and `Sperax` both live on the contested `0xFFF0` block with
 ///   LifeSpan-shaped roles, so they require a recognised advertised name
 ///   (`URTM041…` / `SPERAX_RM01…`, `SPERAX_RM-02…`) on top of the roles.
@@ -69,15 +62,6 @@ use uuid::Uuid;
 ///   of its four verified transport layouts — including the Deerrun variant
 ///   on 0xFFF0 with the notify/write roles SWAPPED relative to LifeSpan,
 ///   which the role checks keep out of every LifeSpan entry.
-/// * `FitShow` (the white-label OEM platform behind `FS-…`, NoblePro,
-///   Tunturi T80 and friends) requires a recognised name plus one of its
-///   three role-verified transports — including the contested `0xFFF0`
-///   block with LifeSpan's EXACT role arrangement, which is why its name
-///   gate (like Urevo's and Sperax's) is the whole adjudication there. For
-///   the names qdomyos routes to FTMS when FTMS is present (NoblePro,
-///   WinFita, `SW…`, BF70), `supports()` steps aside the moment the table
-///   carries Treadmill Data; the `FS-`/TR510/Tunturi-T80 core keeps the
-///   native protocol even alongside FTMS because it reports steps.
 /// * `Ftms` requires the standard Treadmill Data characteristic.
 /// * `LifeSpanFallback` is the deliberate last resort: a device nobody else
 ///   claimed, whose `FFF1`/`FFF2` roles are exactly LifeSpan-shaped, is
@@ -92,11 +76,9 @@ use uuid::Uuid;
 pub static DRIVERS: &[&dyn Driver] = &[
     &lifespan::LifeSpan,
     &kingsmith_wilink::KingSmithWiLink,
-    &kingsmith_props::KingSmithProps,
     &urevo::Urevo,
     &sperax::Sperax,
     &pitpat::PitPat,
-    &fitshow::FitShow,
     &ftms::Ftms,
     &lifespan::LifeSpanFallback,
 ];
@@ -211,8 +193,8 @@ pub enum BeltState {
     ///    bytes, because for that console the bytes ARE the contract's codes
     ///    and changing the mapping would move bytes on the wire for real
     ///    devices. Prefer a named state where your protocol's evidence
-    ///    allows one (WiLink and FitShow both map known wire values away
-    ///    from the colliding codes for exactly this reason).
+    ///    allows one (WiLink maps known wire values away from the
+    ///    colliding codes for exactly this reason).
     /// 2. **`Other` never opens or closes a session.** `Telemetry::
     ///    is_running` derives from `state == Running`, not from the status
     ///    byte, so an unknown byte that happens to be `0x03` presents as
@@ -349,12 +331,12 @@ mod tests {
         assert!(any_match(&adv("", &[0x1826])));
         assert!(any_match(&adv("WalkingPad A1", &[])));
         assert!(any_match(&adv("", &[0xfe00])));
-        // The app-cipher KingSmith generation: by name or its 0x1234
-        // service (the two 128-bit address-space variants are covered in
-        // the driver's own tests).
-        assert!(any_match(&adv("KS-X21C-1234", &[])));
-        assert!(any_match(&adv("KS-NGCH-G1C", &[])));
-        assert!(any_match(&adv("", &[0x1234])));
+        // The app-cipher KingSmith generation (X21/X23/G1/K12 Pro) is
+        // deliberately unsupported — its driver was removed — so neither
+        // its names nor its 0x1234 service surface in a scan.
+        assert!(!any_match(&adv("KS-X21C-1234", &[])));
+        assert!(!any_match(&adv("KS-NGCH-G1C", &[])));
+        assert!(!any_match(&adv("", &[0x1234])));
         // FTMS walking pads that advertise a known name without 0x1826.
         assert!(any_match(&adv("URTM024", &[])));
         assert!(any_match(&adv("KS-MC21-D06BFD", &[])));
@@ -372,19 +354,13 @@ mod tests {
             !any_match(&adv("PITPAT-S1", &[])),
             "PITPAT-S is the PitPat bike — Trot reads treadmills only"
         );
-        // The FitShow OEM family: by name only (its three service blocks
-        // are all generic or contested).
-        assert!(any_match(&adv("FS-3D6CD7", &[])));
-        assert!(any_match(&adv("NOBLEPRO CONNECT 1", &[])));
-        assert!(any_match(&adv("TUNTURI T80-2", &[])));
-        assert!(
-            !any_match(&adv("TUNTURI T90-2", &[])),
-            "the T60/T90 are plain FTMS and surface via 0x1826, not by name"
-        );
-        assert!(
-            !any_match(&adv("FS-YK-100", &[])),
-            "FS-YK is a FitShow-named exercise BIKE — Trot reads treadmills only"
-        );
+        // The FitShow OEM family is deliberately unsupported — its driver
+        // was removed — so its names no longer surface in a scan. FitShow
+        // units that broadcast standard FTMS still surface via 0x1826.
+        assert!(!any_match(&adv("FS-3D6CD7", &[])));
+        assert!(!any_match(&adv("NOBLEPRO CONNECT 1", &[])));
+        assert!(!any_match(&adv("TUNTURI T80-2", &[])));
+        assert!(any_match(&adv("NOBLEPRO CONNECT 1", &[0x1826])));
         assert!(!any_match(&adv("Some Headphones", &[0x180f])));
         assert!(!any_match(&adv("", &[])));
     }
@@ -570,113 +546,78 @@ mod tests {
         assert!(for_device(&adv("PITPAT-S1", &[]), &gatt(&[(0xfba1, W), (0xfba2, N)])).is_none());
     }
 
-    /// The FitShow adjudication on the contested 0xFFF0 block — the hardest
-    /// case yet, because FitShow's FFF0 arrangement is byte-identical to
-    /// LifeSpan's (notify FFF1, write FFF2): role checks cannot tell them
-    /// apart, so the advertised name carries the whole decision. A
-    /// FitShow-named device must land on the FitShow driver and never on a
-    /// LifeSpan entry; a LifeSpan console must never reach FitShow; a
-    /// nameless device stays with the deliberate fallback. Plus both
-    /// directions of the FTMS split qdomyos ships for this family.
+    /// The removed FitShow family (the driver was dropped deliberately —
+    /// see docs/provenance.md): its names must now fall through the
+    /// registry the same way any unrecognised name does, never to a
+    /// mis-decode. On the contested 0xFFF0 block with LifeSpan-shaped
+    /// roles that means the deliberate fallback (the benign
+    /// unanswered-polls failure); with real FTMS present, FTMS wins; on
+    /// the family's vendor-only AE00/FFE0 tables, no driver at all.
     #[test]
-    fn the_fitshow_family_adjudication_across_transports_and_ftms() {
+    fn removed_fitshow_names_fall_through_to_ftms_or_nothing() {
         let lifespan_shape = gatt(&[(0xfff1, N), (0xfff2, W)]);
 
-        // Every FitShow transport, by name: FFF0 (LifeSpan-shaped), AE00,
-        // and FFE0 (whose notify characteristic is FFE4, not FFE1).
+        // FFF0 with LifeSpan roles: exactly the unrecognised-name path.
+        assert_eq!(
+            for_device(&adv("FS-3D6CD7", &[]), &lifespan_shape).map(|d| d.id()),
+            Some("lifespan-fallback")
+        );
+        // Real FTMS alongside: FTMS claims it (steps no longer beat FTMS —
+        // there is no native driver to report them).
+        let fff0_with_ftms = gatt(&[(0xfff1, N), (0xfff2, W), (0x2acd, N)]);
+        assert_eq!(
+            for_device(&adv("TUNTURI T80-1", &[]), &fff0_with_ftms).map(|d| d.id()),
+            Some("ftms")
+        );
+        assert_eq!(
+            for_device(&adv("FS-3D6CD7", &[]), &fff0_with_ftms).map(|d| d.id()),
+            Some("ftms")
+        );
+        assert_eq!(
+            for_device(
+                &adv("NOBLEPRO CONNECT 1", &[]),
+                &gatt(&[(0xae02, N), (0xae01, W), (0x2acd, N)])
+            )
+            .map(|d| d.id()),
+            Some("ftms"),
+            "a NoblePro exposing FTMS still works, via the FTMS driver"
+        );
+        // The vendor-only tables nobody claims any more.
         for (label, shape) in [
-            ("FFF0", gatt(&[(0xfff1, N), (0xfff2, W)])),
             ("AE00", gatt(&[(0xae02, N), (0xae01, W)])),
             (
                 "FFE0",
                 gatt(&[(0xffe4, N), (0xffe1, CharPropFlags::WRITE_WITHOUT_RESPONSE)]),
             ),
         ] {
-            assert_eq!(
-                for_device(&adv("FS-3D6CD7", &[]), &shape).map(|d| d.id()),
-                Some("fitshow"),
+            assert!(
+                for_device(&adv("FS-3D6CD7", &[]), &shape).is_none(),
                 "{label}"
             );
         }
-
-        // The 0xFFF0 name adjudication, all three ways.
-        assert_eq!(
-            for_device(&adv("LifeSpan-TM", &[]), &lifespan_shape).map(|d| d.id()),
-            Some("lifespan"),
-            "a LifeSpan console never reaches FitShow"
-        );
-        assert_eq!(
-            for_device(&adv("", &[]), &lifespan_shape).map(|d| d.id()),
-            Some("lifespan-fallback"),
-            "nameless FFF1/FFF2 stays with the deliberate fallback"
-        );
-        assert_eq!(
-            for_device(&adv("FS-3D6CD7", &[]), &lifespan_shape).map(|d| d.id()),
-            Some("fitshow"),
-            "a FitShow name claims the shape before the fallback"
-        );
-
-        // The FTMS split, both directions. The FS-/TR510/Tunturi-T80 core
-        // keeps the native protocol even alongside real FTMS (it reports
-        // steps); the FTMS-preferred names (NoblePro, WinFita, SW…, BF70)
-        // yield to FTMS the moment Treadmill Data is present.
-        let fff0_with_ftms = gatt(&[(0xfff1, N), (0xfff2, W), (0x2acd, N)]);
-        let ae00_with_ftms = gatt(&[(0xae02, N), (0xae01, W), (0x2acd, N)]);
-        assert_eq!(
-            for_device(&adv("TUNTURI T80-1", &[]), &fff0_with_ftms).map(|d| d.id()),
-            Some("fitshow")
-        );
-        assert_eq!(
-            for_device(&adv("FS-3D6CD7", &[]), &fff0_with_ftms).map(|d| d.id()),
-            Some("fitshow")
-        );
-        assert_eq!(
-            for_device(&adv("NOBLEPRO CONNECT 1", &[]), &ae00_with_ftms).map(|d| d.id()),
-            Some("ftms"),
-            "qdomyos routes a NoblePro with FTMS to FTMS; so do we"
-        );
-        assert_eq!(
-            for_device(
-                &adv("NOBLEPRO CONNECT 1", &[]),
-                &gatt(&[(0xae02, N), (0xae01, W)])
-            )
-            .map(|d| d.id()),
-            Some("fitshow"),
-            "…and to FitShow without it"
-        );
-
         // A modern FS-BT-C1 module: plain FTMS, vendor FFF1 notify-only
-        // (no FFF2 write role) — the role check refuses the vendor block
-        // and the device lands on FTMS.
+        // (no FFF2 write role) — the role check refuses the fallback and
+        // the device lands on FTMS, exactly as before.
         assert_eq!(
             for_device(&adv("FS-AB12CD", &[]), &gatt(&[(0xfff1, N), (0x2acd, N)])).map(|d| d.id()),
             Some("ftms")
         );
-
-        // The Deerrun-swapped FFF0 roles with a FitShow name: no driver —
-        // that table is neither FitShow nor LifeSpan, whatever the name
-        // says, and mis-claiming the contested block is the failure this
-        // registry is built to prevent.
+        // Deerrun-swapped FFF0 roles: still no driver, whatever the name.
         assert!(for_device(
             &adv("FS-3D6CD7", &[]),
             &gatt(&[(0xfff1, CharPropFlags::WRITE_WITHOUT_RESPONSE), (0xfff2, N)])
         )
         .is_none());
-
-        // The FitShow-named exercise bike: no driver even on a
-        // FitShow-shaped table — Trot reads treadmills only.
-        assert!(for_device(&adv("FS-YK-100", &[]), &gatt(&[(0xae02, N), (0xae01, W)])).is_none());
     }
 
-    /// The two native KingSmith generations, adjudicated: an app-cipher
-    /// name on the props transport lands on the props driver; the same
-    /// name on a WiLink-shaped table reaches NEITHER native driver (the
-    /// name is carved out of WiLink, and the table isn't the props
-    /// layout); a WiLink name never reaches the props driver. The props
-    /// transport requires characteristics under their own service, so the
-    /// test builds the table with real service UUIDs.
+    /// The removed app-cipher KingSmith generation (the driver was dropped
+    /// deliberately — see docs/provenance.md): WiLink's carve-outs still
+    /// hold, because a WiLink driver must never poll an app-cipher pad —
+    /// those names now fall to NO driver rather than to a sibling. The
+    /// distinctive props transport (FED8/FED7 under service 0x1234) is
+    /// likewise unclaimed, named or nameless.
     #[test]
-    fn the_two_kingsmith_generations_never_cross_claim() {
+    fn removed_app_cipher_kingsmith_devices_get_no_driver() {
         let props_shape: BTreeSet<Characteristic> = [
             Characteristic {
                 uuid: sig_uuid(0xfed8),
@@ -694,21 +635,16 @@ mod tests {
         .into();
         let wilink_shape = gatt(&[(0xfe01, N), (0xfe02, W)]);
 
-        assert_eq!(
-            for_device(&adv("KS-NGCH-G1C", &[]), &props_shape).map(|d| d.id()),
-            Some("kingsmith-props")
-        );
-        assert_eq!(
-            for_device(&adv("", &[]), &props_shape).map(|d| d.id()),
-            Some("kingsmith-props"),
-            "nameless on the distinctive props layout stays connectable"
-        );
-        // An app-cipher name on WiLink's table: no native driver — the
-        // WiLink carve-out refuses the name, the props driver refuses the
-        // table, and polling either protocol at the other would garble.
+        // The app-cipher transport is unclaimed — polling any surviving
+        // protocol at it would garble.
+        assert!(for_device(&adv("KS-NGCH-G1C", &[]), &props_shape).is_none());
+        assert!(for_device(&adv("", &[]), &props_shape).is_none());
+        // An app-cipher name on WiLink's table: the carve-out still
+        // refuses it (kingsmith_wilink::ADV_NAME_EXCLUDE_PREFIXES), so it
+        // reaches no driver instead of being mis-driven as WiLink.
         assert!(for_device(&adv("KS-HDSY-X21C", &[]), &wilink_shape).is_none());
-        // A WiLink pad never reaches the props driver, with or without
-        // the props service present in the advertisement.
+        assert!(for_device(&adv("KS-HC-R1AA", &[]), &wilink_shape).is_none());
+        // A real WiLink pad is untouched by the removal.
         assert_eq!(
             for_device(&adv("WalkingPad A1", &[]), &wilink_shape).map(|d| d.id()),
             Some("kingsmith-wilink")
@@ -800,11 +736,9 @@ mod tests {
             vec![
                 "lifespan",
                 "kingsmith-wilink",
-                "kingsmith-props",
                 "urevo",
                 "sperax",
                 "pitpat",
-                "fitshow",
                 "ftms",
                 "lifespan-fallback"
             ]

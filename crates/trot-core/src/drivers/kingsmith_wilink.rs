@@ -103,11 +103,15 @@ pub const ADV_NAME_EXACT: &[&str] = &["RE"];
 ///   qdomyos-zwift carves it out explicitly and routes it to FTMS.
 /// * `KS-HC-R1A…`, `KS-HDSC-X21C`, `KS-HDSY-X21C` — the "R2" app-cipher
 ///   generation (base64 + substitution-cipher transport on service 0x1234),
-///   a different protocol qdomyos serves with a separate driver.
+///   a different protocol. Trot **deliberately does not support** that
+///   generation (its driver was removed — see docs/provenance.md), but the
+///   carve-outs stay: a WiLink driver must still never poll an app-cipher
+///   pad, so these names now fall through to **no driver** rather than to a
+///   sibling.
 ///
-/// The other R2/FTMS carve-outs in qdomyos (`KS-ST-K12PRO`, `KS-X21`,
-/// `KS-NACH-…`, `KS-NGCH-…`, `KS-NG-`, `KS-AP-`, `KS-MC`) don't collide with
-/// any prefix above and need no entry here.
+/// The other app-cipher/FTMS carve-outs in qdomyos (`KS-ST-K12PRO`,
+/// `KS-X21`, `KS-NACH-…`, `KS-NGCH-…`, `KS-NG-`, `KS-AP-`, `KS-MC`) don't
+/// collide with any prefix above and need no entry here.
 pub const ADV_NAME_EXCLUDE_PREFIXES: &[&str] =
     &["KS-HD-Z1D", "KS-HC-R1A", "KS-HDSC-X21C", "KS-HDSY-X21C"];
 
@@ -296,9 +300,9 @@ pub fn parse_status(frame: &[u8]) -> Result<Status, ProtocolError> {
 /// Running" is justified here *only* by an upstream predicate tested on real
 /// hardware. For a protocol without that evidence, unknown-⇒-`Running` is
 /// strictly worse than unknown-⇒-`Other`: it would open sessions (and accrue
-/// walking time) on bytes nobody has ever observed. Urevo, PitPat, FitShow
-/// and props all correctly map unknown bytes to `Other` — the divergence is
-/// deliberate, per-protocol, evidence-driven.
+/// walking time) on bytes nobody has ever observed. Urevo and PitPat both
+/// correctly map unknown bytes to `Other` — the divergence is deliberate,
+/// per-protocol, evidence-driven.
 pub(crate) fn belt_state(v: u8) -> BeltState {
     match v {
         0 | 5 => BeltState::Standby, // 5 = asleep / locked — not running

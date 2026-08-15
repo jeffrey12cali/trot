@@ -4,8 +4,8 @@ Trot is licensed under **GPL-3.0-or-later**.
 
 **Trot is an independent Rust implementation of the cited treadmill
 protocols. It reproduces functional protocol data where necessary for
-interoperability and testing — UUIDs, opcodes, device identifiers, cipher and
-lookup tables, command bytes, and selected packet captures or test vectors.
+interoperability and testing — UUIDs, opcodes, device identifiers,
+command bytes, and selected packet captures or test vectors.
 The provenance of those items is recorded below, and item by item in
 [`docs/provenance.md`](docs/provenance.md). No upstream implementation
 routines or prose are intended to be incorporated. To the extent any
@@ -131,23 +131,6 @@ big-endian step-count offset and the end-anchored speed offset, plus the
 `F0`-escape rule were derived by Trot from the captured frames embedded in
 that source and verify against all 64 of them.
 
-Trot's FitShow driver **independently implements protocol behaviour using
-interface facts learned from and cross-checked against qdomyos-zwift's**
-`src/devices/fitshowtreadmill/fitshowtreadmill.{cpp,h}`, the most widely
-deployed implementation of the FitShow `02 … 03` protocol: the frame
-envelope and XOR trailer, the status-response field map in both its byte
-orders (standard little-endian and the big-endian "anyrun" variant, which
-Trot implements for tests but deliberately does not auto-select — upstream
-gates it behind a user setting because no on-wire discriminator exists),
-the status-code table, the three transport layouts (`FFF0`, `AE00`,
-`FFE0`/`FFE4`) with their deployed preference order, and the
-advertised-name matcher with its carve-outs (`FS-YK-`, the
-NoblePro/`SW`-rule FTMS routing, the Tunturi T80/T60/T90 split —
-`src/devices/bluetooth.cpp`). qdomyos-zwift's belt-control paths (its
-`0x53` control-family frames, the user-data login among them) are
-deliberately not implemented, and none of their bytes appear in this tree —
-Trot's checksum tests use synthetic control-family vectors.
-
 Trot's PitPat/Deerrun/SupeRun driver **independently implements protocol
 behaviour using interface facts learned from
 qdomyos-zwift's** `src/devices/deerruntreadmill/deerruntreadmill.cpp` and
@@ -160,24 +143,6 @@ implemented; four of its captured frames (the unlock preamble, an
 uncharacterised init frame, and two actuation-family frames) appear in
 Trot's tests solely as checksum vectors, never transmitted (each is recorded
 in `docs/provenance.md`).
-
-Trot's KingSmith app-cipher (R2/X21) driver **independently implements
-protocol behaviour using interface facts learned from qdomyos-zwift's**
-`src/devices/kingsmithr2treadmill/kingsmithr2treadmill.{cpp,h}`, the most
-widely deployed implementation of the obfuscated `props` text protocol:
-the seven substitution-cipher tables and the transport pipeline (UTF-8 →
-base64 → per-character substitution → `0x0D` terminator → 16-byte
-write-without-response chunks), the three service/characteristic address
-spaces (`0x1234`/`FED7`/`FED8` and its `0001…`/`0002…` variants) with
-their per-model routing and fallbacks, the init message sequence and the
-observed reply to each frame, the `props <key> <value>…` response grammar
-with its `Error`/`mcu_version`/`goal` special cases, the telemetry key
-list, and the advertised-name matcher (`src/devices/bluetooth.cpp`).
-qdomyos-zwift's belt-control paths — its `props CurrentSpeed`/`runState`/
-`ControlMode` setter writes — and its clock-setting `time_posix` init
-write are deliberately not implemented. Where qdomyos-zwift exposes the
-cipher-table choice as a user setting, Trot detects the table from the
-traffic instead — an independent design, documented in the driver.
 
 qdomyos-zwift is distributed under the **GNU General Public License,
 version 3** — the same license as Trot; see [LICENSE](LICENSE) for the full
@@ -257,59 +222,6 @@ PaceKeeper-derived Home Assistant integration. HomeAssistantWalkingPad is
 distributed under the **GNU General Public License, version 3** — the same
 license as Trot; see [LICENSE](LICENSE) for the full text.
 
-## milltender — `sstjohn/milltender`
-
-Trot's FitShow driver **independently implements protocol behaviour using
-interface facts (no code) established on real hardware by
-[milltender](https://github.com/sstjohn/milltender)** by sstjohn
-(`milltender.py`, `phase0/fitshow_probe.py`), the only FitShow telemetry
-implementation verified on real hardware (a TX6 Glow-Up walking pad on a
-FitShow FS-BT-D2 module): the finding that the status stream answers a
-bare `02 51 51 03` poll with no login or init write of any kind, the
-`FFF0` transport's LifeSpan-shaped roles (write FFF2, notify FFF1), the
-≥12-byte status-payload floor, inbound XOR validation, and the imperial
-wire scales on that hardware (0.1 mph speed, 0.001 mile distance, and the
-0.1 kcal calorie reading whose conflict with qdomyos-zwift is why Trot
-reports no calories from this protocol). milltender is distributed under
-the **GNU Affero General Public License, version 3**
-(<https://www.gnu.org/licenses/agpl-3.0.html>).
-
-## fitshow-treadmill-accessible — `aradix85/fitshow-treadmill-accessible`
-
-The finding that newer FitShow modules (FS-BT-C1, still advertising
-`FS-…`) speak plain standard FTMS with the vendor `FFF0` service reduced
-to a notify-only side channel — which is why Trot's FitShow driver
-verifies the vendor *write* role and lets such hardware fall through to
-the FTMS driver — comes from
-**[fitshow-treadmill-accessible](https://github.com/aradix85/fitshow-treadmill-accessible)**
-by aradix85 (`docs/PROTOCOL.md`, a reverse-engineered protocol note for
-the VirtuFit TR600i). fitshow-treadmill-accessible is distributed under
-the MIT License:
-
-```
-MIT License
-
-Copyright (c) 2026 aradix85
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-```
-
 ## walkingpad-controller — `mcdax/walkingpad-controller`
 
 Trot's FTMS driver hardening **implements protocol behaviour using interface
@@ -368,21 +280,17 @@ WalkingPad protocol (`Protocol.cpp`). QWalkingPad is distributed under the
 **GNU General Public License, version 3** — the same license as Trot; see
 [LICENSE](LICENSE) for the full text.
 
-## walkingpad-ble-footpod — `LucasFrendorf/walkingpad-ble-footpod`
+## Removed drivers (2026-08-15)
 
-Trot's KingSmith app-cipher (R2/X21) driver was **cross-checked against
-[walkingpad-ble-footpod](https://github.com/LucasFrendorf/walkingpad-ble-footpod)**
-by LucasFrendorf, a client for the KS-NGCH-G1C built on the same protocol
-(`kingsmith_g1c.py`). It confirms both 128-bit address-space variants on
-real G1C hardware revisions, the 16-byte write-without-response chunking,
-and the G1C's default v6 cipher table — and it is the source that
-establishes the poll-driven steady state: its monitor loop re-sends
-`servers getProp …` at 1 Hz and reads the full telemetry from the `props`
-replies. Its belt-control writes and its clock-setting `time_posix` init
-frame are not implemented. walkingpad-ble-footpod is distributed under the
-**GNU General Public License, version 3** — the same license as Trot; see
-[LICENSE](LICENSE) for the full text.
-
-A further public implementation of this protocol exists (a Kotlin Android
-client) but carries no license; per this project's rules nothing was taken
-from it and it is deliberately absent from these notices.
+Trot briefly shipped drivers for two further protocol families and
+**deliberately removed both** before publication, as a licensing-prudence
+decision: the KingSmith app-cipher generation (`kingsmith_props.rs`, whose
+implementation necessarily reproduced KingSmith's substitution-cipher
+tables) and the FitShow OEM family (`fitshow.rs`, part of whose protocol
+record traces to an unlicensed OEM specification). With them, the notices
+formerly carried here for `sstjohn/milltender` (AGPL-3.0),
+`aradix85/fitshow-treadmill-accessible` (MIT) and
+`LucasFrendorf/walkingpad-ble-footpod` (GPL-3.0) were retired — nothing
+learned from those projects remains in the tree. The decision and its
+reasoning are recorded in [`docs/provenance.md`](docs/provenance.md); the
+removed notices remain available in git history.

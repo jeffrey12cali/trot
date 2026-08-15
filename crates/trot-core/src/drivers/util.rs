@@ -11,11 +11,6 @@
 //! * Cheap firmware silently ignores notification-enable writes that land
 //!   within a few tens of milliseconds of each other; the vendor apps space
 //!   them 100–300 ms apart ([`subscribe_staggered`]).
-//! * Message-oriented protocols arrive as arbitrary GATT chunks and must be
-//!   reassembled on a terminator byte ([`FrameAssembler`]).
-//! * A few protocols obfuscate the transport (base64 + substitution cipher);
-//!   [`TransportCodec`] is the seam where that transform plugs in without the
-//!   reassembly or parsing layers knowing about it.
 //!
 //! None of this is speculative — every helper corresponds to at least one
 //! real device family documented in `docs/drivers/README.md`. Use what your
@@ -201,115 +196,6 @@ pub async fn subscribe_staggered<L: GattIo + ?Sized>(
     Ok(())
 }
 
-// ---- Frame reassembly --------------------------------------------------------
-
-/// Sanity cap on a single reassembled frame. Real treadmill messages are tens
-/// of bytes; a kilobyte of buffered data without a terminator means we joined
-/// a stream mid-frame or the terminator byte is wrong, and buffering more
-/// would just grow memory forever.
-const DEFAULT_MAX_FRAME_LEN: usize = 1024;
-
-/// Reassembles terminator-delimited messages from arbitrary GATT chunks.
-///
-/// Notifications carry transport chunks, not messages: a logical frame can be
-/// split across several notifications AND several frames can share one
-/// notification, in the same session. Feed every chunk to [`push`] and it
-/// yields each complete frame exactly once, terminator stripped.
-///
-/// Empty frames (a terminator with nothing buffered before it) are discarded:
-/// every known protocol in this family sends non-empty messages, so an empty
-/// one is line noise or a doubled terminator, not data.
-///
-/// If a frame exceeds the length cap the buffered bytes are dropped and
-/// reassembly resyncs at the next terminator — one corrupt frame must not
-/// poison everything after it.
-///
-/// [`push`]: FrameAssembler::push
-#[derive(Debug)]
-pub struct FrameAssembler {
-    terminator: u8,
-    buf: Vec<u8>,
-    max_frame_len: usize,
-}
-
-impl FrameAssembler {
-    pub fn new(terminator: u8) -> Self {
-        FrameAssembler {
-            terminator,
-            buf: Vec::new(),
-            max_frame_len: DEFAULT_MAX_FRAME_LEN,
-        }
-    }
-
-    /// Override the frame length cap (rarely needed).
-    pub fn with_max_frame_len(mut self, max_frame_len: usize) -> Self {
-        self.max_frame_len = max_frame_len;
-        self
-    }
-
-    /// Feed one notification chunk; get back every frame it completed
-    /// (zero or more), in order, without the terminator byte.
-    pub fn push(&mut self, chunk: &[u8]) -> Vec<Vec<u8>> {
-        let mut frames = Vec::new();
-        for &byte in chunk {
-            if byte == self.terminator {
-                if !self.buf.is_empty() {
-                    frames.push(std::mem::take(&mut self.buf));
-                }
-            } else {
-                if self.buf.len() >= self.max_frame_len {
-                    tracing::warn!(
-                        "frame exceeded {} bytes without a terminator; dropping buffer to resync",
-                        self.max_frame_len
-                    );
-                    self.buf.clear();
-                }
-                self.buf.push(byte);
-            }
-        }
-        frames
-    }
-
-    /// Bytes buffered toward an incomplete frame. Diagnostics only.
-    pub fn pending(&self) -> usize {
-        self.buf.len()
-    }
-}
-
-// ---- Transport codec ---------------------------------------------------------
-
-/// The seam between raw GATT bytes and protocol parsing.
-///
-/// Most protocols need nothing here ([`IdentityCodec`]). The exception is the
-/// obfuscated-transport family (KingSmith R2/X21: UTF-8 → base64 →
-/// per-character substitution cipher, model-dependent tables), where the
-/// transform must sit *between* frame reassembly and payload parsing. This
-/// trait is deliberately just that seam — the cipher tables themselves belong
-/// in the driver that owns them, not here.
-///
-/// Inbound: reassemble first, then `decode` each complete frame. Outbound:
-/// `encode` the whole message first, then split into GATT-MTU-sized writes
-/// (`payload.chunks(16)`) — the cipher runs over the message, not the chunks.
-pub trait TransportCodec: Send + Sync {
-    /// Reassembled frame bytes → protocol payload bytes.
-    fn decode(&self, raw: &[u8]) -> Result<Vec<u8>>;
-    /// Protocol payload bytes → wire bytes (before chunking/terminator).
-    fn encode(&self, plain: &[u8]) -> Result<Vec<u8>>;
-}
-
-/// The no-op codec, for the (majority of) protocols whose wire bytes are the
-/// payload.
-pub struct IdentityCodec;
-
-impl TransportCodec for IdentityCodec {
-    fn decode(&self, raw: &[u8]) -> Result<Vec<u8>> {
-        Ok(raw.to_vec())
-    }
-    fn encode(&self, plain: &[u8]) -> Result<Vec<u8>> {
-        Ok(plain.to_vec())
-    }
-}
-
 // ---- Checksums ---------------------------------------------------------------
 
 /// Additive checksum: `sum(bytes) mod 256`. One of the two trailer bytes
@@ -320,10 +206,7 @@ pub fn checksum_sum(bytes: &[u8]) -> u8 {
 }
 
 /// XOR checksum: `bytes[0] ^ bytes[1] ^ …`. The other trailer byte that
-/// actually occurs in the wild — FitShow's `02 … 03` frames and the PitPat
-/// family both use it. (An earlier comment here claimed FitShow's trailer
-/// was additive; it is not — every FitShow source, its own OEM spec
-/// included, XORs.)
+/// actually occurs in the wild — the PitPat family uses it.
 pub fn checksum_xor(bytes: &[u8]) -> u8 {
     bytes.iter().fold(0u8, |acc, b| acc ^ b)
 }
@@ -587,126 +470,6 @@ mod tests {
         assert_eq!(ops[2].1 - start, Duration::from_millis(300));
         // The trailing delay also runs — settle time before the first write.
         assert_eq!(Instant::now() - start, Duration::from_millis(600));
-    }
-
-    // ---- Frame reassembly ---------------------------------------------------
-
-    #[test]
-    fn one_chunk_one_frame() {
-        let mut asm = FrameAssembler::new(0x0D);
-        assert_eq!(asm.push(b"props ok\x0D"), vec![b"props ok".to_vec()]);
-        assert_eq!(asm.pending(), 0);
-    }
-
-    /// A frame split across three notifications must come out once, whole.
-    #[test]
-    fn frame_split_across_chunks() {
-        let mut asm = FrameAssembler::new(0x0D);
-        assert!(asm.push(b"props Cur").is_empty());
-        assert!(asm.push(b"rentSpeed ").is_empty());
-        assert_eq!(asm.pending(), 19);
-        assert_eq!(
-            asm.push(b"3.5\x0D"),
-            vec![b"props CurrentSpeed 3.5".to_vec()]
-        );
-    }
-
-    /// Two frames coalesced into one notification must come out as two, plus
-    /// the tail buffered toward the next.
-    #[test]
-    fn multiple_frames_in_one_chunk() {
-        let mut asm = FrameAssembler::new(0x0D);
-        assert_eq!(
-            asm.push(b"one\x0Dtwo\x0Dthr"),
-            vec![b"one".to_vec(), b"two".to_vec()]
-        );
-        assert_eq!(asm.pending(), 3);
-        assert_eq!(asm.push(b"ee\x0D"), vec![b"three".to_vec()]);
-    }
-
-    /// Empty chunks happen (some stacks deliver zero-length notifications);
-    /// they must be a no-op, not a frame boundary.
-    #[test]
-    fn empty_chunks_are_ignored() {
-        let mut asm = FrameAssembler::new(0x0D);
-        assert!(asm.push(&[]).is_empty());
-        assert!(asm.push(b"abc").is_empty());
-        assert!(asm.push(&[]).is_empty());
-        assert_eq!(asm.push(b"\x0D"), vec![b"abc".to_vec()]);
-    }
-
-    /// A terminator as the very first byte (or doubled terminators) closes an
-    /// empty frame — which is noise, not data, and must be discarded.
-    #[test]
-    fn terminator_first_and_doubled_yield_no_empty_frames() {
-        let mut asm = FrameAssembler::new(0x0D);
-        assert!(asm.push(b"\x0D").is_empty());
-        assert_eq!(asm.push(b"\x0D\x0Dok\x0D\x0D"), vec![b"ok".to_vec()]);
-        assert_eq!(asm.pending(), 0);
-    }
-
-    /// A terminator as the last byte of a chunk closes the frame exactly
-    /// there, leaving nothing pending.
-    #[test]
-    fn terminator_as_last_byte_closes_cleanly() {
-        let mut asm = FrameAssembler::new(0x0D);
-        assert_eq!(asm.push(b"tail\x0D"), vec![b"tail".to_vec()]);
-        assert_eq!(asm.pending(), 0);
-    }
-
-    /// Terminator-free garbage must not grow the buffer forever: past the cap
-    /// the buffer is dropped and reassembly resyncs at the next terminator.
-    #[test]
-    fn runaway_frame_is_dropped_and_resyncs() {
-        let mut asm = FrameAssembler::new(0x0D).with_max_frame_len(8);
-        assert!(asm.push(&[0xAA; 100]).is_empty());
-        assert!(asm.pending() <= 8);
-        // The truncated garbage frame is closed and discarded along with the
-        // resync; the next real frame comes through intact.
-        let frames = asm.push(b"\x0Dgood\x0D");
-        assert_eq!(frames.len(), 2); // residual garbage + the good frame
-        assert_eq!(frames[1], b"good".to_vec());
-    }
-
-    // ---- Codec seam ----------------------------------------------------------
-
-    /// Identity in, identity out — and the seam composes with reassembly the
-    /// way a real driver stacks them: chunks → frames → decode → parse.
-    #[test]
-    fn identity_codec_round_trips_through_reassembly() {
-        let codec = IdentityCodec;
-        let mut asm = FrameAssembler::new(0x0D);
-        let mut decoded = Vec::new();
-        for chunk in [&b"props Cur"[..], b"rentSpeed 3.5\x0Dprops mode 1\x0D"] {
-            for frame in asm.push(chunk) {
-                decoded.push(codec.decode(&frame).unwrap());
-            }
-        }
-        assert_eq!(
-            decoded,
-            vec![b"props CurrentSpeed 3.5".to_vec(), b"props mode 1".to_vec()]
-        );
-        assert_eq!(codec.encode(b"abc").unwrap(), b"abc".to_vec());
-    }
-
-    /// The seam accepts a non-trivial transform (here ROT13-ish byte add) —
-    /// the shape the KingSmith cipher-table codec takes for real
-    /// (`kingsmith_props::AppCipherCodec`).
-    #[test]
-    fn a_custom_codec_plugs_into_the_seam() {
-        struct AddOne;
-        impl TransportCodec for AddOne {
-            fn decode(&self, raw: &[u8]) -> Result<Vec<u8>> {
-                Ok(raw.iter().map(|b| b.wrapping_sub(1)).collect())
-            }
-            fn encode(&self, plain: &[u8]) -> Result<Vec<u8>> {
-                Ok(plain.iter().map(|b| b.wrapping_add(1)).collect())
-            }
-        }
-        let codec: &dyn TransportCodec = &AddOne;
-        let wire = codec.encode(b"speed").unwrap();
-        assert_ne!(wire, b"speed".to_vec());
-        assert_eq!(codec.decode(&wire).unwrap(), b"speed".to_vec());
     }
 
     // ---- Checksums -----------------------------------------------------------
