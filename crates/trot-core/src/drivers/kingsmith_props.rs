@@ -229,17 +229,26 @@ pub const SPACE2_NOTIFY_UUID: Uuid = base_uuid(0x0002_fed8);
 // agreement in both directions — no device claimed twice, none orphaned.
 
 /// Name prefixes of the app-cipher generation.
+// Grouped by the product generation each name belongs to, because that is what
+// determines which cipher table a unit is likely to want (see `table_hint`) and
+// therefore what a reader of this list needs to know. Membership is the set of
+// models known to speak the app-cipher protocol — a fact about the hardware —
+// and the names are KingSmith's own.
 pub const ADV_NAME_PREFIXES: &[&str] = &[
-    "KS-ST-K12PRO", // Xiaomi K12 Pro
-    "KS-R1AC",      // WalkingPad R2
-    "KS-HC-R1A",    // WalkingPad R2 (KS-HC-R1AA / KS-HC-R1AC)
+    // X21 family — the generation this protocol is named for. The four
+    // `-X21C` suffixes are ODM variants of the same pad.
     "KS-X21",       // WalkingPad X21
-    "KS-HDSC-X21C",
-    "KS-HDSY-X21C",
-    "KS-NACH-X21C",
-    "KS-NGCH-X21C",
-    "KS-NACH-MXG", // X23
-    "KS-NGCH-G1C", // G1
+    "KS-HDSC-X21C", // X21C, HDSC firmware
+    "KS-HDSY-X21C", // X21C, HDSY firmware
+    "KS-NACH-X21C", // X21C, NACH firmware
+    "KS-NGCH-X21C", // X21C, NGCH firmware
+    // R2 family.
+    "KS-R1AC",   // WalkingPad R2
+    "KS-HC-R1A", // WalkingPad R2 (KS-HC-R1AA / KS-HC-R1AC)
+    // Later single-model generations, each on its own table (see `table_hint`).
+    "KS-NACH-MXG",  // X23
+    "KS-NGCH-G1C",  // G1  — footpod verified this one on hardware as v6
+    "KS-ST-K12PRO", // Xiaomi K12 Pro
 ];
 
 // ---- The cipher --------------------------------------------------------------

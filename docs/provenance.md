@@ -76,7 +76,7 @@ upstream-authored expression only.
 | Checksum/framing vectors (5 frames incl. two control-family shapes) | Trot (2026-08-10) | **Synthetic** — trailers hand-computed | — | — | Tests | Replaced former third-party vectors: two OEM-spec worked examples (unlicensed document), milltender's stop command (AGPL-3.0) and qdomyos' user-data login (GPL-3.0). None of those four frames appears anywhere in this tree any more |
 | Status fixtures (`build_status_frame` + hand-computed pin) | Trot | **Synthetic** | — | — | Tests | No public real capture of an inbound FitShow status frame exists; fixtures are built to the field map the three sources agree on, and labelled synthetic |
 | **FTMS — `ftms.rs`** | | | | | | |
-| Advertised-name list (19 prefixes: `URTM`, `MRK-T`, `SF-T`, `CITYSPORTS-LINKER`, `WELLFIT TM`, `MOBVOI …`, `SWALK LITE-`, `ANPLUS-`/`ANPIUS-`, `YPOO-MINI PRO-`, `THERUN  T15`, `FOCUS M3`, `KS-…`, `SPERAX_RM-01`) | qdomyos-zwift `bluetooth.cpp` | Literal device identifiers | Yes — routes real hardware to the right driver | GPL-3.0 (upstream); names originate with ~15 manufacturers | Source | The *selection* is the one item in Trot with a colourable compilation argument — see `licensing-analysis.md` §3.5. Selection criterion is purely functional (does the device speak FTMS?) |
+| Advertised-name list (18 prefixes: `URTM`, `MRK-T`, `SF-T`, `CITYSPORTS-LINKER`, `WELLFIT TM`, `MOBVOI …`, `SWALK LITE-`, `ANPLUS-`/`ANPIUS-`, `YPOO-MINI PRO-`, `THERUN  T15`, `FOCUS M3`, `KS-…`, `SPERAX_RM-01`) | qdomyos-zwift `bluetooth.cpp` | Literal device identifiers | Yes — routes real hardware to the right driver | GPL-3.0 (upstream); names originate with ~15 manufacturers | Source | The *selection* is the one item in Trot with a colourable compilation argument — see `licensing-analysis.md` §3.5. Selection criterion is purely functional (does the device speak FTMS?) |
 | KingSmith family gate (`is_kingsmith_name` list) | qdomyos-zwift + walkingpad-controller captures | Literal device identifiers | Yes — gates the non-SIG bit-13 step extension | GPL-3.0 / MIT | Source | |
 | FTMS opcodes, flag bits, field sizes | Bluetooth SIG FTMS v1.0.1 + GATT Supplement | Literal spec values | Yes | Bluetooth SIG published specification | Source | Cross-checked against python-pyftms (Apache-2.0); no code copied |
 | Bit-13 step extension layout (uint16-LE + pad byte) | walkingpad-controller (`docs/ftms-protocol-reference.md`, from real KS-MC21 captures) | Derived fact | Yes | MIT | Source | The extension originates with KingSmith firmware |
@@ -86,7 +86,7 @@ upstream-authored expression only.
 | **Cross-cutting** | | | | | | |
 | 16-bit GATT service/characteristic UUIDs (`FFF0`, `FE00`, `FBA0`, `AE00`, `FFE0`, `1826`, `2ACD`, `2ADA`, …) | Device firmware, via all sources | Literal UUIDs | Yes | Facts about the hardware / Bluetooth SIG assignments | Source | |
 | Sperax inbound field geometry (steps at 15, speed at `len-7`) | qdomyos-zwift | Derived — behavioural | Yes, for parity with the only hardware-verified reader | GPL-3.0 | Source | Deliberately follows upstream's raw-wire offsets although this module documents the wire as escaped. **Not protocol-mandated** — disclosed in the module header and in licensing-analysis.md §8.2 |
-| Four quoted upstream comment/expression fragments | qdomyos-zwift | Literal (prose) | No — quoted for criticism | GPL-3.0 | Source comments | Never executed; each quoted to explain a deliberate divergence |
+| Six quoted upstream comment/expression fragments | qdomyos-zwift (4) · ph4-walkingpad (1) · QWalkingPad (1) | Literal (prose) | No — quoted for criticism | GPL-3.0 | Source comments | Never executed; each quoted to explain a deliberate divergence |
 | `1910` / `2B10` / `2B11` transport triple, with roles | pacekeeper `src/platform.h` GATT-dump comment | Literal UUIDs + role assignment read off the dump's `[read,notify]` / `[read,write…]` annotations | Speculative — no implementation drives the protocol over it | GPL-3.0 (dump); UUIDs originate with the device firmware | Source | Probed last as unverified. qdomyos knows `1910` only as a fallback *unlock* service and never mentions `2B10` |
 
 ## What is deliberately absent
@@ -104,12 +104,15 @@ For completeness, upstream material that is **not** in this tree, by policy:
 - Anything from the unlicensed Kotlin KingSmith client and from
   `duhow/ftms-bridge` (never consulted / verified unused).
 - Upstream implementation structure, throughout — and upstream prose, with
-  three disclosed exceptions. Four short fragments are quoted *critically* in
+  three disclosed exceptions. Six short fragments are quoted *critically* in
   code comments, each in order to explain why Trot does something different:
   qdomyos-zwift's "the treadmill send the speed in miles always" and its `SW`
   name-matching expression (both `fitshow.rs`), an "update each 10 m /
   0.01 mile" comment (`kingsmith_props.rs`), and its speed-offset expression
-  `17 + (len - 24)` (`sperax.rs`, quoted to explain why our constant is 7). All GPL-3.0 into
+  `17 + (len - 24)` (`sperax.rs`, quoted to explain why our constant is 7);
+  ph4-walkingpad's `fix_crc` body `cmd[-2] = sum(cmd[1:-2]) % 256` (MIT,
+  `kingsmith_wilink.rs`); and QWalkingPad's `padRunning = s != 0 && s != 5`
+  (GPL-3.0, `kingsmith_wilink.rs`, quoted because we adopt the predicate whole). All GPL-3.0 into
   GPL-3.0-or-later, de minimis, quoted with attribution, never executed.
 
 > **FTMS name-list ordering check (2026-08-11):** 0/18 positional matches against qdomyos-zwift `bluetooth.cpp`, LCS 7/18. Arrangement independent; membership functionally determined.
@@ -175,3 +178,38 @@ For completeness, upstream material that is **not** in this tree, by policy:
   Two rounds, two test suites found that way (milltender, sirfergy), neither
   visible in the vendored file set, and one of them held the only real finding of
   its round.
+
+- **2026-08-15 (second pass) — `kingsmith_wilink.rs`, `ftms.rs`, `lifespan.rs`,
+  `util.rs`**, plus `kingsmith_props.rs` against `walkingpad-ble-footpod`.
+  **Zero category-4 findings.** Affirmative evidence: the WiLink init drops
+  three of qdomyos's five frames and its spacing formula differs from ph4's
+  (ph4 sleeps the *elapsed* time and therefore under-waits); our FTMS parser
+  decodes 18 fields where qdomyos's generic driver skips seven with `// TODO`,
+  and that driver has **no** 0x2ADA opcode map at all, so our eight-variant
+  `MachineStatus` cannot derive from it; every LifeSpan decoder — including the
+  non-obvious `b2*100 + b3` speed rule — is a port of the owner's own
+  `lifespan_sc110/parser.py`, and *contradicts* treadspan's `*256` reading;
+  `util.rs` has no upstream counterpart and its `FrameAssembler` corrects a real
+  defect in footpod's last-byte flush; footpod's distinctive `skip_keys`
+  off-by-one resync hack was not taken.
+
+  **Name-list arrangements, measured against `bluetooth.cpp`** (the check the
+  first pass could not perform): WiLink **0/9** positional, LCS 5/9 —
+  independent. **props was 10/10 — upstream's order exactly.** Membership there
+  is functionally determined (which models speak the app-cipher protocol) and
+  the names are KingSmith's, but a 10/10 arrangement match is the one thing an
+  EU compilation argument could bite on, so the list was **regrouped by product
+  generation** — the property that actually determines which cipher table a unit
+  wants, and therefore what a reader needs — and now scores **0/10**.
+
+  Test-suite probe found nothing: ph4's suite is `def test_main(): assert True`,
+  pyftms's is two parametrize tables over a serializer DSL Trot does not have.
+
+**The review is complete.** Every driver and the shared plumbing has been
+compared function by function against every upstream that exists, in four
+rounds. Two exceptions remain on record: `kingsmithr2treadmill.{cpp,h}` was
+never fetched, so `kingsmith_props.rs`'s attributions to qdomyos for the
+`Error`-terminates rule and the 300 ms init gap rest on the module header rather
+than on a reading (footpod independently corroborates the `Error` rule); and the
+FTMS spec itself is not in the file set, so spec-mandate claims rest on internal
+consistency plus pyftms's independent agreement.
