@@ -2,6 +2,15 @@
 
 All notable changes to `trot` are documented here.
 
+Write new entries under `## Unreleased` as you make the change, while you still
+remember why. The "Cut release" workflow promotes that section to a version
+number — it never writes the prose for you, and nothing here is generated from
+commit messages.
+
+## Unreleased
+
+<!-- Nothing yet. Write what changed here; a release cannot be cut from an empty section. -->
+
 ## 0.3.5
 
 Four more treadmill protocols, a lot of correctness work behind them, and two

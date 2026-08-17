@@ -1,0 +1,201 @@
+name: Cut release
+
+# Turns "the changelog is written" into a published release.
+#
+# What this deliberately does NOT do is write your changelog. The prose in
+# CHANGELOG.md is part of the product — 0.3.5's entry explains that 0xFFF0 is
+# squatted by five vendors and that one of them swaps the notify and write
+# roles, which is not something any commit-message generator produces. So
+# `## Unreleased` is where you write it as you go, and this workflow only
+# promotes that section to a version number. The version automates; the prose
+# stays yours.
+#
+# Sequence: check the changelog says something -> compute the next version ->
+# promote the section -> bump both crates -> commit -> tag -> push. The tag
+# push is what release.yml (dist) already reacts to, so the entire existing
+# build / test-gate / sign / notarize pipeline runs completely untouched.
+#
+# Optionally it then tells the Nowhere repo, which ships this engine as a
+# sidecar. See the `nowhere` input.
+#
+# ── Required secret: RELEASE_PAT ───────────────────────────────────────────
+# A fine-grained PAT with `contents: write` on this repo AND on
+# marcuspuchalla/nowhere. It cannot be the built-in GITHUB_TOKEN: GitHub never
+# fires a workflow for a push made with GITHUB_TOKEN, so tagging with it would
+# create the tag and then silently build nothing. That is the same rule that
+# forces notarize-macos.yml to run as a post-announce job instead of
+# `on: release` — see dist-workspace.toml.
+
+on:
+  workflow_dispatch:
+    inputs:
+      level:
+        description: "Version bump"
+        required: true
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+      nowhere:
+        description: "Also update Nowhere, which bundles this engine?"
+        required: true
+        type: choice
+        options:
+          - "no"
+          - "release"
+          - "pull request"
+        default: "no"
+      nowhere_title:
+        description: "Nowhere — release title, e.g. 'Four more treadmills'"
+        required: false
+        type: string
+      nowhere_summary:
+        description: "Nowhere — what changed, one sentence, for users"
+        required: false
+        type: string
+      nowhere_why:
+        description: "Nowhere — why it matters / what was wrong before"
+        required: false
+        type: string
+
+# We push with RELEASE_PAT, never with GITHUB_TOKEN (see above), so the
+# built-in token stays read-only.
+permissions:
+  contents: read
+
+jobs:
+  cut:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.RELEASE_PAT }}
+          fetch-depth: 0
+
+      # A version with no news is not a release. Fail here rather than tag
+      # something whose changelog entry is an empty heading.
+      - name: The changelog must say something
+        run: |
+          set -euo pipefail
+          body=$(awk '
+            /^## Unreleased$/ { inside = 1; next }
+            /^## /            { inside = 0 }
+            inside            { print }
+          ' CHANGELOG.md | grep -v '^[[:space:]]*<!--' | grep -v '^[[:space:]]*$' || true)
+          if [ -z "$body" ]; then
+            echo "::error::CHANGELOG.md has no '## Unreleased' content." >&2
+            echo "Write what changed under '## Unreleased' first — that section is" >&2
+            echo "the release notes, and it is not generated from commit messages." >&2
+            exit 1
+          fi
+          echo "Unreleased section has $(printf '%s\n' "$body" | wc -l) line(s) of notes."
+
+      - name: Compute the next version
+        id: ver
+        run: |
+          set -euo pipefail
+          cur=$(awk -F'"' '/^version = /{ print $2; exit }' crates/trot-daemon/Cargo.toml)
+          IFS=. read -r major minor patch <<<"$cur"
+          case "${{ inputs.level }}" in
+            patch) patch=$((patch + 1)) ;;
+            minor) minor=$((minor + 1)); patch=0 ;;
+            major) major=$((major + 1)); minor=0; patch=0 ;;
+          esac
+          new="$major.$minor.$patch"
+          echo "current=$cur"  >> "$GITHUB_OUTPUT"
+          echo "version=$new"  >> "$GITHUB_OUTPUT"
+          echo "tag=v$new"     >> "$GITHUB_OUTPUT"
+          echo "$cur -> $new"
+
+      # Rename the section, and leave a fresh empty one behind so the next
+      # change has somewhere obvious to go.
+      - name: Promote the changelog section
+        run: |
+          set -euo pipefail
+          stub='<!-- Nothing yet. Write what changed here; a release cannot be cut from an empty section. -->'
+          awk -v heading="## ${{ steps.ver.outputs.version }}" -v stub="$stub" '
+            /^## Unreleased$/ && !done {
+              print "## Unreleased"; print ""; print stub; print ""
+              print heading
+              done = 1
+              next
+            }
+            # Drop the placeholder if it is still sitting in the section being
+            # promoted — it is scaffolding, not release notes. The fresh one
+            # above is printed directly, so this never eats it.
+            /^<!-- Nothing yet\./ { next }
+            { print }
+          ' CHANGELOG.md > CHANGELOG.tmp
+          mv CHANGELOG.tmp CHANGELOG.md
+
+      - name: Bump both crates
+        run: |
+          set -euo pipefail
+          new="${{ steps.ver.outputs.version }}"
+          for f in crates/trot-core/Cargo.toml crates/trot-daemon/Cargo.toml; do
+            # Only the first `version = "…"`, which is the package's own — never
+            # a dependency's.
+            sed -i "0,/^version = \".*\"/s//version = \"$new\"/" "$f"
+            grep -q "^version = \"$new\"$" "$f" || { echo "::error::failed to bump $f" >&2; exit 1; }
+          done
+          # Refresh the lockfile's entries for the workspace members only, so a
+          # --locked build (which is what dist does) still resolves.
+          cargo update --workspace
+
+      - name: Commit, tag, push
+        env:
+          GIT_AUTHOR_NAME: Marcus Puchalla
+          GIT_COMMITTER_NAME: Marcus Puchalla
+          GIT_AUTHOR_EMAIL: marcus.puchalla@googlemail.com
+          GIT_COMMITTER_EMAIL: marcus.puchalla@googlemail.com
+        run: |
+          set -euo pipefail
+          git add CHANGELOG.md crates/trot-core/Cargo.toml crates/trot-daemon/Cargo.toml Cargo.lock
+          git commit -m "Release ${{ steps.ver.outputs.version }}"
+          git tag "${{ steps.ver.outputs.tag }}"
+          git push origin HEAD "${{ steps.ver.outputs.tag }}"
+
+      # ── the fan-out to Nowhere ──────────────────────────────────────────
+      # A direct release needs the three bits of user-facing prose, because
+      # Nowhere's changelog.json structurally requires a `summary` and a `why`
+      # per entry and neither is something this workflow may invent. Supply
+      # them and Nowhere releases outright; leave any blank and it opens a pull
+      # request with the bump done and the prose left for you.
+      - name: Tell Nowhere
+        if: inputs.nowhere != 'no'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PAT }}
+          TITLE: ${{ inputs.nowhere_title }}
+          SUMMARY: ${{ inputs.nowhere_summary }}
+          WHY: ${{ inputs.nowhere_why }}
+        run: |
+          set -euo pipefail
+          mode="release"
+          [ "${{ inputs.nowhere }}" = "pull request" ] && mode="pr"
+          if [ -z "$TITLE" ] || [ -z "$SUMMARY" ] || [ -z "$WHY" ]; then
+            if [ "$mode" = "release" ]; then
+              echo "::warning::Nowhere release downgraded to a pull request — it needs a title, a summary and a why, and at least one was blank."
+            fi
+            mode="pr"
+          fi
+
+          jq -n \
+            --arg tag     "${{ steps.ver.outputs.tag }}" \
+            --arg mode    "$mode" \
+            --arg title   "$TITLE" \
+            --arg summary "$SUMMARY" \
+            --arg why     "$WHY" \
+            '{event_type: "trot-released",
+              client_payload: {trot_tag: $tag, mode: $mode,
+                               title: $title, summary: $summary, why: $why}}' \
+          | gh api repos/marcuspuchalla/nowhere/dispatches --input -
+
+          echo "Dispatched to Nowhere as: $mode"
+
+      - name: Summary
+        run: |
+          {
+            echo "### Released ${{ steps.ver.outputs.version }}"
+            echo
+            echo "- tag \`${{ steps.ver.outputs.tag }}\` pushed — dist is building, signing and notarizing now"
+            echo "- Nowhere: \`${{ inputs.nowhere }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

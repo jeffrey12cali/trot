@@ -67,6 +67,11 @@ cargo run --bin trot -- completions powershell > completions/_trot.ps1
 cargo run --bin trot -- completions elvish     > completions/trot.elv
 ```
 
+If your change is user-visible, add a note under `## Unreleased` in
+[`CHANGELOG.md`](CHANGELOG.md) in the same pull request — while you still
+remember why. That section becomes the release notes verbatim; nothing here is
+generated from commit messages. See [docs/releasing.md](docs/releasing.md).
+
 ## Things worth knowing about the codebase
 
 - **Trot observes treadmills; it never controls them.** No code in this tree
