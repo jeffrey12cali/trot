@@ -9,6 +9,10 @@ commit messages.
 
 ## Unreleased
 
+<!-- Nothing yet. Write what changed here; a release cannot be cut from an empty section. -->
+
+## 0.3.6
+
 **No engine changes.** Nothing about reading a treadmill, storing a session or
 serving the API is different from 0.3.5 — if you are running that, there is
 nothing here you need. This release exists to make the *next* one harder to get
