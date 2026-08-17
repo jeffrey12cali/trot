@@ -9,7 +9,25 @@ commit messages.
 
 ## Unreleased
 
-<!-- Nothing yet. Write what changed here; a release cannot be cut from an empty section. -->
+**No engine changes.** Nothing about reading a treadmill, storing a session or
+serving the API is different from 0.3.5 — if you are running that, there is
+nothing here you need. This release exists to make the *next* one harder to get
+wrong.
+
+### Added
+- **`Cut release`, a one-button release.** Releasing meant bumping two
+  `Cargo.toml`s, writing the changelog, committing and tagging, in that order;
+  doing it out of order is how 0.3.2 shipped a tag with no release behind it.
+  The workflow now promotes the `## Unreleased` section to a version heading,
+  bumps the crates, tags and pushes. The build pipeline it hands off to — the
+  test gate, five platforms, codesigning, notarization — is unchanged.
+- **A `## Unreleased` section in this file**, which is where changes are now
+  written as they are made. Release notes are not generated from commit
+  messages here, deliberately: the 0.3.5 entry explains that `0xFFF0` is
+  squatted by at least five vendors and that one of them swaps the notify and
+  write roles, and no tool that reads `git log` writes that sentence.
+- **[docs/releasing.md](docs/releasing.md)**, documenting both this repo's
+  release path and the hand-off to the Nowhere app, which bundles this engine.
 
 ## 0.3.5
 
