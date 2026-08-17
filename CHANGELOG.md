@@ -9,6 +9,10 @@ commit messages.
 
 ## Unreleased
 
+<!-- Nothing yet. Write what changed here; a release cannot be cut from an empty section. -->
+
+## 0.3.7
+
 **No engine changes**, again — this corrects the release documentation.
 
 ### Fixed
