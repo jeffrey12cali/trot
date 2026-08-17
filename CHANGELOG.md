@@ -9,7 +9,17 @@ commit messages.
 
 ## Unreleased
 
-<!-- Nothing yet. Write what changed here; a release cannot be cut from an empty section. -->
+**No engine changes**, again — this corrects the release documentation.
+
+### Fixed
+- **[docs/releasing.md](docs/releasing.md) described a gap that has since been
+  closed.** It said the Nowhere app's CI published unsigned, unnotarized macOS
+  bundles and that only local builds were signed. That was true when written and
+  is no longer: those builds are now signed with the Developer ID certificate,
+  notarized, and stapled — both the app and the disk image. The document now
+  also records how far one release tag reaches (desktop bundles *and* a
+  TestFlight upload), and describes the certificate pre-flight that fails in
+  seconds, by name, rather than eight minutes into a build.
 
 ## 0.3.6
 

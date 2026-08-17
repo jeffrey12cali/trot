@@ -66,13 +66,34 @@ and then silently build nothing. It is the same rule that forces
 `notarize-macos.yml` to run as a dist post-announce job rather than
 `on: release` — see the comment in `dist-workspace.toml`.
 
-## A known gap on the Nowhere side
+## Where it reaches
 
-`desktop.yml` holds no Apple credentials, so the macOS bundles it publishes are
-**unsigned and unnotarized** — only local builds via `npm run build:mac` are
-signed. The workflow now checks the produced `.app` and says so in the job
-summary. Setting the repo variable `REQUIRE_SIGNED_MACOS=true` turns that from
-a warning into a build failure; do that once the signing secrets are in place.
+One release tag in the nowhere repo builds everything: the desktop bundles for
+macOS, Linux and Windows via `desktop.yml`, **and** a TestFlight upload via
+`ios-testflight.yml`. Both read the engine version from `.trot-version`, as does
+the Xcode Cloud post-clone script, so all three build paths of a given commit
+contain the same engine.
+
+macOS bundles from CI are signed with the Developer ID certificate, notarized,
+and stapled — both the `.app` and the disk image, since Tauri notarizes the app
+and then builds the image around it, leaving the image without a ticket of its
+own. The repo variable `REQUIRE_SIGNED_MACOS=true` makes an unsigned macOS build
+a hard failure rather than a warning.
+
+That guard is worth its keep. A build that signs but skips notarization still
+exits 0, emitting one warning line in a long log while producing a `.dmg`
+Gatekeeper rejects on every install. Nowhere 0.1.13 was built that way locally:
+the App Store Connect key was present but named `NOWHERE_API_*` while Tauri only
+reads `APPLE_API_*`, so it signed, warned once, and carried on. The names are
+mapped now, and `desktop.yml` verifies the finished bundle rather than trusting
+the exit code.
+
+`desktop.yml` also pre-flights the certificate before building anything: it
+imports it into a throwaway keychain and fails in seconds, by name, if the
+password is wrong or if an **Apple Distribution** certificate was exported where
+a **Developer ID Application** one was needed. Those two look nearly identical in
+Keychain Access and only the latter can sign software distributed outside the
+App Store.
 
 This matters because the failure is quiet by nature. A build that signs but
 skips notarization still exits 0 — it emits one warning line in a long log and
