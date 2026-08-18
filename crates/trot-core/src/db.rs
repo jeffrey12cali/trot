@@ -599,13 +599,53 @@ impl Db {
         Ok(())
     }
 
-    pub fn close_stale_active(&self, reason: &str) -> Result<usize> {
+    /// Close sessions this device left open — and ONLY this device's.
+    ///
+    /// `mine` is the local device_name. Sessions recorded elsewhere arrive here
+    /// through cloud sync and are open because that device is still walking; a
+    /// restart here must not invent an end time for a walk happening on someone
+    /// else's phone. It used to, and then published the fabricated row back to
+    /// the cloud, so a follower restarting mid-walk truncated the walker's
+    /// session for every device on the account.
+    ///
+    /// Sessions with no source predate device attribution and can only be ours.
+    pub fn close_stale_active(&self, reason: &str, mine: Option<&str>) -> Result<usize> {
         let c = self.conn();
-        let n = c.execute(
-            "UPDATE sessions SET ended_ts=?, closed_reason=? WHERE ended_ts IS NULL",
-            params![now_ts(), reason],
-        )?;
+        let n = match mine {
+            Some(name) if !name.is_empty() => c.execute(
+                "UPDATE sessions SET ended_ts=?, closed_reason=?
+                 WHERE ended_ts IS NULL AND (source IS NULL OR source = ?)",
+                params![now_ts(), reason, name],
+            )?,
+            // No identity of our own yet: only close unattributed sessions,
+            // never another device's.
+            _ => c.execute(
+                "UPDATE sessions SET ended_ts=?, closed_reason=?
+                 WHERE ended_ts IS NULL AND source IS NULL",
+                params![now_ts(), reason],
+            )?,
+        };
         Ok(n)
+    }
+
+    /// Is another device recording a walk right now?
+    ///
+    /// A session with no end time whose source is not ours, touched recently.
+    /// The freshness bound matters because a remote session only ends here when
+    /// its end arrives by sync — a phone that goes offline mid-walk would
+    /// otherwise look like it is still walking for ever.
+    pub fn remote_active(&self, mine: &str, fresh_secs: f64) -> Result<bool> {
+        let c = self.conn();
+        let n: i64 = c.query_row(
+            "SELECT COUNT(*) FROM sessions
+             WHERE ended_ts IS NULL
+               AND source IS NOT NULL AND source <> ''
+               AND source <> ?
+               AND started_ts > ?",
+            params![mine, now_ts() - fresh_secs],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
     }
 
     pub fn list_sessions(&self, limit: i64) -> Result<Vec<Session>> {
@@ -1548,6 +1588,12 @@ impl Db {
             "format": "lifespan-sc110-dump",
             "version": 2,
             "exported_at": now_ts(),
+            // Which device produced this dump. The importer uses it to decide
+            // whose rows it may UPDATE rather than merely insert: a device owns
+            // the sessions it recorded, and is the only authority on how many
+            // steps they contain. Additive — older importers ignore it and keep
+            // the previous insert-only behaviour.
+            "origin": crate::config::device_name(),
             "include_raw": include_raw,
             "sessions": sessions,
             "rollups_1m": rollups,
@@ -1586,6 +1632,20 @@ impl Db {
         if mode != "merge" && mode != "replace" {
             anyhow::bail!("mode must be 'merge' or 'replace', got {mode}");
         }
+        // Who produced this dump. A device is the sole authority on the sessions
+        // IT recorded, so rows carrying that source may be UPDATED here rather
+        // than skipped. Without this the merge is insert-only, and a follower
+        // that has rolled up a half-arrived minute keeps its short bucket for
+        // ever: the walker's correct one arrives and is discarded as a
+        // duplicate, so the two devices' day totals never reconcile.
+        // Absent (older peers) means "authoritative for nothing" — previous
+        // behaviour exactly.
+        let origin = dump
+            .get("origin")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+
         let empty: Vec<Value> = Vec::new();
         let sessions = dump
             .get("sessions")
@@ -1621,6 +1681,8 @@ impl Db {
             "skipped_rollups",
             "skipped_speed_marks",
             "skipped_old_samples",
+            "updated_sessions",
+            "updated_rollups",
         ] {
             counts.insert(k.into(), json!(0));
         }
@@ -1644,6 +1706,10 @@ impl Db {
         }
 
         let mut id_map: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
+        // Local ids of the sessions this dump is authoritative for, so the
+        // rollup pass below can tell whose buckets it may replace without
+        // re-querying per row.
+        let mut owned_sids: std::collections::HashSet<i64> = std::collections::HashSet::new();
         for s in sessions {
             let started_ts = match f64_of(s, "started_ts") {
                 Some(t) => t,
@@ -1662,7 +1728,41 @@ impl Db {
                     if let Some(oid) = old_id {
                         id_map.insert(oid, eid);
                     }
-                    bump(&mut counts, "skipped_sessions");
+                    // The producer owns this session: take its numbers. They
+                    // change all through a walk (steps_end climbs, ended_ts
+                    // lands at the end), and a frozen first copy is how a
+                    // follower ends up showing a session that never finishes.
+                    let owned = match (&origin, str_of(s, "source")) {
+                        (Some(o), Some(src)) => &src == o,
+                        _ => false,
+                    };
+                    if owned {
+                        tx.execute(
+                            "UPDATE sessions SET ended_ts=?, local_date=?, display_unit=?,
+                                start_steps=?, start_duration_s=?, steps_end=?, duration_s_end=?,
+                                distance_raw_end=?, calories_end=?, speed_raw_last=?,
+                                closed_reason=?, source=? WHERE id=?",
+                            params![
+                                f64_of(s, "ended_ts"),
+                                str_of(s, "local_date").unwrap_or_default(),
+                                str_of(s, "display_unit").unwrap_or_else(|| "km/h".into()),
+                                i64_of(s, "start_steps"),
+                                i64_of(s, "start_duration_s"),
+                                i64_of(s, "steps_end"),
+                                i64_of(s, "duration_s_end"),
+                                i64_of(s, "distance_raw_end"),
+                                i64_of(s, "calories_end"),
+                                i64_of(s, "speed_raw_last"),
+                                str_of(s, "closed_reason"),
+                                str_of(s, "source"),
+                                eid,
+                            ],
+                        )?;
+                        owned_sids.insert(eid);
+                        bump(&mut counts, "updated_sessions");
+                    } else {
+                        bump(&mut counts, "skipped_sessions");
+                    }
                     continue;
                 }
             }
@@ -1686,8 +1786,16 @@ impl Db {
                     str_of(s, "source"),
                 ],
             )?;
+            let new_id = tx.last_insert_rowid();
             if let Some(oid) = old_id {
-                id_map.insert(oid, tx.last_insert_rowid());
+                id_map.insert(oid, new_id);
+            }
+            // Newly inserted sessions from the producing device are owned too,
+            // so its buckets for them may be replaced on later syncs.
+            if let (Some(o), Some(src)) = (&origin, str_of(s, "source")) {
+                if &src == o {
+                    owned_sids.insert(new_id);
+                }
             }
             bump(&mut counts, "sessions");
         }
@@ -1743,7 +1851,40 @@ impl Db {
                     )
                     .optional()?;
                 if dup.is_some() {
-                    bump(&mut counts, "skipped_rollups");
+                    // The producer's bucket replaces ours when it owns the
+                    // session. This is the repair: a follower rolls up a minute
+                    // whose raw has only partly arrived, writes a short bucket,
+                    // and advances its rollup floor past it — after which the
+                    // clipped samples can never be re-rolled. Skipping the
+                    // producer's correct bucket here made that loss permanent
+                    // and the two devices' totals never converged.
+                    let owned = new_sid.map(|id| owned_sids.contains(&id)).unwrap_or(false);
+                    if owned {
+                        tx.execute(
+                            "UPDATE sample_rollups_1m SET steps_delta=?, distance_raw_delta=?,
+                                calories_delta=?, duration_s_delta=?, speed_raw_min=?,
+                                speed_raw_avg=?, speed_raw_max=?, running_samples=?,
+                                total_samples=?
+                             WHERE bucket_ts=? AND (session_id IS ? OR session_id = ?)",
+                            params![
+                                i64_of(rr, "steps_delta").unwrap_or(0),
+                                i64_of(rr, "distance_raw_delta").unwrap_or(0),
+                                i64_of(rr, "calories_delta").unwrap_or(0),
+                                i64_of(rr, "duration_s_delta").unwrap_or(0),
+                                i64_of(rr, "speed_raw_min"),
+                                f64_of(rr, "speed_raw_avg"),
+                                i64_of(rr, "speed_raw_max"),
+                                i64_of(rr, "running_samples").unwrap_or(0),
+                                i64_of(rr, "total_samples").unwrap_or(0),
+                                bucket_ts,
+                                new_sid,
+                                new_sid,
+                            ],
+                        )?;
+                        bump(&mut counts, "updated_rollups");
+                    } else {
+                        bump(&mut counts, "skipped_rollups");
+                    }
                     continue;
                 }
             }
@@ -2038,6 +2179,110 @@ mod tests {
 
     fn mem() -> Db {
         Db::open(":memory:").unwrap()
+    }
+
+    /// The invariant the whole "following" feature rests on: two devices that
+    /// have exchanged the same data must report the same number of steps.
+    ///
+    /// This reproduces the failure that shipped. A follower rolls up a minute
+    /// whose raw samples have only partly arrived, banking a SHORT bucket and
+    /// advancing its rollup floor past that minute — after which the clipped
+    /// samples can never be re-rolled. The walker's correct bucket then arrives
+    /// and, under insert-only merge, was discarded as a duplicate. The follower
+    /// kept the short figure for ever: not lag, permanent loss.
+    #[test]
+    fn a_follower_converges_on_the_walkers_total() {
+        let walker = mem();
+        let follower = mem();
+
+        // Recent timestamps: raw older than the retention window is refused on
+        // import, and then the floor never moves and nothing counts at all.
+        let base = (now_ts() / 60.0).floor() * 60.0 - 300.0;
+
+        let sid = walker
+            .open_session(base, "km/h", Some(0), Some(0), Some("iPhone"))
+            .unwrap();
+        for (i, steps) in [0u32, 30, 60, 90, 120].iter().enumerate() {
+            walker
+                .insert_sample(
+                    Some(sid),
+                    base + (i as f64) * 12.0,
+                    Some(*steps),
+                    Some(i as u32 * 12),
+                    Some(400),
+                    Some(0),
+                    Some(0),
+                    Some(1),
+                )
+                .unwrap();
+        }
+
+        // The export stamps `origin` from this process's device name, which is
+        // empty in a test. Set it: what is under test is the importer's
+        // ownership rule, not how the name is discovered.
+        let mut partial = walker.export_since(true, Some(0.0)).unwrap();
+        partial["origin"] = json!("iPhone");
+
+        // The follower sees only the first half of the minute, and rolls it up
+        // itself — banking a short bucket and moving its floor past the minute.
+        let mut half = partial.clone();
+        let cut: Vec<Value> = half["samples"].as_array().unwrap()[..3].to_vec();
+        half["samples"] = json!(cut);
+        follower.import_dump(&half, "merge").unwrap();
+        follower.rollup_samples_at(base + 180.0).unwrap();
+
+        // Now the rest arrives, with the walker's own complete bucket.
+        walker.rollup_samples_at(base + 180.0).unwrap();
+        let mut full = walker.export_since(true, Some(0.0)).unwrap();
+        full["origin"] = json!("iPhone");
+        follower.import_dump(&full, "merge").unwrap();
+
+        let date = local_date(base);
+        let w = walker.day_totals(&date).unwrap()["steps"].as_i64().unwrap();
+        let f = follower.day_totals(&date).unwrap()["steps"]
+            .as_i64()
+            .unwrap();
+        assert_eq!(
+            w, 120,
+            "the walking device is authoritative and must be right"
+        );
+        assert_eq!(
+            f, w,
+            "a follower must converge on the walker's total; it read {f} against {w}. \
+             Insert-only merge leaves the follower's clipped bucket in place for ever."
+        );
+    }
+
+    /// The other half of the contract: a dump may only correct rows it owns.
+    ///
+    /// Without this, "update on conflict" would let any device overwrite any
+    /// other's history — a follower echoing stale copies back would clobber the
+    /// walker's own numbers. Ownership is what makes the upsert safe, so it is
+    /// worth a test that fails if the check is ever dropped.
+    #[test]
+    fn a_dump_cannot_rewrite_another_devices_session() {
+        let db = mem();
+        let base = (now_ts() / 60.0).floor() * 60.0 - 300.0;
+
+        let sid = db
+            .open_session(base, "km/h", Some(0), Some(0), Some("iPhone"))
+            .unwrap();
+        db.update_active_session(sid, Some(500), Some(60), Some(0), Some(0), Some(60))
+            .unwrap();
+
+        // A dump from a DIFFERENT device carrying a mangled copy of that session.
+        let mut dump = db.export_since(false, None).unwrap();
+        dump["origin"] = json!("SomebodyElse");
+        dump["sessions"][0]["steps_end"] = json!(9);
+
+        db.import_dump(&dump, "merge").unwrap();
+
+        let after = db.get_session(sid).unwrap().unwrap();
+        assert_eq!(
+            after.steps_end,
+            Some(500),
+            "a device that does not own a session must not be able to rewrite it"
+        );
     }
 
     /// A follower reads today's total as rollups PLUS the raw tail, so live

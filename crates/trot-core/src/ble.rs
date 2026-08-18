@@ -99,7 +99,13 @@ pub async fn scan(seconds: f64, all_devices: bool) -> Result<serde_json::Value> 
 
 /// Worker entry point — runs forever, reconnecting with backoff.
 pub async fn run(state: Arc<AppState>) {
-    if let Ok(closed) = state.db.close_stale_active("backend_restart") {
+    // Only our own — a follower must not stamp an end on a walk still running
+    // on another device (see close_stale_active).
+    let mine = crate::config::device_name();
+    if let Ok(closed) = state
+        .db
+        .close_stale_active("backend_restart", Some(mine.as_str()))
+    {
         if closed > 0 {
             tracing::warn!("closed {closed} stale active session(s) at startup");
         }

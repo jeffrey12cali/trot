@@ -317,6 +317,15 @@ impl AppState {
         }
     }
 
+    /// Whether another device is mid-walk, per the synced session rows.
+    /// A twelve-hour freshness bound: long enough for any real walk, short
+    /// enough that a device which vanished mid-session stops claiming one.
+    pub fn remote_active(&self) -> bool {
+        self.db
+            .remote_active(&crate::config::device_name(), 12.0 * 3600.0)
+            .unwrap_or(false)
+    }
+
     /// `today` object combining day_totals + total_steps_live + avg speed.
     ///
     /// Served from a ~1 s cache (see `today_cache`): the underlying aggregation
@@ -375,6 +384,12 @@ impl AppState {
             "steps_supported": self.steps_supported_json(),
             "state": lock(&self.last_state).clone(),
             "active_session_id": self.active_session(),
+            // True when a DIFFERENT device of this account has a walk open. The
+            // desktop tray polls this endpoint from Rust (the webview gets
+            // throttled in the background), and without this it could only ever
+            // know about a belt attached to this machine — so following showed
+            // a still icon and no progress while a walk was plainly happening.
+            "remote_active": self.remote_active(),
             "today": self.today_payload(),
         })
     }
