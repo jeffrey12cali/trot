@@ -9,6 +9,10 @@ commit messages.
 
 ## Unreleased
 
+<!-- Nothing yet. Write what changed here; a release cannot be cut from an empty section. -->
+
+## 0.3.9
+
 Two devices sharing an account now agree about how far you walked. They did
 not, and the disagreement was permanent rather than a delay.
 
