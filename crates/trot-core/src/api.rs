@@ -596,11 +596,18 @@ struct ExportParams {
     /// default export is sessions + rollups_1m + speed_marks only — no raw.
     #[serde(default)]
     include: String,
+    /// Bound the raw samples to `ts >= since`. Live sync uses this to ship the
+    /// last few minutes — the part `day_totals` reads from raw and that a
+    /// rollups-only export leaves behind — without pushing the whole day.
+    #[serde(default)]
+    since: Option<f64>,
 }
 
 async fn api_export(State(s): State<Arc<AppState>>, Query(p): Query<ExportParams>) -> Response {
     let include_raw = p.include.eq_ignore_ascii_case("raw");
-    let dump = s.db.export_all(include_raw).unwrap_or_else(|_| json!({}));
+    let dump =
+        s.db.export_since(include_raw, p.since)
+            .unwrap_or_else(|_| json!({}));
     let body = serde_json::to_string(&dump).unwrap_or_default();
     let filename = format!(
         "lifespan-sc110-{}.json",

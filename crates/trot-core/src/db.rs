@@ -95,7 +95,15 @@ pub const SAMPLE_INTERVAL_S: f64 = 1.0;
 /// `/api/rollup/status`, so it lives here rather than being restated per module.
 pub const RETENTION_DAYS: f64 = 7.0;
 /// How often the rollup + prune loop runs.
-pub const ROLLUP_INTERVAL_S: f64 = 300.0;
+///
+/// Was 300 s, which is invisible on the machine doing the walking — `day_totals`
+/// reads the raw tail above the rollup floor, so the local screen is always
+/// current. It is very visible to another device following over sync: rollups
+/// are the bulk of what gets exported, so a follower could sit five minutes
+/// behind however fast it polled. Sixty seconds matches the one-minute bucket
+/// resolution, so the loop now banks each bucket about as soon as it is
+/// complete rather than five at a time.
+pub const ROLLUP_INTERVAL_S: f64 = 60.0;
 
 const ROLLUP_RESOLUTION_S: i64 = 60;
 const ROLLUP_KIND: &str = "samples_1m";
@@ -1519,7 +1527,16 @@ impl Db {
     /// true` for a full manual archive (the UI "export with raw" button). The
     /// dump `version` stays 2 and remains importable by older builds; the extra
     /// `speed_marks` key is ignored by importers that don't know it.
-    pub fn export_all(&self, include_raw: bool) -> Result<Value> {
+    /// Export everything, optionally with the raw samples.
+    ///
+    /// `raw_since` bounds those samples to a timestamp, which is what makes
+    /// live following affordable: a full raw export is a day's worth of rows,
+    /// far too large to push every twenty seconds, while the last few minutes
+    /// is a handful. It matters because `day_totals` is rollups PLUS the raw
+    /// tail above the rollup floor — so a device that only ever receives
+    /// rollups is missing however much walking has happened since the rollup
+    /// loop last ran, and reads low by exactly that much.
+    pub fn export_since(&self, include_raw: bool, raw_since: Option<f64>) -> Result<Value> {
         let c = self.conn();
         let sessions = rows_as_json(&c, "SELECT * FROM sessions ORDER BY id")?;
         let rollups = rows_as_json(
@@ -1537,10 +1554,22 @@ impl Db {
             "speed_marks": speed_marks,
         });
         if include_raw {
-            let samples = rows_as_json(&c, "SELECT * FROM samples ORDER BY id")?;
+            let samples = match raw_since {
+                Some(ts) => rows_as_json_p(
+                    &c,
+                    "SELECT * FROM samples WHERE ts >= ? ORDER BY id",
+                    params![ts],
+                )?,
+                None => rows_as_json(&c, "SELECT * FROM samples ORDER BY id")?,
+            };
             out["samples"] = json!(samples);
         }
         Ok(out)
+    }
+
+    /// Backwards-compatible shorthand: every raw sample, or none.
+    pub fn export_all(&self, include_raw: bool) -> Result<Value> {
+        self.export_since(include_raw, None)
     }
 
     /// Load a previous export back in. mode="merge" skips sessions whose
@@ -1977,10 +2006,15 @@ fn row_to_session(r: &rusqlite::Row) -> rusqlite::Result<Session> {
 
 /// Generic "dump a SELECT to a JSON array of objects" using column names.
 fn rows_as_json(c: &Connection, sql: &str) -> Result<Vec<Value>> {
+    rows_as_json_p(c, sql, [])
+}
+
+/// Same, with bound parameters — used by the time-bounded raw export.
+fn rows_as_json_p<P: rusqlite::Params>(c: &Connection, sql: &str, p: P) -> Result<Vec<Value>> {
     let mut stmt = c.prepare(sql)?;
     let col_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
     let mut out = Vec::new();
-    let mut rows = stmt.query([])?;
+    let mut rows = stmt.query(p)?;
     while let Some(row) = rows.next()? {
         let mut obj = serde_json::Map::new();
         for (i, name) in col_names.iter().enumerate() {
@@ -2004,6 +2038,50 @@ mod tests {
 
     fn mem() -> Db {
         Db::open(":memory:").unwrap()
+    }
+
+    /// A follower reads today's total as rollups PLUS the raw tail, so live
+    /// sync has to carry that tail — but carrying ALL of it every twenty
+    /// seconds would ship the whole day. `since` is what makes it affordable.
+    #[test]
+    fn export_since_bounds_the_raw_tail() {
+        let db = mem();
+        let sid = db
+            .open_session(now_ts(), "km/h", Some(0), Some(0), None)
+            .unwrap();
+        let base = now_ts();
+        for (i, steps) in [10u32, 20, 30, 40].iter().enumerate() {
+            db.insert_sample(
+                Some(sid),
+                base + (i as f64) * 60.0,
+                Some(*steps),
+                Some(60),
+                Some(0),
+                Some(0),
+                Some(0),
+                Some(1),
+            )
+            .unwrap();
+        }
+
+        let all = db.export_since(true, None).unwrap();
+        let n_all = all["samples"].as_array().unwrap().len();
+        assert_eq!(n_all, 4, "unbounded export keeps every sample");
+
+        // Only the last two minutes — what a live sync would ask for.
+        let recent = db.export_since(true, Some(base + 120.0)).unwrap();
+        let n_recent = recent["samples"].as_array().unwrap().len();
+        assert_eq!(
+            n_recent, 2,
+            "`since` must bound the raw tail, or live sync ships the whole day"
+        );
+
+        // The rest of the dump is unaffected by the bound.
+        assert_eq!(
+            all["sessions"].as_array().unwrap().len(),
+            recent["sessions"].as_array().unwrap().len(),
+            "bounding raw must not drop sessions — they are how a follower sees the walk at all"
+        );
     }
 
     #[test]

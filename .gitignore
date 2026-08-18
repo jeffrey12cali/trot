@@ -14,3 +14,6 @@ runtime.json
 # Claude Code's per-session tooling cache — local scratch, never part of the
 # repo or a release (it leaked into v0.2.1's source.tar.gz).
 .claude/
+
+# Scratch space for downloaded release archives during verification.
+test/
