@@ -9,7 +9,36 @@ commit messages.
 
 ## Unreleased
 
-<!-- Nothing yet. Write what changed here; a release cannot be cut from an empty section. -->
+Every device that shares an account now reads the same number for a day, by
+construction rather than by agreement.
+
+### Changed
+- **A session now carries its own total, and that is what every device
+  displays.** `sessions` gains `steps_total`, `duration_s_total`,
+  `distance_raw_total` and `calories_total`, written by the device that
+  recorded the walk and carried verbatim over sync and export.
+
+  De-glitching a treadmill's odometer needs the raw sample stream, and only the
+  recording device ever has it — a synced peer receives session rows and
+  nothing else. So each engine had its own way of answering "how many steps
+  today": this one summed de-glitched per-minute deltas, while a client holding
+  only session rows subtracted odometer endpoints. Two algorithms over two
+  datasets, agreeing only by coincidence — one real day read 4,909 steps over
+  6 sessions on the desktop and 4,496 over 5 on the web, and no amount of
+  syncing brought them together.
+
+  Now the recorder computes the answer once and banks it on the row; everyone
+  else sums those columns. The day-wide de-glitch walk is unchanged — each
+  accepted increment is simply attributed to the session that owns its sample,
+  so per-session totals still add up to exactly the day total. Sessions
+  recorded before this are backfilled from their samples the first time that
+  day is read; sessions whose samples have already been pruned keep the old
+  endpoint arithmetic.
+
+  Additive on `/api`: `/api/sessions` and `/api/sessions/:id` gain the four
+  fields, and `/api/today` reports corrected values under unchanged keys.
+  A day's session count now includes a walk in progress rather than only
+  finished ones.
 
 ## 0.3.9
 

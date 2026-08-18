@@ -28,7 +28,15 @@ CREATE TABLE IF NOT EXISTS sessions (
     calories_end INTEGER,
     speed_raw_last INTEGER,
     closed_reason TEXT,
-    source TEXT
+    source TEXT,
+    -- The recording device's own de-glitched verdict on what this session
+    -- contained. Only the recorder holds the raw samples the de-glitch needs,
+    -- so it banks the answer here and every other device sums these columns
+    -- instead of re-deriving a different number from the odometer endpoints.
+    steps_total INTEGER,
+    duration_s_total INTEGER,
+    distance_raw_total INTEGER,
+    calories_total INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_date ON sessions(local_date);
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_ts);
@@ -158,6 +166,10 @@ fn local_date(ts: f64) -> String {
 /// Core pass: calls `emit(i, delta)` once per *accepted* positive increment at
 /// sample index `i` (including the first-sample baseline). Day totals and the
 /// hourly breakdown both drive off this so they always reconcile.
+/// Reference walk over a full sequence. Production reads go through
+/// `deglitch_tail`, which applies the same rules from the rollup floor up;
+/// this stays as the executable statement of those rules.
+#[cfg(test)]
 fn deglitch_walk(values: &[i64], spike: i64, reset_max: i64, mut emit: impl FnMut(usize, i64)) {
     let n = values.len();
     let mut prev: Option<i64> = None;
@@ -211,6 +223,7 @@ fn deglitch_walk(values: &[i64], spike: i64, reset_max: i64, mut emit: impl FnMu
 }
 
 /// De-glitched cumulative total — sum of every accepted increment.
+#[cfg(test)]
 fn deglitch_total(values: &[i64], spike: i64, reset_max: i64) -> i64 {
     let mut total: i64 = 0;
     deglitch_walk(values, spike, reset_max, |_, d| total += d);
@@ -379,44 +392,182 @@ fn local_hour(ts: f64) -> usize {
 /// De-glitched total for one metric: use the sampled odometer when samples
 /// exist, otherwise fall back to the session end-minus-start sum. `start_col`
 /// empty means the metric has no per-session start (count from 0).
-fn metric_total(
+
+/// One session's totals, in raw device units.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SessionTotals {
+    pub steps: i64,
+    pub duration_s: i64,
+    pub distance_raw: i64,
+    pub calories: i64,
+}
+
+/// The de-glitch parameters per metric: (spike, reset_max). Kept in one place so
+/// a session total and a day total can never be computed with different ones.
+const SPIKE_STEPS: (i64, i64) = (50, 10);
+const SPIKE_DURATION: (i64, i64) = (600, 10);
+const SPIKE_CALORIES: (i64, i64) = (100, 10);
+const SPIKE_DISTANCE: (i64, i64) = (200, 10);
+
+/// De-glitched per-session totals for one local date, for the sessions this
+/// device actually recorded.
+///
+/// The walk stays DAY-WIDE and each accepted increment is attributed to the
+/// session that owns its sample. It cannot be split into independent per-session
+/// walks: the treadmill console counts across sessions (a day might run 30→113,
+/// then 120→150), so the day's opening value is banked once, by the first
+/// session, and every later session is worth only what it added on top. Walking
+/// each session from scratch re-banks its opening reading and inflates the day
+/// by roughly one session total per session.
+///
+/// By construction the returned values sum to exactly what a day-wide total
+/// would be — which is what lets a peer add them up and reach the same number.
+/// A session absent from the map is one this device holds no data for.
+fn day_session_totals(
     c: &Connection,
     local_date_s: &str,
-    values: &[i64],
-    spike: i64,
-    reset_max: i64,
-    end_col: &str,
-    start_col: &str,
-) -> Result<i64> {
-    if !values.is_empty() {
-        return Ok(deglitch_total(values, spike, reset_max));
+) -> Result<std::collections::HashMap<i64, SessionTotals>> {
+    use std::collections::HashMap;
+    let floor = raw_floor(c);
+    let mut acc: HashMap<i64, SessionTotals> = HashMap::new();
+
+    // Tier 1: deltas already banked in the per-minute rollups, per session.
+    {
+        let mut stmt = c.prepare(
+            "SELECT r.session_id,
+                    COALESCE(SUM(r.steps_delta),0), COALESCE(SUM(r.duration_s_delta),0),
+                    COALESCE(SUM(r.distance_raw_delta),0), COALESCE(SUM(r.calories_delta),0)
+             FROM sample_rollups_1m r JOIN sessions se ON se.id = r.session_id
+             WHERE se.local_date = ? AND r.bucket_ts < ?
+             GROUP BY r.session_id",
+        )?;
+        let mut q = stmt.query(params![local_date_s, floor as i64])?;
+        while let Some(r) = q.next()? {
+            acc.insert(
+                r.get(0)?,
+                SessionTotals {
+                    steps: r.get(1)?,
+                    duration_s: r.get(2)?,
+                    distance_raw: r.get(3)?,
+                    calories: r.get(4)?,
+                },
+            );
+        }
     }
-    let start_expr = if start_col.is_empty() {
-        "0".to_string()
-    } else {
-        format!("COALESCE(se.{start_col}, 0)")
+
+    // Tier 0: the raw tail at/above the floor, walked once per metric across the
+    // whole day so continuity between sessions is preserved.
+    let mut steps_v: Vec<(f64, i64)> = Vec::new();
+    let mut dur_v: Vec<(f64, i64)> = Vec::new();
+    let mut dist_v: Vec<(f64, i64)> = Vec::new();
+    let mut cal_v: Vec<(f64, i64)> = Vec::new();
+    let (mut steps_sid, mut dur_sid, mut dist_sid, mut cal_sid) =
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    {
+        let mut stmt = c.prepare(
+            "SELECT s.ts, s.session_id, s.steps, s.duration_s, s.distance_raw, s.calories
+             FROM samples s JOIN sessions se ON se.id = s.session_id
+             WHERE se.local_date = ? ORDER BY s.ts, s.id",
+        )?;
+        let mut q = stmt.query(params![local_date_s])?;
+        while let Some(r) = q.next()? {
+            let ts: f64 = r.get(0)?;
+            let Some(sid) = r.get::<_, Option<i64>>(1)? else {
+                continue;
+            };
+            acc.entry(sid).or_default();
+            if let Some(x) = r.get::<_, Option<i64>>(2)? {
+                steps_v.push((ts, x));
+                steps_sid.push(sid);
+            }
+            if let Some(x) = r.get::<_, Option<i64>>(3)? {
+                dur_v.push((ts, x));
+                dur_sid.push(sid);
+            }
+            if let Some(x) = r.get::<_, Option<i64>>(4)? {
+                dist_v.push((ts, x));
+                dist_sid.push(sid);
+            }
+            if let Some(x) = r.get::<_, Option<i64>>(5)? {
+                cal_v.push((ts, x));
+                cal_sid.push(sid);
+            }
+        }
+    }
+
+    let mut walk = |vals: &[(f64, i64)],
+                    sids: &[i64],
+                    spike: (i64, i64),
+                    pick: fn(&mut SessionTotals) -> &mut i64| {
+        deglitch_tail(vals, floor, spike.0, spike.1, |i, d| {
+            *pick(acc.entry(sids[i]).or_default()) += d;
+        });
     };
-    // When the end value is BELOW the recorded start, the counter reset during
-    // the session and the baseline is stale — the end value IS the session's
-    // total. Subtracting anyway yields a negative that silently eats other
-    // sessions' steps from the day (measured: 1391 instead of 2688 on a real
-    // day). This path only runs for dates with neither rollups nor raw samples,
-    // i.e. legacy summary-only imports, which cannot be recomputed.
-    let sql = if start_col.is_empty() {
-        format!(
-            "SELECT COALESCE(SUM(COALESCE(se.{end_col}, 0)), 0)
-             FROM sessions se WHERE se.local_date = ?"
+    walk(&steps_v, &steps_sid, SPIKE_STEPS, |t| &mut t.steps);
+    walk(&dur_v, &dur_sid, SPIKE_DURATION, |t| &mut t.duration_s);
+    walk(&dist_v, &dist_sid, SPIKE_DISTANCE, |t| &mut t.distance_raw);
+    walk(&cal_v, &cal_sid, SPIKE_CALORIES, |t| &mut t.calories);
+
+    Ok(acc)
+}
+
+/// Last-resort total for a session this device never recorded and whose recorder
+/// banked nothing (a pre-banking peer, or a legacy summary-only import): the
+/// odometer endpoints. An end BELOW the recorded start means the counter reset
+/// mid-session and the baseline is stale, so the end value IS the total.
+fn session_totals_from_endpoints(
+    end: Option<i64>,
+    start: Option<i64>,
+) -> i64 {
+    let end = end.unwrap_or(0);
+    let start = start.unwrap_or(0);
+    if end < start { end.max(0) } else { end - start }
+}
+
+/// Write this device's verdict for `sid` onto the session row, so every other
+/// device can sum it instead of guessing. No-op when we hold no data for the
+/// session (we are not its recorder) or when the stored value is already right.
+fn bank_session_totals(c: &Connection, sid: i64) -> Result<()> {
+    let date: Option<String> = c
+        .query_row(
+            "SELECT local_date FROM sessions WHERE id = ?",
+            params![sid],
+            |r| r.get(0),
         )
-    } else {
-        format!(
-            "SELECT COALESCE(SUM(
-                 CASE WHEN COALESCE(se.{end_col}, 0) < {start_expr}
-                      THEN COALESCE(se.{end_col}, 0)
-                      ELSE COALESCE(se.{end_col}, 0) - {start_expr} END), 0)
-             FROM sessions se WHERE se.local_date = ?"
-        )
+        .optional()?;
+    let Some(date) = date else { return Ok(()) };
+    let totals = day_session_totals(c, &date)?;
+    let Some(t) = totals.get(&sid).copied() else {
+        return Ok(());
     };
-    Ok(c.query_row(&sql, params![local_date_s], |r| r.get(0))?)
+    write_banked_totals(c, sid, t)
+}
+
+fn write_banked_totals(c: &Connection, sid: i64, t: SessionTotals) -> Result<()> {
+    let stored: Option<(Option<i64>, Option<i64>, Option<i64>, Option<i64>)> = c
+        .query_row(
+            "SELECT steps_total, duration_s_total, distance_raw_total, calories_total
+             FROM sessions WHERE id = ?",
+            params![sid],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()?;
+    if stored
+        == Some((
+            Some(t.steps),
+            Some(t.duration_s),
+            Some(t.distance_raw),
+            Some(t.calories),
+        ))
+    {
+        return Ok(()); // already banked and unchanged — skip the write
+    }
+    c.execute(
+        "UPDATE sessions SET steps_total = ?, duration_s_total = ?,
+             distance_raw_total = ?, calories_total = ? WHERE id = ?",
+        params![t.steps, t.duration_s, t.distance_raw, t.calories, sid],
+    )?;
+    Ok(())
 }
 
 /// Unix timestamp of local midnight for a "YYYY-MM-DD" date string, using the
@@ -456,6 +607,14 @@ pub struct Session {
     pub calories_end: Option<i64>,
     pub speed_raw_last: Option<i64>,
     pub source: Option<String>,
+    /// The recording device's own de-glitched verdict on this session. Every
+    /// client sums these rather than re-deriving a number from the endpoints
+    /// above, which is what makes two devices agree. Null on rows written by a
+    /// peer that predates banking.
+    pub steps_total: Option<i64>,
+    pub duration_s_total: Option<i64>,
+    pub distance_raw_total: Option<i64>,
+    pub calories_total: Option<i64>,
 }
 
 pub struct Db {
@@ -476,6 +635,14 @@ impl Db {
         // NOT EXISTS` won't add columns to an existing table, so patch them in.
         // Nullable + no default → no row rewrite, safe on a large table.
         ensure_column(&conn, "sessions", "source", "TEXT")?;
+        for col in [
+            "steps_total",
+            "duration_s_total",
+            "distance_raw_total",
+            "calories_total",
+        ] {
+            ensure_column(&conn, "sessions", col, "INTEGER")?;
+        }
         Ok(Db {
             conn: Mutex::new(conn),
         })
@@ -534,6 +701,9 @@ impl Db {
                 session_id
             ],
         )?;
+        // Bank our verdict now the session is final, so the row that syncs out
+        // carries the same number this device will display for it for ever.
+        bank_session_totals(&c, session_id)?;
         Ok(())
     }
 
@@ -703,90 +873,87 @@ impl Db {
     pub fn day_totals(&self, local_date_s: &str) -> Result<Value> {
         let c = self.conn();
 
-        let sessions: i64 = c.query_row(
-            "SELECT COUNT(*) FROM sessions WHERE local_date = ? AND ended_ts IS NOT NULL",
-            params![local_date_s],
-            |r| r.get(0),
+        // One rule, everywhere: a day is the sum of its sessions, and a session
+        // is worth whatever its RECORDER says it is worth.
+        //
+        // De-glitching needs the raw samples, and only the device that recorded
+        // a session ever has them — a synced peer receives session rows and
+        // nothing else. So each device computes its own sessions from samples
+        // (and banks the answer on the row, which is what sync carries), and
+        // takes every other device's sessions at the banked value. Before this,
+        // the recorder summed de-glitched sample deltas while a follower summed
+        // odometer endpoints: two different algorithms over two different
+        // datasets, which agreed only by luck.
+        // Everything this device recorded on this date, decomposed per session
+        // from one day-wide de-glitched walk.
+        let ours = day_session_totals(&c, local_date_s)?;
+
+        let mut rows = c.prepare(
+            "SELECT id, steps_total, duration_s_total, distance_raw_total, calories_total,
+                    steps_end, start_steps, duration_s_end, start_duration_s,
+                    distance_raw_end, calories_end
+             FROM sessions WHERE local_date = ? ORDER BY started_ts, id",
         )?;
+        let mut q = rows.query(params![local_date_s])?;
 
-        // Rollup floor: everything below it lives in sample_rollups_1m. For a
-        // fully-historical (pruned) date the raw tail is empty and all totals
-        // come from the rollups; for today the rollups carry the bulk and the
-        // raw tail carries the last, not-yet-rolled minute — union at `floor`.
-        let floor = raw_floor(&c);
+        let mut sessions = 0i64;
+        let (mut steps, mut duration_s, mut distance_raw, mut calories) = (0i64, 0i64, 0i64, 0i64);
+        // Sessions whose banked totals are missing or out of date. Written after
+        // the read loop so the statement is no longer borrowing the connection —
+        // this is also what backfills history recorded before banking existed.
+        let mut to_bank: Vec<(i64, SessionTotals)> = Vec::new();
 
-        // Tier-1 contribution: SUM of de-glitched deltas already banked in the
-        // per-minute rollups for this local_date.
-        let (r_steps, r_dist, r_cal, r_dur, roll_n): (i64, i64, i64, i64, i64) = c.query_row(
-            "SELECT COALESCE(SUM(r.steps_delta),0), COALESCE(SUM(r.distance_raw_delta),0),
-                    COALESCE(SUM(r.calories_delta),0), COALESCE(SUM(r.duration_s_delta),0),
-                    COUNT(*)
-             FROM sample_rollups_1m r JOIN sessions se ON se.id = r.session_id
-             WHERE se.local_date = ? AND r.bucket_ts < ?",
-            params![local_date_s, floor as i64],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-        )?;
+        while let Some(r) = q.next()? {
+            sessions += 1;
+            let sid: i64 = r.get(0)?;
+            let banked = (
+                r.get::<_, Option<i64>>(1)?,
+                r.get::<_, Option<i64>>(2)?,
+                r.get::<_, Option<i64>>(3)?,
+                r.get::<_, Option<i64>>(4)?,
+            );
 
-        // Tier-0 tail: the day's raw samples with their timestamps, walked once
-        // so increments at/after `floor` are added on top of the rollup sums.
-        let mut steps_v: Vec<(f64, i64)> = Vec::new();
-        let mut dur_v: Vec<(f64, i64)> = Vec::new();
-        let mut dist_v: Vec<(f64, i64)> = Vec::new();
-        let mut cal_v: Vec<(f64, i64)> = Vec::new();
-        {
-            let mut stmt = c.prepare(
-                "SELECT s.ts, s.steps, s.duration_s, s.distance_raw, s.calories
-                 FROM samples s JOIN sessions se ON se.id = s.session_id
-                 WHERE se.local_date = ? ORDER BY s.ts, s.id",
-            )?;
-            let mut rows = stmt.query(params![local_date_s])?;
-            while let Some(r) = rows.next()? {
-                let ts: f64 = r.get(0)?;
-                if let Some(x) = r.get::<_, Option<i64>>(1)? {
-                    steps_v.push((ts, x));
+            let t = match ours.get(&sid).copied() {
+                // We recorded it: our samples are the authority.
+                Some(t) => {
+                    if banked != (Some(t.steps), Some(t.duration_s), Some(t.distance_raw), Some(t.calories)) {
+                        to_bank.push((sid, t));
+                    }
+                    t
                 }
-                if let Some(x) = r.get::<_, Option<i64>>(2)? {
-                    dur_v.push((ts, x));
-                }
-                if let Some(x) = r.get::<_, Option<i64>>(3)? {
-                    dist_v.push((ts, x));
-                }
-                if let Some(x) = r.get::<_, Option<i64>>(4)? {
-                    cal_v.push((ts, x));
-                }
-            }
+                // Someone else recorded it. Take their banked verdict; fall back
+                // to the odometer endpoints only for rows that predate banking.
+                None => SessionTotals {
+                    steps: banked.0.unwrap_or_else(|| {
+                        session_totals_from_endpoints(
+                            r.get::<_, Option<i64>>(5).unwrap_or(None),
+                            r.get::<_, Option<i64>>(6).unwrap_or(None),
+                        )
+                    }),
+                    duration_s: banked.1.unwrap_or_else(|| {
+                        session_totals_from_endpoints(
+                            r.get::<_, Option<i64>>(7).unwrap_or(None),
+                            r.get::<_, Option<i64>>(8).unwrap_or(None),
+                        )
+                    }),
+                    distance_raw: banked.2.unwrap_or_else(|| {
+                        session_totals_from_endpoints(r.get::<_, Option<i64>>(9).unwrap_or(None), None)
+                    }),
+                    calories: banked.3.unwrap_or_else(|| {
+                        session_totals_from_endpoints(r.get::<_, Option<i64>>(10).unwrap_or(None), None)
+                    }),
+                },
+            };
+            steps += t.steps;
+            duration_s += t.duration_s;
+            distance_raw += t.distance_raw;
+            calories += t.calories;
         }
-
-        // Per-metric (spike, reset_max) as before. Where neither a rollup nor a
-        // raw sample exists for the date, fall back to the session end-start sum
-        // (metric_total with an empty slice) — legacy summary-only imports.
-        let combine = |c: &Connection,
-                       roll: i64,
-                       vals: &[(f64, i64)],
-                       spike: i64,
-                       reset: i64,
-                       end_col: &str,
-                       start_col: &str|
-         -> Result<i64> {
-            if roll_n > 0 || !vals.is_empty() {
-                Ok(roll + deglitch_tail_total(vals, floor, spike, reset))
-            } else {
-                metric_total(c, local_date_s, &[], spike, reset, end_col, start_col)
-            }
-        };
-
-        let steps = combine(&c, r_steps, &steps_v, 50, 10, "steps_end", "start_steps")?;
-        let duration_s = combine(
-            &c,
-            r_dur,
-            &dur_v,
-            600,
-            10,
-            "duration_s_end",
-            "start_duration_s",
-        )?;
-        let calories = combine(&c, r_cal, &cal_v, 100, 10, "calories_end", "")?;
-        let distance_raw = combine(&c, r_dist, &dist_v, 200, 10, "distance_raw_end", "")?;
+        drop(q);
+        drop(rows);
+        for (sid, t) in to_bank {
+            write_banked_totals(&c, sid, t)?;
+        }
 
         Ok(json!({
             "sessions": sessions,
@@ -1578,6 +1745,21 @@ impl Db {
     /// loop last ran, and reads low by exactly that much.
     pub fn export_since(&self, include_raw: bool, raw_since: Option<f64>) -> Result<Value> {
         let c = self.conn();
+        // A dump is how our sessions reach every other device, and they will sum
+        // the banked columns verbatim. Refresh the still-open one first (its last
+        // minute is not rolled up yet) so a mid-walk push is exact rather than a
+        // rollup-interval behind.
+        let open_ids: Vec<i64> = {
+            let mut stmt = c.prepare("SELECT id FROM sessions WHERE ended_ts IS NULL")?;
+            let ids = stmt
+                .query_map([], |r| r.get::<_, i64>(0))?
+                .filter_map(|r| r.ok())
+                .collect();
+            ids
+        };
+        for sid in open_ids {
+            bank_session_totals(&c, sid)?;
+        }
         let sessions = rows_as_json(&c, "SELECT * FROM sessions ORDER BY id")?;
         let rollups = rows_as_json(
             &c,
@@ -1741,7 +1923,9 @@ impl Db {
                             "UPDATE sessions SET ended_ts=?, local_date=?, display_unit=?,
                                 start_steps=?, start_duration_s=?, steps_end=?, duration_s_end=?,
                                 distance_raw_end=?, calories_end=?, speed_raw_last=?,
-                                closed_reason=?, source=? WHERE id=?",
+                                closed_reason=?, source=?,
+                                steps_total=?, duration_s_total=?,
+                                distance_raw_total=?, calories_total=? WHERE id=?",
                             params![
                                 f64_of(s, "ended_ts"),
                                 str_of(s, "local_date").unwrap_or_default(),
@@ -1755,6 +1939,14 @@ impl Db {
                                 i64_of(s, "speed_raw_last"),
                                 str_of(s, "closed_reason"),
                                 str_of(s, "source"),
+                                // The producer's own verdict on this session.
+                                // Carried verbatim: we have none of the samples
+                                // it was de-glitched from, so re-deriving one
+                                // here is exactly how the two used to disagree.
+                                i64_of(s, "steps_total"),
+                                i64_of(s, "duration_s_total"),
+                                i64_of(s, "distance_raw_total"),
+                                i64_of(s, "calories_total"),
                                 eid,
                             ],
                         )?;
@@ -1769,7 +1961,9 @@ impl Db {
             tx.execute(
                 "INSERT INTO sessions(started_ts, ended_ts, local_date, display_unit, start_steps,
                     start_duration_s, steps_end, duration_s_end, distance_raw_end, calories_end,
-                    speed_raw_last, closed_reason, source) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    speed_raw_last, closed_reason, source,
+                    steps_total, duration_s_total, distance_raw_total, calories_total)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 params![
                     started_ts,
                     f64_of(s, "ended_ts"),
@@ -1784,6 +1978,10 @@ impl Db {
                     i64_of(s, "speed_raw_last"),
                     str_of(s, "closed_reason"),
                     str_of(s, "source"),
+                    i64_of(s, "steps_total"),
+                    i64_of(s, "duration_s_total"),
+                    i64_of(s, "distance_raw_total"),
+                    i64_of(s, "calories_total"),
                 ],
             )?;
             let new_id = tx.last_insert_rowid();
@@ -2141,6 +2339,10 @@ fn row_to_session(r: &rusqlite::Row) -> rusqlite::Result<Session> {
         distance_raw_end: r.get("distance_raw_end")?,
         calories_end: r.get("calories_end")?,
         speed_raw_last: r.get("speed_raw_last")?,
+        steps_total: r.get("steps_total").unwrap_or(None),
+        duration_s_total: r.get("duration_s_total").unwrap_or(None),
+        distance_raw_total: r.get("distance_raw_total").unwrap_or(None),
+        calories_total: r.get("calories_total").unwrap_or(None),
         source: r.get("source")?,
     })
 }
@@ -2190,6 +2392,84 @@ mod tests {
     /// samples can never be re-rolled. The walker's correct bucket then arrives
     /// and, under insert-only merge, was discarded as a duplicate. The follower
     /// kept the short figure for ever: not lag, permanent loss.
+    #[test]
+    fn a_device_holding_only_session_rows_reads_the_same_day_total() {
+        // The web app receives session rows and nothing else — no samples, no
+        // rollups — so it cannot run the de-glitch the walker runs. Before the
+        // recorder banked its verdict on the row, the two summed different
+        // things and disagreed for ever: on a real day the desktop showed 4,909
+        // steps over 6 sessions and the web showed 4,496 over 5.
+        let walker = mem();
+        let follower = mem();
+        let base = (now_ts() / 60.0).floor() * 60.0 - 300.0;
+
+        // The console counts ACROSS sessions: 30→113, then 120→150. The day is
+        // worth 150, not 113 + 150.
+        let s1 = walker
+            .open_session(base, "km/h", Some(30), Some(10), Some("Mac"))
+            .unwrap();
+        for (i, steps) in [30u32, 55, 80, 110, 113].iter().enumerate() {
+            walker
+                .insert_sample(
+                    Some(s1),
+                    base + (i as f64) * 10.0,
+                    Some(*steps),
+                    Some(10 + i as u32 * 8),
+                    Some(300),
+                    Some(0),
+                    Some(0),
+                    Some(1),
+                )
+                .unwrap();
+        }
+        walker
+            .close_session(s1, base + 50.0, Some(113), Some(42), Some(5), Some(5), Some(0), "pause")
+            .unwrap();
+
+        let s2 = walker
+            .open_session(base + 60.0, "km/h", Some(120), Some(50), Some("Mac"))
+            .unwrap();
+        for (i, steps) in [120u32, 135, 150].iter().enumerate() {
+            walker
+                .insert_sample(
+                    Some(s2),
+                    base + 60.0 + (i as f64) * 10.0,
+                    Some(*steps),
+                    Some(50 + i as u32 * 8),
+                    Some(300),
+                    Some(0),
+                    Some(0),
+                    Some(1),
+                )
+                .unwrap();
+        }
+        walker
+            .close_session(s2, base + 80.0, Some(150), Some(65), Some(7), Some(7), Some(0), "stop")
+            .unwrap();
+
+        let date = local_date(base);
+        let walker_day = walker.day_totals(&date).unwrap();
+        assert_eq!(walker_day["steps"], 150, "walker: {walker_day}");
+
+        // What actually crosses the wire to a samples-less device.
+        let mut dump = walker.export_since(false, None).unwrap();
+        dump["origin"] = json!("Mac");
+        dump["rollups_1m"] = json!([]);
+        assert!(
+            dump["samples"].is_null(),
+            "this test is only meaningful without raw samples"
+        );
+
+        follower.import_dump(&dump, "merge").unwrap();
+        let follower_day = follower.day_totals(&date).unwrap();
+        assert_eq!(
+            follower_day["steps"], walker_day["steps"],
+            "follower disagreed with the walker: {follower_day} vs {walker_day}"
+        );
+        assert_eq!(follower_day["duration_s"], walker_day["duration_s"]);
+        assert_eq!(follower_day["sessions"], walker_day["sessions"]);
+    }
+
     #[test]
     fn a_follower_converges_on_the_walkers_total() {
         let walker = mem();
