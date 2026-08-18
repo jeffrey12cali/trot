@@ -9,6 +9,10 @@ commit messages.
 
 ## Unreleased
 
+<!-- Nothing yet. Write what changed here; a release cannot be cut from an empty section. -->
+
+## 0.3.8
+
 Everything here exists so that a *second* device can watch a walk happening on
 the first one. Nothing changes for a machine reading its own treadmill.
 
