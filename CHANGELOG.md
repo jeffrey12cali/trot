@@ -9,7 +9,25 @@ commit messages.
 
 ## Unreleased
 
-<!-- Nothing yet. Write what changed here; a release cannot be cut from an empty section. -->
+Everything here exists so that a *second* device can watch a walk happening on
+the first one. Nothing changes for a machine reading its own treadmill.
+
+### Added
+- **`/api/export?include=raw&since=<ts>` bounds the raw samples by time.**
+  A day's total is the per-minute rollups *plus* the raw tail above the rollup
+  floor — which is why the device doing the walking is always right, and why a
+  device syncing from it was not: the export left the raw tail out, so a
+  follower received only rollups and read low by everything walked since the
+  rollup loop last ran. It can now carry that tail without shipping the whole
+  history, which at one sample per second across a week is thousands of rows
+  and several megabytes — far too much to push every twenty seconds.
+
+### Changed
+- **The rollup loop runs every 60 seconds instead of every 300.** Invisible
+  locally, for the same reason as above. Very visible to a follower, which
+  could sit five minutes behind however often it synced. Sixty seconds matches
+  the one-minute bucket resolution, so a bucket is banked about as soon as it
+  is complete rather than five at a time.
 
 ## 0.3.7
 
