@@ -9,7 +9,34 @@ commit messages.
 
 ## Unreleased
 
-<!-- Nothing yet. Write what changed here; a release cannot be cut from an empty section. -->
+Two devices sharing an account now agree about how far you walked. They did
+not, and the disagreement was permanent rather than a delay.
+
+### Fixed
+- **A device syncing a walk from another device kept a step count that was
+  short, and stayed short.** Every engine rolls raw samples into per-minute
+  buckets. A device receiving a walk over sync rolls up a minute whose samples
+  have only partly arrived, banks a short bucket, and moves its rollup floor
+  past it — after which those clipped samples can never be re-rolled. The
+  recording device's correct bucket for that minute then arrived and was
+  discarded as a duplicate, because a merge could only insert, never correct.
+  A dump now names the device that produced it, and a device is authoritative
+  for the sessions it recorded: its rows replace what a receiving device
+  derived for itself. Everyone else stays insert-only, which is what keeps that
+  safe — a device echoing an old copy back cannot overwrite the original.
+- **A session imported while it was still in progress never finished.** The
+  same insert-only rule meant its final step count and end time could never
+  arrive, so another device showed a walk that ran for ever.
+- **A restart could end a walk happening on someone else's device.** Closing
+  sessions left open by a crash matched every open session regardless of which
+  device recorded it, then published the invented end time back — truncating a
+  live walk for every device on the account. It now only closes its own.
+
+### Added
+- `/api/state` gains `remote_active`: whether another device of this account is
+  mid-walk. The desktop menu bar is driven from native code, because a
+  backgrounded webview is throttled, and it could otherwise only ever know
+  about a treadmill attached to that machine.
 
 ## 0.3.8
 
