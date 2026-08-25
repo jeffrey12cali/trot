@@ -393,6 +393,33 @@ fn local_hour(ts: f64) -> usize {
 /// exist, otherwise fall back to the session end-minus-start sum. `start_col`
 /// empty means the metric has no per-session start (count from 0).
 
+#[cfg(test)]
+thread_local! {
+    static TEST_DEVICE_NAME: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Which install this is, for ownership decisions. Sessions are stamped with it
+/// at `open_session`, so `source == this_device()` means "we recorded it".
+///
+/// Compared by plain equality including the empty string: a fresh install whose
+/// name the client has not seeded yet stamps its sessions `""` and must still
+/// own them. Two devices sharing a name is a pre-existing hazard (they can
+/// overwrite each other's rows) and is why the client seeds a distinct label.
+fn this_device() -> String {
+    #[cfg(test)]
+    if let Some(n) = TEST_DEVICE_NAME.with(|c| c.borrow().clone()) {
+        return n;
+    }
+    crate::config::device_name()
+}
+
+/// Act as `name` for the rest of this test thread.
+#[cfg(test)]
+fn set_test_device(name: &str) {
+    TEST_DEVICE_NAME.with(|c| *c.borrow_mut() = Some(name.to_string()));
+}
+
 /// One session's totals, in raw device units.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SessionTotals {
@@ -536,6 +563,23 @@ fn bank_session_totals(c: &Connection, sid: i64) -> Result<()> {
         )
         .optional()?;
     let Some(date) = date else { return Ok(()) };
+    // Only the recording device may write a verdict. Without this a follower
+    // banked its own partial recomputation over the walker's total and then
+    // published it to the shared account blob.
+    let source: Option<String> = c
+        .query_row(
+            "SELECT source FROM sessions WHERE id = ?",
+            params![sid],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+    let mine = this_device();
+    if let Some(src) = source.as_deref() {
+        if src != mine {
+            return Ok(());
+        }
+    }
     let totals = day_session_totals(c, &date)?;
     let Some(t) = totals.get(&sid).copied() else {
         return Ok(());
@@ -884,14 +928,16 @@ impl Db {
         // the recorder summed de-glitched sample deltas while a follower summed
         // odometer endpoints: two different algorithms over two different
         // datasets, which agreed only by luck.
-        // Everything this device recorded on this date, decomposed per session
-        // from one day-wide de-glitched walk.
+        // Everything this device holds raw data for on this date, decomposed per
+        // session from one day-wide de-glitched walk. Only consulted for sessions
+        // this device actually RECORDED — see the authority rule below.
         let ours = day_session_totals(&c, local_date_s)?;
+        let mine = this_device();
 
         let mut rows = c.prepare(
             "SELECT id, steps_total, duration_s_total, distance_raw_total, calories_total,
                     steps_end, start_steps, duration_s_end, start_duration_s,
-                    distance_raw_end, calories_end
+                    distance_raw_end, calories_end, source
              FROM sessions WHERE local_date = ? ORDER BY started_ts, id",
         )?;
         let mut q = rows.query(params![local_date_s])?;
@@ -906,6 +952,7 @@ impl Db {
         while let Some(r) = q.next()? {
             sessions += 1;
             let sid: i64 = r.get(0)?;
+            let source: Option<String> = r.get(11)?;
             let banked = (
                 r.get::<_, Option<i64>>(1)?,
                 r.get::<_, Option<i64>>(2)?,
@@ -913,7 +960,32 @@ impl Db {
                 r.get::<_, Option<i64>>(4)?,
             );
 
-            let t = match ours.get(&sid).copied() {
+            // Authority is decided by WHO RECORDED the session, never by how much
+            // of it we happen to hold. Holding data is not the same as having
+            // recorded it: a follower imports another device's sessions, rollups
+            // and (while live-following) its raw tail, and would otherwise
+            // recompute that walk from a partial copy — against its OWN rollup
+            // floor, which stalls as soon as it stops recording anything itself.
+            // It then displayed a number that could never rise again, wrote it
+            // over the recorder's verdict, and pushed that back to the account,
+            // so any device bootstrapping from the blob inherited it. That was
+            // the permanent Mac-vs-iPhone disagreement.
+            //
+            // A NULL source with no banked total is the one exception: history
+            // recorded here before attribution existed, which we may still
+            // recompute and backfill.
+            // A NULL source is history from before attribution existed, which
+            // only ever means local history — the engine treats it as ours
+            // everywhere else too (`close_stale_active`). Deciding this on
+            // whether a total happens to be banked would be worse than useless:
+            // the first read banks it, and the device would then lose authority
+            // over its own session and stop noticing that it had grown.
+            let recorded_here = match source.as_deref() {
+                Some(src) => src == mine,
+                None => true,
+            };
+
+            let t = match ours.get(&sid).copied().filter(|_| recorded_here) {
                 // We recorded it: our samples are the authority.
                 Some(t) => {
                     if banked != (Some(t.steps), Some(t.duration_s), Some(t.distance_raw), Some(t.calories)) {
@@ -1543,12 +1615,21 @@ impl Db {
         let mut dur_s: Vec<(i64, i64, i64)> = Vec::new();
         {
             let mut q = c.prepare(
+                // Only samples from sessions THIS device recorded. A follower
+                // also holds the walker's raw tail, and rolling that up here
+                // banked the tail's first odometer reading as a fresh day
+                // baseline (there is no older local sample to seed from) and
+                // then overwrote the walker's correct bucket through the
+                // upsert. NULL source is legacy local history.
                 "SELECT CAST(s.ts AS INTEGER), s.session_id, s.steps, s.distance_raw,
                         s.calories, s.duration_s
-                 FROM samples s WHERE s.ts > ? AND s.ts < ? AND s.session_id IS NOT NULL
+                 FROM samples s JOIN sessions se ON se.id = s.session_id
+                 WHERE s.ts > ? AND s.ts < ? AND s.session_id IS NOT NULL
+                   AND (se.source IS NULL OR se.source = ?)
                  ORDER BY s.ts, s.id",
             )?;
-            let mut rows = q.query(params![deglitch_start, agg_end])?;
+            let mine = this_device();
+            let mut rows = q.query(params![deglitch_start, agg_end, mine])?;
             while let Some(r) = rows.next()? {
                 let ts: i64 = r.get(0)?;
                 let sess: i64 = r.get(1)?;
@@ -1775,7 +1856,7 @@ impl Db {
             // the sessions it recorded, and is the only authority on how many
             // steps they contain. Additive — older importers ignore it and keep
             // the previous insert-only behaviour.
-            "origin": crate::config::device_name(),
+            "origin": this_device(),
             "include_raw": include_raw,
             "sessions": sessions,
             "rollups_1m": rollups,
@@ -2393,6 +2474,101 @@ mod tests {
     /// and, under insert-only merge, was discarded as a duplicate. The follower
     /// kept the short figure for ever: not lag, permanent loss.
     #[test]
+    fn a_follower_that_saw_half_a_walk_does_not_freeze_on_half_the_steps() {
+        // The shipped convergence test imports the walker's COMPLETE raw stream,
+        // so it never exercised the case that actually broke: a follower that
+        // live-follows part of a walk, rolls that part up, and thereby advances
+        // its own rollup floor past the rest.
+        //
+        // It then held data for the session, claimed authority over it, summed
+        // only the buckets below its own stalled floor, and displayed a number
+        // that could never rise again — while also writing that number over the
+        // walker's banked verdict and publishing it to the shared account.
+        let walker = mem();
+        let follower = mem();
+        let base = (now_ts() / 60.0).floor() * 60.0 - 600.0;
+
+        set_test_device("Mac");
+        let sid = walker
+            .open_session(base, "km/h", Some(0), Some(0), Some("Mac"))
+            .unwrap();
+        let push = |upto: usize| {
+            for i in 0..upto {
+                walker
+                    .insert_sample(
+                        Some(sid),
+                        base + (i as f64) * 30.0,
+                        Some((i as u32) * 100),
+                        Some((i as u32) * 30),
+                        Some(300),
+                        Some(0),
+                        Some(0),
+                        Some(1),
+                    )
+                    .unwrap();
+            }
+        };
+
+        // First half of the walk reaches the follower while it is live-following.
+        push(5);
+        let mut half = walker.export_since(true, Some(0.0)).unwrap();
+        half["origin"] = json!("Mac");
+        set_test_device("iPhone");
+        follower.import_dump(&half, "merge").unwrap();
+        // The follower's own rollup loop runs on a timer regardless of BLE.
+        follower.rollup_samples_at(base + 300.0).unwrap();
+
+        // The walk continues and finishes on the Mac.
+        set_test_device("Mac");
+        push(10);
+        walker.rollup_samples_at(base + 600.0).unwrap();
+        walker
+            .close_session(sid, base + 300.0, Some(900), Some(270), Some(0), Some(0), Some(0), "stop")
+            .unwrap();
+
+        let date = local_date(base);
+        let walker_day = walker.day_totals(&date).unwrap();
+
+        let mut full = walker.export_since(true, Some(0.0)).unwrap();
+        full["origin"] = json!("Mac");
+        set_test_device("iPhone");
+        follower.import_dump(&full, "merge").unwrap();
+        follower.rollup_samples_at(base + 600.0).unwrap();
+
+        let follower_day = follower.day_totals(&date).unwrap();
+        assert_eq!(
+            follower_day["steps"], walker_day["steps"],
+            "follower froze on a partial view: {follower_day} vs {walker_day}"
+        );
+
+        // And it must not have overwritten the recorder's verdict, or the wrong
+        // number would spread to every device that bootstraps from the account.
+        let banked: Option<i64> = follower
+            .conn()
+            .query_row(
+                "SELECT steps_total FROM sessions WHERE started_ts = ?",
+                params![base],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            banked,
+            Some(walker_day["steps"].as_i64().unwrap()),
+            "follower rebanked its own recomputation over the walker's"
+        );
+
+        // The walker must be unmoved by the follower's echo.
+        let echo = follower.export_since(true, Some(0.0)).unwrap();
+        set_test_device("Mac");
+        walker.import_dump(&echo, "merge").unwrap();
+        assert_eq!(
+            walker.day_totals(&date).unwrap()["steps"],
+            walker_day["steps"],
+            "the walker's own total moved after importing a follower's echo"
+        );
+    }
+
+    #[test]
     fn a_device_holding_only_session_rows_reads_the_same_day_total() {
         // The web app receives session rows and nothing else — no samples, no
         // rollups — so it cannot run the de-glitch the walker runs. Before the
@@ -2402,6 +2578,7 @@ mod tests {
         let walker = mem();
         let follower = mem();
         let base = (now_ts() / 60.0).floor() * 60.0 - 300.0;
+        set_test_device("Mac");
 
         // The console counts ACROSS sessions: 30→113, then 120→150. The day is
         // worth 150, not 113 + 150.
@@ -2454,6 +2631,7 @@ mod tests {
         // What actually crosses the wire to a samples-less device.
         let mut dump = walker.export_since(false, None).unwrap();
         dump["origin"] = json!("Mac");
+        set_test_device("iPhone"); // the follower is a different install
         dump["rollups_1m"] = json!([]);
         assert!(
             dump["samples"].is_null(),
@@ -2478,6 +2656,7 @@ mod tests {
         // Recent timestamps: raw older than the retention window is refused on
         // import, and then the floor never moves and nothing counts at all.
         let base = (now_ts() / 60.0).floor() * 60.0 - 300.0;
+        set_test_device("iPhone"); // this test's walker install
 
         let sid = walker
             .open_session(base, "km/h", Some(0), Some(0), Some("iPhone"))
@@ -3229,11 +3408,17 @@ mod tests {
 
     #[test]
     fn steps_by_device_groups_by_source() {
-        let db = mem();
+        // Per-device history is built from ROLLUPS, and a device only ever rolls
+        // up its own samples — a follower must not re-derive a peer's buckets
+        // from a partial copy. So the peers' buckets have to arrive the way they
+        // do in production: banked by their recorder and carried over sync.
         let base = (((now_ts() as i64 - 600) / 60) * 60) as f64 + 1.0;
-        let make = |src: Option<&str>, start: f64, steps: &[u32]| {
+
+        let record = |name: Option<&str>, start: f64, steps: &[u32]| -> Value {
+            set_test_device(name.unwrap_or(""));
+            let db = mem();
             let sid = db
-                .open_session(start, "km/h", Some(0), Some(0), src)
+                .open_session(start, "km/h", Some(0), Some(0), name)
                 .unwrap();
             for (i, st) in steps.iter().enumerate() {
                 db.insert_sample(
@@ -3248,11 +3433,22 @@ mod tests {
                 )
                 .unwrap();
             }
+            db.rollup_samples().unwrap();
+            let mut dump = db.export_since(true, Some(0.0)).unwrap();
+            dump["origin"] = json!(name.unwrap_or(""));
+            dump
         };
-        make(Some("Mac"), base, &[0, 10, 20, 30]); // 30 steps
-        make(Some("iPhone"), base + 5.0, &[0, 5, 10]); // 10 steps
-        make(None, base + 10.0, &[0, 40]); // 40 steps, legacy (no source)
-        db.rollup_samples().unwrap();
+
+        let mac = record(Some("Mac"), base, &[0, 10, 20, 30]); // 30 steps
+        let iphone = record(Some("iPhone"), base + 5.0, &[0, 5, 10]); // 10 steps
+        let legacy = record(None, base + 10.0, &[0, 40]); // 40 steps, no source
+
+        // A fourth install that recorded nothing and only syncs.
+        set_test_device("Viewer");
+        let db = mem();
+        for dump in [&mac, &iphone, &legacy] {
+            db.import_dump(dump, "merge").unwrap();
+        }
 
         let rows = db.steps_by_device(&local_date(base)).unwrap();
         let mut got = std::collections::HashMap::new();
