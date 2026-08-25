@@ -12,6 +12,27 @@ commit messages.
 Every device that shares an account now reads the same number for a day, by
 construction rather than by agreement.
 
+### Fixed
+- **A device that followed part of someone else's walk kept a number that could
+  never rise again — and spread it to the whole account.** Banked session
+  totals were preferred only when this device had no data of its own for a
+  session. But a follower has plenty: sync brings the walker's sessions, its
+  rollups, and while live-following its raw tail. So the follower recomputed
+  the walk from a partial copy, against its *own* rollup floor, which stops
+  advancing as soon as the device records nothing itself — leaving every bucket
+  above that floor invisible.
+
+  It then wrote that number over the recorder's verdict and published it, so
+  each device bootstrapping from the account inherited it. Measured on a
+  half-followed walk: 650 steps against the walker's 1200, permanently.
+
+  Authority now follows the recording device (`source`), never the amount of a
+  session a device happens to hold. A device will not bank a verdict for a
+  session it did not record, and no longer rolls up another device's samples —
+  with no older local sample to seed the de-glitch, an imported tail's first
+  odometer reading was being banked as a fresh day baseline and the upsert
+  replaced the walker's correct bucket with it.
+
 ### Changed
 - **A session now carries its own total, and that is what every device
   displays.** `sessions` gains `steps_total`, `duration_s_total`,
