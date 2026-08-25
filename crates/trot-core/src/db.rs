@@ -389,10 +389,6 @@ fn local_hour(ts: f64) -> usize {
         .min(23)
 }
 
-/// De-glitched total for one metric: use the sampled odometer when samples
-/// exist, otherwise fall back to the session end-minus-start sum. `start_col`
-/// empty means the metric has no per-session start (count from 0).
-
 #[cfg(test)]
 thread_local! {
     static TEST_DEVICE_NAME: std::cell::RefCell<Option<String>> =
@@ -419,6 +415,10 @@ fn this_device() -> String {
 fn set_test_device(name: &str) {
     TEST_DEVICE_NAME.with(|c| *c.borrow_mut() = Some(name.to_string()));
 }
+
+/// The four banked totals as stored on a session row, any of which is NULL on a
+/// row nobody has banked yet.
+type BankedTotals = (Option<i64>, Option<i64>, Option<i64>, Option<i64>);
 
 /// One session's totals, in raw device units.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -542,13 +542,14 @@ fn day_session_totals(
 /// banked nothing (a pre-banking peer, or a legacy summary-only import): the
 /// odometer endpoints. An end BELOW the recorded start means the counter reset
 /// mid-session and the baseline is stale, so the end value IS the total.
-fn session_totals_from_endpoints(
-    end: Option<i64>,
-    start: Option<i64>,
-) -> i64 {
+fn session_totals_from_endpoints(end: Option<i64>, start: Option<i64>) -> i64 {
     let end = end.unwrap_or(0);
     let start = start.unwrap_or(0);
-    if end < start { end.max(0) } else { end - start }
+    if end < start {
+        end.max(0)
+    } else {
+        end - start
+    }
 }
 
 /// Write this device's verdict for `sid` onto the session row, so every other
@@ -588,7 +589,7 @@ fn bank_session_totals(c: &Connection, sid: i64) -> Result<()> {
 }
 
 fn write_banked_totals(c: &Connection, sid: i64, t: SessionTotals) -> Result<()> {
-    let stored: Option<(Option<i64>, Option<i64>, Option<i64>, Option<i64>)> = c
+    let stored: Option<BankedTotals> = c
         .query_row(
             "SELECT steps_total, duration_s_total, distance_raw_total, calories_total
              FROM sessions WHERE id = ?",
@@ -988,7 +989,14 @@ impl Db {
             let t = match ours.get(&sid).copied().filter(|_| recorded_here) {
                 // We recorded it: our samples are the authority.
                 Some(t) => {
-                    if banked != (Some(t.steps), Some(t.duration_s), Some(t.distance_raw), Some(t.calories)) {
+                    if banked
+                        != (
+                            Some(t.steps),
+                            Some(t.duration_s),
+                            Some(t.distance_raw),
+                            Some(t.calories),
+                        )
+                    {
                         to_bank.push((sid, t));
                     }
                     t
@@ -1009,10 +1017,16 @@ impl Db {
                         )
                     }),
                     distance_raw: banked.2.unwrap_or_else(|| {
-                        session_totals_from_endpoints(r.get::<_, Option<i64>>(9).unwrap_or(None), None)
+                        session_totals_from_endpoints(
+                            r.get::<_, Option<i64>>(9).unwrap_or(None),
+                            None,
+                        )
                     }),
                     calories: banked.3.unwrap_or_else(|| {
-                        session_totals_from_endpoints(r.get::<_, Option<i64>>(10).unwrap_or(None), None)
+                        session_totals_from_endpoints(
+                            r.get::<_, Option<i64>>(10).unwrap_or(None),
+                            None,
+                        )
                     }),
                 },
             };
@@ -2523,7 +2537,16 @@ mod tests {
         push(10);
         walker.rollup_samples_at(base + 600.0).unwrap();
         walker
-            .close_session(sid, base + 300.0, Some(900), Some(270), Some(0), Some(0), Some(0), "stop")
+            .close_session(
+                sid,
+                base + 300.0,
+                Some(900),
+                Some(270),
+                Some(0),
+                Some(0),
+                Some(0),
+                "stop",
+            )
             .unwrap();
 
         let date = local_date(base);
@@ -2600,7 +2623,16 @@ mod tests {
                 .unwrap();
         }
         walker
-            .close_session(s1, base + 50.0, Some(113), Some(42), Some(5), Some(5), Some(0), "pause")
+            .close_session(
+                s1,
+                base + 50.0,
+                Some(113),
+                Some(42),
+                Some(5),
+                Some(5),
+                Some(0),
+                "pause",
+            )
             .unwrap();
 
         let s2 = walker
@@ -2621,7 +2653,16 @@ mod tests {
                 .unwrap();
         }
         walker
-            .close_session(s2, base + 80.0, Some(150), Some(65), Some(7), Some(7), Some(0), "stop")
+            .close_session(
+                s2,
+                base + 80.0,
+                Some(150),
+                Some(65),
+                Some(7),
+                Some(7),
+                Some(0),
+                "stop",
+            )
             .unwrap();
 
         let date = local_date(base);
