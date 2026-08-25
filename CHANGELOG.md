@@ -9,6 +9,10 @@ commit messages.
 
 ## Unreleased
 
+<!-- Nothing yet. Write what changed here; a release cannot be cut from an empty section. -->
+
+## 0.4.0
+
 Every device that shares an account now reads the same number for a day, by
 construction rather than by agreement.
 
