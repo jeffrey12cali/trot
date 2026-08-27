@@ -9,7 +9,11 @@ commit messages.
 
 ## Unreleased
 
-<!-- Nothing yet. Write what changed here; a release cannot be cut from an empty section. -->
+- `trot scan` no longer aborts with a D-Bus `GetAll ... doesn't exist` error about
+  half the way through: it now reads device properties while discovery is still
+  active (BlueZ deletes temporary device objects on stop, which used to kill the
+  scan), and a device that vanishes mid-scan is skipped instead of failing the
+  whole scan.
 
 ## 0.4.0
 
