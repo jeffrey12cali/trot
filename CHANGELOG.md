@@ -14,6 +14,16 @@ commit messages.
   active (BlueZ deletes temporary device objects on stop, which used to kill the
   scan), and a device that vanishes mid-scan is skipped instead of failing the
   whole scan.
+- **Urevo URTM030 now reports steps.** The Urevo driver only knew `URTM041`, so
+  a URTM030 (which exposes the same proprietary service `0xFFF0` with notify
+  `FFF1`/write `FFF2` alongside FTMS) fell through to FTMS, which has no step
+  counter. URTM030 speaks the same native status protocol, but its firmware
+  computes the trailer over bytes `1..len-2` (excluding the STX) where the E1L
+  counts it — so the Urevo driver now picks the checksum variant from the
+  advertised name and decodes steps, speed, distance and duration from the
+  native stream. Calories, which the native protocol doesn't carry, are taken
+  from the pad's FTMS service when one is present and ridden on the native
+  samples — so a Urevo pad that also exposes FTMS keeps its energy readings.
 
 ## 0.4.0
 
