@@ -24,6 +24,10 @@ commit messages.
   native stream. Calories, which the native protocol doesn't carry, are taken
   from the pad's FTMS service when one is present and ridden on the native
   samples — so a Urevo pad that also exposes FTMS keeps its energy readings.
+- **No more per-second `urevo decode error: expected at least 6 bytes, got 5`
+  log spam** while a URTM030 pad is idle (belt stopped, just booted). That
+  frame is the firmware's wake ack/keepalive, not a status frame; the driver
+  now recognises and skips it instead of warning on every arrival.
 
 ## 0.4.0
 

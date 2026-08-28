@@ -366,6 +366,18 @@ fn cache_ftms_energy(kcal: &mut Option<u32>, frame: &[u8]) {
     }
 }
 
+/// Is this the 5-byte keepalive the URTM030 firmware streams (~1 Hz) while
+/// the belt is stopped? It's the ack for the status-stream wake, not a
+/// status frame, so the driver skips it instead of warning on every one.
+/// Gated on the URTM030 checksum variant — the E1L's deep-standby frames are
+/// 6 bytes and must keep flowing through the normal path.
+fn is_idle_ack(value: &[u8], kind: ChecksumKind) -> bool {
+    kind == ChecksumKind::ExcludeStx
+        && value.len() == 5
+        && value[0] == FRAME_PREFIX
+        && value[1] == MSG_STATUS
+}
+
 /// Ride the cached FTMS energy on a native sample — but only on frames that
 /// carry counters. A deep-standby frame reports only its state; tagging it
 /// with calories would claim the pad sent an energy reading it didn't (and
@@ -480,6 +492,13 @@ impl Driver for Urevo {
             };
 
             if n.uuid == NOTIFY_CHAR_UUID {
+                // The URTM030 firmware answers the status-stream wake with a 5-byte
+                // keepalive (`02 51 00 0b 03`) while the belt is stopped, at
+                // ~1 Hz. It's an ack, not a status frame, so skip it instead
+                // of logging a decode warning every second.
+                if is_idle_ack(&n.value, checksum_kind) {
+                    continue;
+                }
                 host.record_frame(MSG_STATUS, &n.value); // raw capture for /api/diag
                 match parse_status_with(&n.value, checksum_kind) {
                     Ok(status) => {
@@ -829,6 +848,27 @@ mod tests {
         merge_energy(&mut idle, &standby, kcal);
         assert_eq!(idle.calories, None, "standby frames never carry calories");
         assert_eq!(idle.steps, None, "…nor any other counter");
+    }
+
+    /// Only the URTM030 5-byte idle ack is skipped — never the E1L's 6-byte
+    /// standby frames, never a running frame, and never a non-status family.
+    #[test]
+    fn idle_ack_is_the_short_status_family_frame_from_a_urtm030() {
+        let ack = hx("02 51 00 0b 03"); // real URTM030 keepalive
+        assert!(is_idle_ack(&ack, ChecksumKind::ExcludeStx), "the real ack");
+        // The E1L variant is not gated: its frames must keep flowing.
+        assert!(!is_idle_ack(&ack, ChecksumKind::IncludeStx));
+        // Six-byte deep-standby and 19-byte running frames are not acks.
+        assert!(!is_idle_ack(
+            &hx("02 51 02 03 0c 03"),
+            ChecksumKind::ExcludeStx
+        ));
+        assert!(!is_idle_ack(&hx(RUNNING_FIXTURE), ChecksumKind::ExcludeStx));
+        // A short frame of another family is not our ack.
+        assert!(!is_idle_ack(
+            &hx("02 50 00 0b 03"),
+            ChecksumKind::ExcludeStx
+        ));
     }
 
     // ---- Malformed input -----------------------------------------------------
